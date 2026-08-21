@@ -1423,7 +1423,7 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
         homeTeam: homeTeam.displayName || '',
         awayTeam: awayTeam.displayName || '',
         // Just the nickname (e.g. "Suns"), not the full "Phoenix Suns" -
-        // needed for tier 4's city/state exclusion rule in stream ranking.
+        // needed for tier 5's city/state exclusion rule in stream ranking.
         homeNick,
         awayNick,
         homeAbbr,
@@ -1591,7 +1591,7 @@ async function fetchEpgForStream(user, streamId) {
       timeout: 4000
     });
     const listings = res.data?.epg_listings || [];
-    if (listings.length === 0) return { text: '', startTimestamp: null };
+    if (listings.length === 0) return { text: '', title: '', startTimestamp: null };
 
     const decodeBase64 = (value) => {
       try {
@@ -1602,17 +1602,27 @@ async function fetchEpgForStream(user, streamId) {
     };
 
     const entry = listings[0];
+    // The programme title is kept as its own field in addition to being
+    // folded into `text`. Tier 2 of stream ranking matches on the title
+    // ALONE - a provider that writes the actual matchup into the title
+    // (e.g. "Live NFL P/S: Raiders @ Texans") is stating outright what
+    // the channel is carrying, and blending the much longer, noisier
+    // description into that check would dilute exactly the precision
+    // that makes the signal worth its own tier. `text` stays combined so
+    // every other tier keeps behaving exactly as before.
+    const title = decodeBase64(entry.title).trim();
     const text = `${decodeBase64(entry.title)} ${decodeBase64(entry.description)}`.trim();
     const startTimestamp = entry.start_timestamp ? Number(entry.start_timestamp) : null;
-    return { text, startTimestamp: Number.isFinite(startTimestamp) ? startTimestamp : null };
+    return { text, title, startTimestamp: Number.isFinite(startTimestamp) ? startTimestamp : null };
   } catch (err) {
-    return { text: '', startTimestamp: null };
+    return { text: '', title: '', startTimestamp: null };
   }
 }
 
 // Fetches EPG data for every given stream in parallel, so the total wait
 // is roughly bounded by the single slowest channel rather than the sum of
-// all of them. Returns a { [stream_id]: { text, startTimestamp } } lookup;
+// all of them. Returns a { [stream_id]: { text, title, startTimestamp } }
+// lookup;
 // any channel whose lookup failed or timed out simply gets empty/null values.
 async function fetchEpgForStreams(user, streams) {
   const results = await Promise.allSettled(
@@ -1621,7 +1631,7 @@ async function fetchEpgForStreams(user, streams) {
 
   const epgByStreamId = {};
   streams.forEach((s, i) => {
-    epgByStreamId[s.stream_id] = results[i].status === 'fulfilled' ? results[i].value : { text: '', startTimestamp: null };
+    epgByStreamId[s.stream_id] = results[i].status === 'fulfilled' ? results[i].value : { text: '', title: '', startTimestamp: null };
   });
   return epgByStreamId;
 }
@@ -2400,10 +2410,11 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     // Normalized into the exact same shape M3U produces above, so the
     // matching logic below never needs to know which source it came from.
     candidateStreams = xtreamStreams.map(s => {
-      const epg = epgByStreamId[s.stream_id] || { text: '', startTimestamp: null };
+      const epg = epgByStreamId[s.stream_id] || { text: '', title: '', startTimestamp: null };
       return {
         name: s.name,
         description: epg.text,
+        epgTitle: epg.title,
         startTimestamp: epg.startTimestamp,
         streamUrl: `${user.xtream.url.replace(/\/+$/, '')}/live/${encodeURIComponent(user.xtream.username)}/${encodeURIComponent(user.xtream.password)}/${s.stream_id}.m3u8`,
         categoryLabel: getCategoryName(s)
@@ -2423,9 +2434,9 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   if (awayAbbr.length > 2) awayKw.push(awayAbbr);
 
   // Nickname-only keywords (e.g. just "suns", not "phoenix suns") - used
-  // specifically for tier 4's requirement that a city/state-only match
+  // specifically for tier 5's requirement that a city/state-only match
   // doesn't count. Kept separate from homeKw/awayKw above, which stay
-  // city-inclusive for tiers 1-3 (a much stronger "both teams" signal
+  // city-inclusive for tiers 1-4 (a much stronger "both teams" signal
   // where a city match is far less likely to be a coincidence).
   const homeNickKw = (game.homeNick || '').toLowerCase().split(' ').filter(w => w.length > 2);
   const awayNickKw = (game.awayNick || '').toLowerCase().split(' ').filter(w => w.length > 2);
@@ -2469,15 +2480,15 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   // name like "ESPN4Kids" accidentally counting.
   const has4K = (text) => /\b4k\b/i.test(text);
 
-  // Four tiers, most confident first. A stream is assigned to the FIRST
+  // Five tiers, most confident first. A stream is assigned to the FIRST
   // tier it qualifies for, checked in priority order - see the ranking
-  // logic reference doc for the full rationale behind this ordering. Tier
-  // 5 (EPG-verified broadcaster match) was deliberately removed - the
-  // provider's own Xtream EPG data wasn't judged reliable enough as a
-  // matching signal. Revisit once M3U support lands with a more trustworthy
-  // EPG source (e.g. epg6-style data), as its own dedicated tier rather
-  // than reusing this same slot.
-  const tiers = [[], [], [], []];
+  // logic reference doc for the full rationale behind this ordering. An
+  // earlier tier matching the EPG-listed BROADCASTER was deliberately
+  // removed - the provider's own EPG data wasn't judged reliable enough
+  // for that particular signal. Tier 2 below is a different, far more
+  // direct use of that same EPG data: it doesn't trust the provider to
+  // name the right network, it just reads the matchup stated outright.
+  const tiers = [[], [], [], [], []];
   candidateStreams.forEach(s => {
     const name = (s.name || '').toLowerCase();
     // "Description" specifically means the provider's own EPG/programme
@@ -2487,6 +2498,11 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     // external source. See the ranking logic reference doc for why that
     // scope was chosen deliberately.
     const description = (s.description || '').toLowerCase();
+    // The EPG programme TITLE on its own, without the longer description
+    // text folded in - see tier 2. For Xtream this is the listing's own
+    // title field; for M3U the programme title IS the whole entry, so it
+    // equals `description` there.
+    const epgTitle = (s.epgTitle || '').toLowerCase();
     const combined = `${name} ${description}`;
 
     const homeInName = matchesHome(name);
@@ -2496,6 +2512,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     const bothInEither = (homeInName || homeInDesc) && (awayInName || awayInDesc);
     const bothInNameAlone = homeInName && awayInName;
     const bothInDescAlone = homeInDesc && awayInDesc;
+    const bothInEpgTitle = matchesHome(epgTitle) && matchesAway(epgTitle);
 
     const entry = { stream: s, startTimestamp: s.startTimestamp };
 
@@ -2507,27 +2524,44 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
       return;
     }
 
-    // Tier 2: both teams confirmed in EACH field independently (name
-    // alone has both, description alone also has both) - stricter than
-    // tier 3 below, so checked first.
-    if (bothInNameAlone && bothInDescAlone) {
+    // Tier 2: the EPG programme title ALONE names both teams (e.g. "Live
+    // NFL P/S: Raiders @ Texans"). A provider that wrote the actual
+    // matchup into the title is stating directly what this channel is
+    // carrying right now - a stronger claim than anything the channel's
+    // own name offers, since channel names are generic and static by
+    // nature ("NFL Sunday Ticket 04") while the title is rewritten per
+    // broadcast. Checked against the title by itself rather than the
+    // combined text, because folding the longer description back in is
+    // exactly what would dilute this down to tier 4's much weaker
+    // "somewhere in all the text" standard. Both teams being confirmed
+    // together is a strong enough anchor that foreign-team exclusion
+    // doesn't apply, same reasoning as tier 1.
+    if (bothInEpgTitle) {
       tiers[1].push(entry);
       return;
     }
 
-    // Tier 3: both teams confirmed across the combined text, not
-    // necessarily within a single field.
-    if (bothInEither) {
+    // Tier 3: both teams confirmed in EACH field independently (name
+    // alone has both, description alone also has both) - stricter than
+    // tier 4 below, so checked first.
+    if (bothInNameAlone && bothInDescAlone) {
       tiers[2].push(entry);
       return;
     }
 
-    // Tier 4: one team's actual nickname (not just its city/state) in the
+    // Tier 4: both teams confirmed across the combined text, not
+    // necessarily within a single field.
+    if (bothInEither) {
+      tiers[3].push(entry);
+      return;
+    }
+
+    // Tier 5: one team's actual nickname (not just its city/state) in the
     // channel name specifically. The one tier without a strong
     // independent anchor, so foreign-team exclusion applies here only.
     if (matchesHomeNickOnly(name) || matchesAwayNickOnly(name)) {
       if (mentionsForeignTeam(combined)) return;
-      tiers[3].push(entry);
+      tiers[4].push(entry);
     }
   });
 
@@ -2546,7 +2580,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   }
 
   // Every stream that qualified for ANY tier is included - tier number
-  // controls display order only, not inclusion. A stream in tier 4 doesn't
+  // controls display order only, not inclusion. A stream in tier 5 doesn't
   // get discarded just because some other stream also qualified for tier 1.
   // If nothing cleared any tier at all, the flattened result is naturally
   // empty - no separate fallback needed.

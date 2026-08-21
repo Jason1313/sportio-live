@@ -29,9 +29,10 @@ A channel that clears any tier gets shown, ordered by how confident the match ac
 | Tier | Requires|
 |--|-
 |1| "4K" appears somewhere, and both team names are confirmed (name and/or description)
-|2| Both team names appear in the channel name **and** both also appear in the description
-|3| Both team names appear somewhere across name + description combined, not necessarily in the same field
-|4| Just one team's actual nickname (e.g. "Knicks," not "New York") appears in the channel name — a city/state-only match doesn't count
+|2| Both team names appear in the EPG programme title on its own (e.g. "Live NFL P/S: Raiders @ Texans") — the provider stating outright what the channel is carrying
+|3| Both team names appear in the channel name **and** both also appear in the description
+|4| Both team names appear somewhere across name + description combined, not necessarily in the same field
+|5| Just one team's actual nickname (e.g. "Knicks," not "New York") appears in the channel name — a city/state-only match doesn't count
 
 ## Matchup art
 

@@ -153,8 +153,8 @@ function extractRealDate(title, fallbackStartTs, assumedYear) {
 
 // Builds the candidate stream list for one specific game, from a parsed
 // M3U source - normalized into the exact same {name, description,
-// startTimestamp, streamUrl} shape the existing Xtream-based tier-
-// matching logic already expects, so that logic can run completely
+// epgTitle, startTimestamp, streamUrl} shape the existing Xtream-based
+// tier-matching logic already expects, so that logic can run completely
 // unchanged regardless of which source produced the candidates.
 //
 // For each relevant channel, picks the ONE programme entry whose real,
@@ -190,6 +190,13 @@ function getCandidateStreamsForGame(source, configuredCategoryIds, gameTimestamp
     return {
       name: ch.name,
       description: bestTitle,
+      // XMLTV programme entries here are title-only (see parseXMLTVEpg -
+      // no <desc> is ever captured), so for M3U the programme title IS
+      // the whole entry, and epgTitle deliberately equals description.
+      // Still populated as its own field rather than left for the
+      // matcher to infer, so tier 2 below reads identically for both
+      // sources instead of special-casing M3U.
+      epgTitle: bestTitle,
       startTimestamp: bestStartTimestamp,
       streamUrl: ch.streamUrl,
       categoryLabel: ch.categories[0] || ''
