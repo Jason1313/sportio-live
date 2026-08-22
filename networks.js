@@ -559,10 +559,31 @@ function foldSuperscripts(text) {
 // can outrank a weaker group hint, but never turns a wrong channel into
 // the suggested one. If these want tuning later, this table is the only
 // place to change.
+// 4K is DEMOTED, not promoted, despite being the highest resolution.
+// This provider's 4K feeds are World Cup leftovers that no longer run,
+// and an unavailable stream at any resolution is worse than a working
+// one. Most sit in the "4K Channels" group and are dropped outright by
+// isDeadChannel; this penalty covers the stragglers listed elsewhere -
+// they stay reachable but rank last. If live 4K feeds appear later, move
+// this back above 1080p.
+//
+// 1080p is now the top tier, which is what "best available and actually
+// up" means here.
+// Bare "HD" is scored separately from, and far below, an explicit 720p.
+// It reads like a resolution but carries almost no information - nearly
+// every channel in the playlist is HD, and providers append it as
+// decoration rather than as a spec. Treating it as equivalent to 720p
+// gave it enough weight to overturn a TV Guide (USA) listing, which is a
+// much stronger signal: "US: NFL NETWORK ᴴᴰ" was outranking the TV Guide
+// NFL Network feed purely on the strength of two decorative characters.
+//
+// Checked in order, first match wins - so "FHD" resolves as 1080p rather
+// than falling through to the bare-HD tier.
 const QUALITY_TIERS = [
-  { pattern: /\b(?:4k|uhd|2160p?|3840p?)\b/i, weight: 35, label: '4K' },
-  { pattern: /\b(?:fhd|1080p?)\b/i,           weight: 15, label: '1080p' },
-  { pattern: /\b(?:hd|720p?)\b/i,             weight: 5,  label: '720p' },
+  { pattern: /\b(?:4k|uhd|2160p?|3840p?)\b/i, weight: -30, label: '4K' },
+  { pattern: /\b(?:fhd|1080p?)\b/i,           weight: 25,  label: '1080p' },
+  { pattern: /\b720p?\b/i,                    weight: 10,  label: '720p' },
+  { pattern: /\bhd\b/i,                       weight: 2,   label: 'HD' },
   { pattern: /\b(?:sd|480p?|360p?)\b/i,       weight: -10, label: 'SD' },
 ];
 
@@ -616,12 +637,43 @@ function tvgIdCountry(id) {
 // there to carry college football, whereas "TV Guide (USA)" says only
 // that it's American.
 const PREFERRED_GROUP_HINTS = [
-  { pattern: /college football/i,   weight: 25 },
+  // The provider's main US listing, and confirmed in practice to be the
+  // reliable, consistently-live, good-quality feeds - so it outranks
+  // every other hint rather than acting as the weak generic signal it
+  // was first treated as.
+  { pattern: /tv guide \(usa\)/i,   weight: 30 },
   { pattern: /nfl sunday ticket/i,  weight: 25 },
   { pattern: /\bnfl\b/i,            weight: 20 },
   { pattern: /sport networks/i,     weight: 15 },
-  { pattern: /4k/i,                 weight: 10 },
-  { pattern: /tv guide \(usa\)/i,   weight: 8 },
+];
+
+// Groups whose channels are dead in practice, whatever their names claim.
+//
+//   "4K Channels"      - World Cup leftovers; the feeds no longer run.
+//   "College Football" - the NCAAF nn: slots, dark out of season.
+//
+// Applied ONLY when the channel has no strong-US group alongside them,
+// because membership is not exclusive and the same URL is often listed
+// in several groups at once. The provider's real ESPN feed
+// (espn.us, .../605011.ts) sits in TV Guide (USA), College Football AND
+// Sport Networks simultaneously - excluding on any single dead-group
+// match would throw away a perfectly good channel along with the dead
+// ones. Being listed somewhere live is proof enough that it is live.
+//
+// These are excluded from SUGGESTIONS only. Search still finds them, so
+// when college football returns they can be added by hand - or moved
+// back into PREFERRED_GROUP_HINTS to be suggested again.
+const DEAD_GROUP_HINTS = [
+  /4k channels/i,
+  /college football/i,
+];
+
+// Groups that positively confirm a channel is a live US feed. Used both
+// to rescue a channel from DEAD_GROUP_HINTS above and to suppress the
+// soft penalties below.
+const STRONG_US_GROUP_HINTS = [
+  /tv guide \(usa\)/i,
+  /nfl sunday ticket/i,
 ];
 
 // Groups that make a channel LESS likely: foreign feeds, and the
@@ -633,29 +685,63 @@ const PREFERRED_GROUP_HINTS = [
 // "dummy-" placeholder carrying no country suffix to penalize either.
 // News-channel groups are excluded for a different reason - "ABC" in a
 // news bundle is ABC News, not the network carrying the game.
-const PENALIZED_GROUP_HINTS = [
+// Wrong-country or wrong-language feeds. These always apply - no amount
+// of being listed in a US group makes a Spanish-language or Canadian feed
+// the right answer for an NFL game.
+const HARD_PENALTY_HINTS = [
   /^(?:uk|ca|au|ie|nz)\s*\|/i, /\((?:uk|canada|australia|ireland)\)/i,
   /\b(?:canada|australia|ireland|mexico|brasil|brazil)\b/i,
-  /directv go/i, /deportes|espanol|español/i, /entertainment/i,
-  /news networks/i,
+  /deportes|espanol|español/i,
+  // Free ad-supported streaming bundles. A channel here named for a
+  // league or promotion carries highlights, replays and studio filler -
+  // never the live event. Left as a penalty rather than a dead group so
+  // one can still be added by hand, but they should never be suggested:
+  // the UFC bucket was proposing "Ufc" from Prime, Roku and Tubi, none of
+  // which ever carries a live card.
+  /\b(?:prime|roku|tubi|pluto|plex|xumo|freevee)\s+channels\b/i,
 ];
 
+// Lower-confidence listings rather than wrong ones. Suppressed when the
+// channel also appears in a strong-US group, because that membership
+// already answers the question these were guarding against.
+//
+// This mattered concretely: the provider's NFL Network sits in TV Guide
+// (USA), NFL Sunday Ticket, DirecTV GO and Sport Networks at once, and
+// an unconditional DirecTV penalty dragged it below feeds with far
+// weaker credentials.
+const SOFT_PENALTY_HINTS = [
+  /directv go/i, /entertainment/i, /news networks/i,
+];
+
+function matchesAny(categories, patterns) {
+  return (categories || []).some(group => patterns.some(re => re.test(group)));
+}
+
 // Takes the STRONGEST preferred hint rather than summing them. Summing
-// let two weak generic hints outrank one strong specific one - a channel
-// listed in both "TV Guide (USA)" and "Sport Networks" beat the
-// provider's own dedicated "NCAAF 11: SEC NETWORK" feed, which is
-// backwards. Membership in several generic groups says a channel is
-// popular, not that it's the right one.
+// let two weak generic hints outrank one strong specific one - membership
+// in several generic groups says a channel is popular, not that it's the
+// right one.
 function scoreGroups(categories) {
   let best = 0;
-  let penalty = 0;
   for (const group of categories || []) {
     for (const hint of PREFERRED_GROUP_HINTS) {
       if (hint.pattern.test(group)) best = Math.max(best, hint.weight);
     }
-    if (PENALIZED_GROUP_HINTS.some(re => re.test(group))) penalty = -20;
+  }
+
+  let penalty = 0;
+  if (matchesAny(categories, HARD_PENALTY_HINTS)) penalty -= 20;
+  if (!matchesAny(categories, STRONG_US_GROUP_HINTS) && matchesAny(categories, SOFT_PENALTY_HINTS)) {
+    penalty -= 20;
   }
   return best + penalty;
+}
+
+// True when every group this channel belongs to is a dead one - see
+// DEAD_GROUP_HINTS. A channel listed anywhere live is kept.
+function isDeadChannel(categories) {
+  if (!matchesAny(categories, DEAD_GROUP_HINTS)) return false;
+  return !matchesAny(categories, STRONG_US_GROUP_HINTS);
 }
 
 // Scores one channel as a candidate for one network. Returns null when
@@ -669,6 +755,9 @@ function scoreChannelForNetwork(channel, network) {
   const nameHit = aliases.has(coreName);
   const idHit = aliases.has(idCore);
   if (!nameHit && !idHit) return null;
+
+  // Dead channels are never suggested, however well they otherwise match.
+  if (isDeadChannel(channel.categories)) return null;
 
   let score = 0;
   if (nameHit) score += 100;
@@ -790,6 +879,7 @@ module.exports = {
   resolveNetworkLinks,
   getNetworkLabel,
   MIN_SUGGESTION_SCORE,
+  isDeadChannel,
   sportAffinity,
   orderLinksForSport,
   getEventNetworkForSport,

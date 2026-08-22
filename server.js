@@ -2122,7 +2122,13 @@ app.post('/api/user/update', async (req, res) => {
       if (!result.ok) {
         return res.status(400).json({ error: `${networks.getNetworkLabel(networkKey)}: ${result.error}` });
       }
-      if (result.links.length > 0) validated[networkKey] = result.links;
+      // Empty arrays are KEPT, not dropped. An absent key and an empty
+      // array mean different things now that suggestions auto-fill:
+      // absent is "never configured", so suggestions may populate it,
+      // while empty is "the user deliberately cleared this" and must
+      // stay cleared. Dropping empties would make a cleared network
+      // refill itself on the next dashboard load.
+      validated[networkKey] = result.links;
     }
     user.networkLinks = validated;
   }
