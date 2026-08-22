@@ -21,17 +21,34 @@ const axios = require('axios');
 
 // Parses raw M3U playlist text into:
 // - channels: array of { id, name, logo, streamUrl, categories: [...] }
-//   (categories is always an array - a channel can genuinely belong to
-//   more than one group-title at once, confirmed against real data: 903
-//   such channels in the file used to validate this design)
+//   (categories is always an array - the SAME stream URL can genuinely be
+//   listed under more than one group-title at once)
 // - categoryList: array of { name, channelCount }, sorted alphabetically
 //
 // Deliberately not a full M3U-spec parser - just enough structure
 // extraction for the fields actually used, matching the real-world
 // format confirmed during design against actual provider output.
+//
+// KEYED BY streamUrl, NOT tvg-id. This was originally keyed by tvg-id on
+// the assumption that one tvg-id means one channel. That is false against
+// real provider data: tvg-id identifies the NETWORK for EPG purposes, and
+// providers routinely list many genuinely different feeds of that network
+// (different qualities, different source servers, 4K variants, backups)
+// under one shared tvg-id. Measured on a real 18k-entry playlist: 1,278
+// tvg-ids were used by more than one entry, and keying by tvg-id silently
+// discarded 2,048 DISTINCT stream URLs - keeping only whichever feed
+// happened to appear first in the file and merging every other feed's
+// group membership onto it. The practical effect was that if that first
+// feed was dead, the channel was dead everywhere, even though the
+// provider had supplied several working alternates.
+//
+// Keying by URL means one entry per real, distinct stream. tvg-id is
+// retained on each channel as a non-unique attribute, which is exactly
+// what EPG lookup wants - several feeds of the same network SHOULD all
+// resolve to that network's programme list.
 function parseM3UPlaylist(content) {
   const blocks = content.split(/(?=#EXTINF:)/);
-  const channelsById = new Map();
+  const channelsByUrl = new Map();
 
   for (const block of blocks) {
     if (!block.startsWith('#EXTINF:')) continue;
@@ -54,15 +71,18 @@ function parseM3UPlaylist(content) {
     const streamUrl = urlMatch[1].trim();
     const group = groupMatch ? groupMatch[1] : '';
 
-    if (!channelsById.has(id)) {
-      channelsById.set(id, { id, name, logo, streamUrl, categories: new Set() });
+    // First listing of a URL wins for name/logo - if the same stream is
+    // listed twice under different names, either is equally valid and
+    // there's no basis for preferring the later one.
+    if (!channelsByUrl.has(streamUrl)) {
+      channelsByUrl.set(streamUrl, { id, name, logo, streamUrl, categories: new Set() });
     }
     if (group) {
-      channelsById.get(id).categories.add(group);
+      channelsByUrl.get(streamUrl).categories.add(group);
     }
   }
 
-  const channels = [...channelsById.values()].map(ch => ({
+  const channels = [...channelsByUrl.values()].map(ch => ({
     ...ch,
     categories: [...ch.categories]
   }));
@@ -153,8 +173,8 @@ function extractRealDate(title, fallbackStartTs, assumedYear) {
 
 // Builds the candidate stream list for one specific game, from a parsed
 // M3U source - normalized into the exact same {name, description,
-// epgTitle, startTimestamp, streamUrl} shape the existing Xtream-based
-// tier-matching logic already expects, so that logic can run completely
+// startTimestamp, streamUrl} shape the existing Xtream-based tier-
+// matching logic already expects, so that logic can run completely
 // unchanged regardless of which source produced the candidates.
 //
 // For each relevant channel, picks the ONE programme entry whose real,
@@ -190,13 +210,6 @@ function getCandidateStreamsForGame(source, configuredCategoryIds, gameTimestamp
     return {
       name: ch.name,
       description: bestTitle,
-      // XMLTV programme entries here are title-only (see parseXMLTVEpg -
-      // no <desc> is ever captured), so for M3U the programme title IS
-      // the whole entry, and epgTitle deliberately equals description.
-      // Still populated as its own field rather than left for the
-      // matcher to infer, so tier 2 below reads identically for both
-      // sources instead of special-casing M3U.
-      epgTitle: bestTitle,
       startTimestamp: bestStartTimestamp,
       streamUrl: ch.streamUrl,
       categoryLabel: ch.categories[0] || ''

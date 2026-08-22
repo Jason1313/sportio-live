@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const m3u = require('./m3u.js');
+const networks = require('./networks.js');
 
 // Xtream credentials are encrypted at rest in users.json using this key.
 // Must be a 64-character hex string (32 bytes) for AES-256-GCM. Generate one
@@ -117,6 +118,36 @@ function decryptM3uFromStorage(m3u) {
   };
 }
 
+// Saved network links carry a full M3U stream URL, and those URLs embed
+// the provider credentials in the path exactly the way the playlist URL
+// does (".../live/username/password/1568650.ts", confirmed against real
+// provider output). So they get the same encryption-at-rest treatment -
+// storing them in the clear would undo the protection on m3u.playlistUrl
+// by leaking the same secret through a different field.
+//
+// Only the url is encrypted. tvgId/name/group are healing metadata with
+// no secret in them, and leaving them readable keeps a users.json dump
+// diagnosable without the key.
+function encryptNetworkLinksForStorage(networkLinks) {
+  if (!networkLinks || typeof networkLinks !== 'object') return networkLinks;
+  const out = {};
+  for (const [networkKey, links] of Object.entries(networkLinks)) {
+    if (!Array.isArray(links)) continue;
+    out[networkKey] = links.map(l => ({ ...l, url: l.url ? encrypt(l.url) : l.url }));
+  }
+  return out;
+}
+
+function decryptNetworkLinksFromStorage(networkLinks) {
+  if (!networkLinks || typeof networkLinks !== 'object') return networkLinks;
+  const out = {};
+  for (const [networkKey, links] of Object.entries(networkLinks)) {
+    if (!Array.isArray(links)) continue;
+    out[networkKey] = links.map(l => ({ ...l, url: l.url ? decrypt(l.url) : l.url }));
+  }
+  return out;
+}
+
 const app = express();
 // Behind Nginx Proxy Manager (or any reverse proxy), req.protocol/hostname
 // need to trust X-Forwarded-* headers to correctly report https - without
@@ -193,7 +224,12 @@ if (fs.existsSync(DATA_FILE)) {
   try {
     const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
     for (const [uuid, user] of Object.entries(raw)) {
-      userConfigs[uuid] = { ...user, xtream: decryptXtreamFromStorage(user.xtream), m3u: decryptM3uFromStorage(user.m3u) };
+      userConfigs[uuid] = {
+        ...user,
+        xtream: decryptXtreamFromStorage(user.xtream),
+        m3u: decryptM3uFromStorage(user.m3u),
+        networkLinks: decryptNetworkLinksFromStorage(user.networkLinks)
+      };
     }
   } catch (err) {
     console.error('[Storage] Error loading users.json:', err.message);
@@ -204,7 +240,12 @@ function saveUserConfigs() {
   try {
     const toWrite = {};
     for (const [uuid, user] of Object.entries(userConfigs)) {
-      toWrite[uuid] = { ...user, xtream: encryptXtreamForStorage(user.xtream), m3u: encryptM3uForStorage(user.m3u) };
+      toWrite[uuid] = {
+        ...user,
+        xtream: encryptXtreamForStorage(user.xtream),
+        m3u: encryptM3uForStorage(user.m3u),
+        networkLinks: encryptNetworkLinksForStorage(user.networkLinks)
+      };
     }
     fs.writeFileSync(DATA_FILE, JSON.stringify(toWrite, null, 2), 'utf8');
   } catch (err) {
@@ -309,7 +350,24 @@ const ESPN_CORE_EVENT_ENDPOINTS = {
 // NCAA sports have far more teams than the pro leagues, and ESPN's scoreboard
 // endpoint silently truncates results unless a broad 'groups' + high 'limit'
 // is passed. The pro leagues and single-table soccer leagues don't need this.
-const NCAA_SPORTS = new Set(['NCAAMB', 'NCAAWB', 'NCAAFB']);
+//
+// The correct 'groups' id is PER SPORT, not shared. 50 is Division I for
+// basketball, but for college FOOTBALL the divisions are 80 (FBS) and 81
+// (FCS) - and passing 50 there does the opposite of what it was added to
+// do. Verified live against 2025-10-04:
+//     (no groups param)   -> 46 events
+//     &groups=50          ->  5 events   <-- what this used to send
+//     &groups=80          -> 46 events
+// So NCAAFB was showing ~11% of the slate. Any NCAA sport added here needs
+// its own verified group id; do not assume 50 generalizes.
+const NCAA_GROUP_IDS = { NCAAMB: 50, NCAAWB: 50, NCAAFB: 80 };
+const NCAA_SPORTS = new Set(Object.keys(NCAA_GROUP_IDS));
+
+// The '&groups=N&limit=500' suffix for a sport, or '' if it needs none.
+function getNcaaScoreboardParams(sportKey) {
+  const groupId = NCAA_GROUP_IDS[sportKey.toUpperCase()];
+  return groupId ? `&groups=${groupId}&limit=500` : '';
+}
 
 const ESPN_LEAGUES = {
   NBA: 'nba',
@@ -748,13 +806,13 @@ async function fetchUpcomingGames(sport, userTimeZone = 'America/New_York', limi
     const isNcaa = NCAA_SPORTS.has(sport.toUpperCase());
     // NCAA sports have hundreds of teams playing multiple games a week, so a
     // short window still comfortably finds `limit` games - and keeps the
-    // query (with groups=50 covering all of Division I) fast and light.
+    // query (scoped by the sport's own division group id) fast and light.
     const lookaheadDays = isNcaa ? 21 : 90;
     const rangeStart = new Date(now.getTime() + 1 * 24 * 60 * 60 * 1000); // start tomorrow, excluding today's games
     const rangeEnd = new Date(now.getTime() + lookaheadDays * 24 * 60 * 60 * 1000);
     const startStr = formatDateYYYYMMDD(rangeStart, userTimeZone);
     const endStr = formatDateYYYYMMDD(rangeEnd, userTimeZone);
-    const ncaaParams = isNcaa ? '&groups=50&limit=500' : '';
+    const ncaaParams = getNcaaScoreboardParams(sport);
 
     const res = await axios.get(`${endpoint}?dates=${startStr}-${endStr}${ncaaParams}`, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
@@ -1295,7 +1353,7 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
 
   try {
     const targetDateStr = getLocalDateString(userTimeZone);
-    const ncaaParams = NCAA_SPORTS.has(sport.toUpperCase()) ? '&groups=50&limit=500' : '';
+    const ncaaParams = getNcaaScoreboardParams(sport);
     const res = await axios.get(`${endpoint}?dates=${targetDateStr}${ncaaParams}`, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
       timeout: 7000
@@ -1339,6 +1397,15 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
       const broadcastNames = [...new Set(
         (competition.broadcasts || []).flatMap(b => b.names || [])
       )];
+
+      // National-only, type-aware view of the same data, plus the network
+      // slot it resolves to. Kept separate from broadcastNames above
+      // rather than replacing it: that field mixes in local affiliates,
+      // which is wrong for picking a channel but is exactly the broad
+      // net the tier system would want if broadcast matching is ever
+      // revisited there. `network` is null for streaming-only games and
+      // for networks with no slot defined - both mean "use the tiers".
+      const { nationalBroadcasts, network } = networks.resolveNetworkFromCompetition(competition);
 
       const gameUtcDate = event.date || '';
       const artParams = new URLSearchParams({
@@ -1423,12 +1490,14 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
         homeTeam: homeTeam.displayName || '',
         awayTeam: awayTeam.displayName || '',
         // Just the nickname (e.g. "Suns"), not the full "Phoenix Suns" -
-        // needed for tier 5's city/state exclusion rule in stream ranking.
+        // needed for tier 4's city/state exclusion rule in stream ranking.
         homeNick,
         awayNick,
         homeAbbr,
         awayAbbr,
         broadcastNames,
+        nationalBroadcasts,
+        network,
         poster,
         background,
         logo,
@@ -1511,6 +1580,13 @@ async function fetchTodayUFCEvents(hostUrl, userTimeZone = 'America/New_York') {
         (competition.broadcasts || []).flatMap(b => b.names || [])
       )];
 
+      // UFC resolves a network the same way every other sport does, even
+      // though its answer is usually a streaming service (Paramount+ for
+      // Fight Nights, confirmed live) and therefore usually null. That's
+      // fine: UFC combines links with tiers rather than replacing them,
+      // so a null network costs nothing here.
+      const { nationalBroadcasts, network } = networks.resolveNetworkFromCompetition(competition);
+
       const artParams = new URLSearchParams({
         home: fighterAName,
         away: fighterBName,
@@ -1534,6 +1610,8 @@ async function fetchTodayUFCEvents(hostUrl, userTimeZone = 'America/New_York') {
         homeAbbr: '',
         awayAbbr: '',
         broadcastNames,
+        nationalBroadcasts,
+        network,
         poster,
         background,
         logo,
@@ -1591,7 +1669,7 @@ async function fetchEpgForStream(user, streamId) {
       timeout: 4000
     });
     const listings = res.data?.epg_listings || [];
-    if (listings.length === 0) return { text: '', title: '', startTimestamp: null };
+    if (listings.length === 0) return { text: '', startTimestamp: null };
 
     const decodeBase64 = (value) => {
       try {
@@ -1602,27 +1680,17 @@ async function fetchEpgForStream(user, streamId) {
     };
 
     const entry = listings[0];
-    // The programme title is kept as its own field in addition to being
-    // folded into `text`. Tier 2 of stream ranking matches on the title
-    // ALONE - a provider that writes the actual matchup into the title
-    // (e.g. "Live NFL P/S: Raiders @ Texans") is stating outright what
-    // the channel is carrying, and blending the much longer, noisier
-    // description into that check would dilute exactly the precision
-    // that makes the signal worth its own tier. `text` stays combined so
-    // every other tier keeps behaving exactly as before.
-    const title = decodeBase64(entry.title).trim();
     const text = `${decodeBase64(entry.title)} ${decodeBase64(entry.description)}`.trim();
     const startTimestamp = entry.start_timestamp ? Number(entry.start_timestamp) : null;
-    return { text, title, startTimestamp: Number.isFinite(startTimestamp) ? startTimestamp : null };
+    return { text, startTimestamp: Number.isFinite(startTimestamp) ? startTimestamp : null };
   } catch (err) {
-    return { text: '', title: '', startTimestamp: null };
+    return { text: '', startTimestamp: null };
   }
 }
 
 // Fetches EPG data for every given stream in parallel, so the total wait
 // is roughly bounded by the single slowest channel rather than the sum of
-// all of them. Returns a { [stream_id]: { text, title, startTimestamp } }
-// lookup;
+// all of them. Returns a { [stream_id]: { text, startTimestamp } } lookup;
 // any channel whose lookup failed or timed out simply gets empty/null values.
 async function fetchEpgForStreams(user, streams) {
   const results = await Promise.allSettled(
@@ -1631,7 +1699,7 @@ async function fetchEpgForStreams(user, streams) {
 
   const epgByStreamId = {};
   streams.forEach((s, i) => {
-    epgByStreamId[s.stream_id] = results[i].status === 'fulfilled' ? results[i].value : { text: '', title: '', startTimestamp: null };
+    epgByStreamId[s.stream_id] = results[i].status === 'fulfilled' ? results[i].value : { text: '', startTimestamp: null };
   });
   return epgByStreamId;
 }
@@ -1838,11 +1906,118 @@ app.post('/api/m3u/categories', async (req, res) => {
   return res.json({ success: true, categories: source.categoryList });
 });
 
+// Shared front half of every network-links endpoint: rate limit, verify
+// credentials, and hand back the user's parsed playlist. Factored out
+// because three endpoints need exactly this and duplicating it is how the
+// login-lockout bypass happened the first time.
+//
+// Returns null after having already sent a response, so callers just
+// check for null and return.
+async function authenticateForChannels(req, res) {
+  const { uuid, password } = req.body;
+  const ip = req.ip;
+
+  if (isRateLimited(ip)) {
+    const retryAfterSec = getRetryAfterSeconds(ip);
+    res.setHeader('Retry-After', retryAfterSec);
+    res.status(429).json({ error: `Too many failed attempts. Try again in ${Math.ceil(retryAfterSec / 60)} minute(s).` });
+    return null;
+  }
+
+  const user = userConfigs[uuid];
+  if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
+    recordFailedAttempt(ip);
+    res.status(401).json({ error: 'Invalid UUID or password.' });
+    return null;
+  }
+  clearFailedAttempts(ip);
+
+  if (user.connectionType !== 'm3u' || !user.m3u || !user.m3u.playlistUrl) {
+    // Xtream accounts reach the same feature through their own channel
+    // list rather than a parsed playlist; that path isn't built yet, so
+    // say so plainly instead of returning a confusingly empty result.
+    res.status(400).json({ error: 'Network links currently require an M3U account.' });
+    return null;
+  }
+
+  const source = m3u.getCachedM3USource(user.m3u.playlistUrl);
+  if (!source) {
+    res.status(503).json({ error: 'Your playlist has not finished importing yet. Try again in a moment.' });
+    return null;
+  }
+
+  return { user, source };
+}
+
+// The full network registry, so the dashboard renders its sections from
+// the server's list rather than keeping a second copy in the page that
+// could drift out of sync when a network is added.
+app.get('/api/networks', (req, res) => {
+  res.json({
+    networks: networks.NETWORKS.map(({ key, label, kind }) => ({ key, label, kind })),
+    maxLinksPerNetwork: networks.MAX_LINKS_PER_NETWORK
+  });
+});
+
+// Suggested channels for every network at once. One pass over the
+// playlist serves all 16 networks, which is far cheaper than 16 separate
+// round trips and means the dashboard can populate the whole section in
+// a single request.
+app.post('/api/networks/suggest', async (req, res) => {
+  const auth = await authenticateForChannels(req, res);
+  if (!auth) return;
+
+  const suggestions = networks.suggestAllNetworks(auth.source.channels);
+  return res.json({ success: true, suggestions });
+});
+
+// Free-text search over the whole playlist, for overriding a suggestion
+// with a specific channel. Capped server-side: a bare query like "fox"
+// legitimately matches hundreds of channels and there's no value in
+// shipping all of them to a picker the user is scrolling by hand.
+app.post('/api/networks/search', async (req, res) => {
+  const auth = await authenticateForChannels(req, res);
+  if (!auth) return;
+
+  const { query } = req.body;
+  if (!query || typeof query !== 'string' || query.trim().length < 2) {
+    return res.status(400).json({ error: 'Enter at least 2 characters to search.' });
+  }
+
+  const results = networks.searchChannels(query, auth.source.channels, 50);
+  return res.json({ success: true, channels: results, truncated: results.length >= 50 });
+});
+
+// Resolves the user's SAVED links against the current playlist, so the
+// dashboard can show which ones still point at a live channel, which
+// silently moved and got healed, and which are gone. This is the only
+// place a broken link can realistically be surfaced - once a URL is
+// handed to Stremio the app never learns whether it played.
+app.post('/api/networks/status', async (req, res) => {
+  const auth = await authenticateForChannels(req, res);
+  if (!auth) return;
+
+  const status = {};
+  for (const network of networks.NETWORKS) {
+    const { resolved, problems } = networks.resolveNetworkLinks(
+      auth.user.networkLinks, network.key, auth.source
+    );
+    if (resolved.length === 0 && problems.length === 0) continue;
+    status[network.key] = {
+      ok: resolved.filter(r => r.status === 'ok').length,
+      healed: resolved.filter(r => r.status === 'healed').map(r => ({ slot: r.slot, name: r.name, note: r.note })),
+      problems
+    };
+  }
+
+  return res.json({ success: true, status });
+});
+
 app.post('/api/user/register', async (req, res) => {
   if (!ENCRYPTION_KEY_CONFIGURED) {
     return res.status(503).json({ error: 'Encryption key not configured yet. See the homepage for setup instructions.' });
   }
-  const { xtream, m3u, connectionType, selectedSports, sportCategories, password, timeZone, sportOrder } = req.body;
+  const { xtream, m3u, connectionType, selectedSports, sportCategories, password, timeZone, sportOrder, networkLinks } = req.body;
   if (!password || typeof password !== 'string' || password.length === 0) {
     return res.status(400).json({ error: 'A password is required.' });
   }
@@ -1864,6 +2039,7 @@ app.post('/api/user/register', async (req, res) => {
     sportCategories,
     timeZone: timeZone || 'America/New_York',
     sportOrder,
+    networkLinks: networkLinks || {},
     createdAt: new Date().toISOString()
   };
   saveUserConfigs();
@@ -1903,12 +2079,13 @@ app.post('/api/user/login', async (req, res) => {
     sportCategories: user.sportCategories, 
     timeZone: user.timeZone || 'America/New_York',
     sportOrder: user.sportOrder || [],
+    networkLinks: user.networkLinks || {},
     manifestUrl: `/user/${uuid}/manifest.json` 
   });
 });
 
 app.post('/api/user/update', async (req, res) => {
-  const { uuid, password, xtream, m3u, selectedSports, sportCategories, timeZone, sportOrder } = req.body;
+  const { uuid, password, xtream, m3u, selectedSports, sportCategories, timeZone, sportOrder, networkLinks } = req.body;
   const ip = req.ip;
 
   if (isRateLimited(ip)) {
@@ -1929,6 +2106,27 @@ app.post('/api/user/update', async (req, res) => {
   if (sportCategories !== undefined) user.sportCategories = sportCategories;
   if (timeZone) user.timeZone = timeZone;
   if (sportOrder !== undefined) user.sportOrder = sportOrder;
+
+  // Validated before assignment, not after - a malformed link that gets
+  // stored resolves to nothing later, at which point the failure surfaces
+  // in Stremio as a missing stream with no explanation of why. Rejecting
+  // it here means the dashboard can say what's actually wrong while the
+  // user is still looking at the field they typed it into.
+  if (networkLinks !== undefined) {
+    if (!networkLinks || typeof networkLinks !== 'object' || Array.isArray(networkLinks)) {
+      return res.status(400).json({ error: 'networkLinks must be an object keyed by network.' });
+    }
+    const validated = {};
+    for (const [networkKey, links] of Object.entries(networkLinks)) {
+      const result = networks.validateNetworkLinks(networkKey, links);
+      if (!result.ok) {
+        return res.status(400).json({ error: `${networks.getNetworkLabel(networkKey)}: ${result.error}` });
+      }
+      if (result.links.length > 0) validated[networkKey] = result.links;
+    }
+    user.networkLinks = validated;
+  }
+
   saveUserConfigs();
 
   return res.json({ success: true, uuid: user.uuid, manifestUrl: `/user/${uuid}/manifest.json` });
@@ -2385,6 +2583,48 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   const gameTimestampMs = game.date ? new Date(game.date).getTime() : null;
   const gameTimestamp = gameTimestampMs && !isNaN(gameTimestampMs) ? gameTimestampMs / 1000 : null;
 
+  // --- Network links ---
+  //
+  // Resolved BEFORE the tier work below, not after, because for NFL and
+  // college football a configured network wins outright and the tier
+  // results are thrown away. Computing them first would mean, for an
+  // Xtream account, firing one EPG request per channel and discarding
+  // every response.
+  //
+  // Which slot applies: for UFC it's the sport's own event bucket (its
+  // broadcaster is a streaming service that resolves to no network), for
+  // everything else it's whatever network ESPN says carries the game.
+  // Either can be null, which buildStreamList handles.
+  const sportKey = sport.toUpperCase();
+  const networkKey = networks.getEventNetworkForSport(sportKey) || game.network;
+
+  let linkStreams = [];
+  let linkProblems = [];
+  if (networkKey) {
+    const { resolved, problems } = networks.resolveNetworkLinks(
+      user.networkLinks, networkKey, m3uSource,
+      // Xtream links rebuild their URL from the account's credentials
+      // rather than storing it, so the builder is passed in - only this
+      // route has the credentials in hand.
+      (streamId) => (user.xtream && user.xtream.url)
+        ? `${user.xtream.url.replace(/\/+$/, '')}/live/${encodeURIComponent(user.xtream.username)}/${encodeURIComponent(user.xtream.password)}/${streamId}.m3u8`
+        : null
+    );
+    linkProblems = problems;
+
+    // Reordered for this specific sport, so a college-football game
+    // prefers the CFB bundle feed and an NFL game prefers the Sunday
+    // Ticket one - from the same single saved list.
+    linkStreams = networks.orderLinksForSport(resolved, sportKey).map(link => ({
+      name: link.name,
+      title: `📡 ${networks.getNetworkLabel(networkKey)}  📁 ${link.group || ''}`,
+      url: link.url
+    }));
+  }
+
+  // Tier results are only reachable when they can actually be used.
+  const skipTiers = networks.getLinkPolicy(sportKey) === 'replace' && linkStreams.length > 0;
+
   // Normalizes both sources into the same {name, description,
   // startTimestamp, streamUrl, categoryLabel} shape, so every bit of
   // matching/ranking logic below this point runs completely unchanged
@@ -2393,7 +2633,13 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   // it exactly, not maintaining two parallel copies.
   let candidateStreams;
   let allTeamNames;
-  if (isM3u) {
+  if (skipTiers) {
+    // An empty candidate list makes the whole tier pipeline below a no-op
+    // without needing to branch around it, keeping one code path rather
+    // than two.
+    candidateStreams = [];
+    allTeamNames = [];
+  } else if (isM3u) {
     candidateStreams = m3u.getCandidateStreamsForGame(m3uSource, configuredCategoryIds, gameTimestamp);
     allTeamNames = await fetchAllTeamNamesForSport(sport.toUpperCase());
   } else {
@@ -2410,11 +2656,10 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     // Normalized into the exact same shape M3U produces above, so the
     // matching logic below never needs to know which source it came from.
     candidateStreams = xtreamStreams.map(s => {
-      const epg = epgByStreamId[s.stream_id] || { text: '', title: '', startTimestamp: null };
+      const epg = epgByStreamId[s.stream_id] || { text: '', startTimestamp: null };
       return {
         name: s.name,
         description: epg.text,
-        epgTitle: epg.title,
         startTimestamp: epg.startTimestamp,
         streamUrl: `${user.xtream.url.replace(/\/+$/, '')}/live/${encodeURIComponent(user.xtream.username)}/${encodeURIComponent(user.xtream.password)}/${s.stream_id}.m3u8`,
         categoryLabel: getCategoryName(s)
@@ -2434,9 +2679,9 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   if (awayAbbr.length > 2) awayKw.push(awayAbbr);
 
   // Nickname-only keywords (e.g. just "suns", not "phoenix suns") - used
-  // specifically for tier 5's requirement that a city/state-only match
+  // specifically for tier 4's requirement that a city/state-only match
   // doesn't count. Kept separate from homeKw/awayKw above, which stay
-  // city-inclusive for tiers 1-4 (a much stronger "both teams" signal
+  // city-inclusive for tiers 1-3 (a much stronger "both teams" signal
   // where a city match is far less likely to be a coincidence).
   const homeNickKw = (game.homeNick || '').toLowerCase().split(' ').filter(w => w.length > 2);
   const awayNickKw = (game.awayNick || '').toLowerCase().split(' ').filter(w => w.length > 2);
@@ -2480,15 +2725,15 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   // name like "ESPN4Kids" accidentally counting.
   const has4K = (text) => /\b4k\b/i.test(text);
 
-  // Five tiers, most confident first. A stream is assigned to the FIRST
+  // Four tiers, most confident first. A stream is assigned to the FIRST
   // tier it qualifies for, checked in priority order - see the ranking
-  // logic reference doc for the full rationale behind this ordering. An
-  // earlier tier matching the EPG-listed BROADCASTER was deliberately
-  // removed - the provider's own EPG data wasn't judged reliable enough
-  // for that particular signal. Tier 2 below is a different, far more
-  // direct use of that same EPG data: it doesn't trust the provider to
-  // name the right network, it just reads the matchup stated outright.
-  const tiers = [[], [], [], [], []];
+  // logic reference doc for the full rationale behind this ordering. Tier
+  // 5 (EPG-verified broadcaster match) was deliberately removed - the
+  // provider's own Xtream EPG data wasn't judged reliable enough as a
+  // matching signal. Revisit once M3U support lands with a more trustworthy
+  // EPG source (e.g. epg6-style data), as its own dedicated tier rather
+  // than reusing this same slot.
+  const tiers = [[], [], [], []];
   candidateStreams.forEach(s => {
     const name = (s.name || '').toLowerCase();
     // "Description" specifically means the provider's own EPG/programme
@@ -2498,11 +2743,6 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     // external source. See the ranking logic reference doc for why that
     // scope was chosen deliberately.
     const description = (s.description || '').toLowerCase();
-    // The EPG programme TITLE on its own, without the longer description
-    // text folded in - see tier 2. For Xtream this is the listing's own
-    // title field; for M3U the programme title IS the whole entry, so it
-    // equals `description` there.
-    const epgTitle = (s.epgTitle || '').toLowerCase();
     const combined = `${name} ${description}`;
 
     const homeInName = matchesHome(name);
@@ -2512,7 +2752,6 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     const bothInEither = (homeInName || homeInDesc) && (awayInName || awayInDesc);
     const bothInNameAlone = homeInName && awayInName;
     const bothInDescAlone = homeInDesc && awayInDesc;
-    const bothInEpgTitle = matchesHome(epgTitle) && matchesAway(epgTitle);
 
     const entry = { stream: s, startTimestamp: s.startTimestamp };
 
@@ -2524,44 +2763,27 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
       return;
     }
 
-    // Tier 2: the EPG programme title ALONE names both teams (e.g. "Live
-    // NFL P/S: Raiders @ Texans"). A provider that wrote the actual
-    // matchup into the title is stating directly what this channel is
-    // carrying right now - a stronger claim than anything the channel's
-    // own name offers, since channel names are generic and static by
-    // nature ("NFL Sunday Ticket 04") while the title is rewritten per
-    // broadcast. Checked against the title by itself rather than the
-    // combined text, because folding the longer description back in is
-    // exactly what would dilute this down to tier 4's much weaker
-    // "somewhere in all the text" standard. Both teams being confirmed
-    // together is a strong enough anchor that foreign-team exclusion
-    // doesn't apply, same reasoning as tier 1.
-    if (bothInEpgTitle) {
+    // Tier 2: both teams confirmed in EACH field independently (name
+    // alone has both, description alone also has both) - stricter than
+    // tier 3 below, so checked first.
+    if (bothInNameAlone && bothInDescAlone) {
       tiers[1].push(entry);
       return;
     }
 
-    // Tier 3: both teams confirmed in EACH field independently (name
-    // alone has both, description alone also has both) - stricter than
-    // tier 4 below, so checked first.
-    if (bothInNameAlone && bothInDescAlone) {
+    // Tier 3: both teams confirmed across the combined text, not
+    // necessarily within a single field.
+    if (bothInEither) {
       tiers[2].push(entry);
       return;
     }
 
-    // Tier 4: both teams confirmed across the combined text, not
-    // necessarily within a single field.
-    if (bothInEither) {
-      tiers[3].push(entry);
-      return;
-    }
-
-    // Tier 5: one team's actual nickname (not just its city/state) in the
+    // Tier 4: one team's actual nickname (not just its city/state) in the
     // channel name specifically. The one tier without a strong
     // independent anchor, so foreign-team exclusion applies here only.
     if (matchesHomeNickOnly(name) || matchesAwayNickOnly(name)) {
       if (mentionsForeignTeam(combined)) return;
-      tiers[4].push(entry);
+      tiers[3].push(entry);
     }
   });
 
@@ -2580,7 +2802,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   }
 
   // Every stream that qualified for ANY tier is included - tier number
-  // controls display order only, not inclusion. A stream in tier 5 doesn't
+  // controls display order only, not inclusion. A stream in tier 4 doesn't
   // get discarded just because some other stream also qualified for tier 1.
   // If nothing cleared any tier at all, the flattened result is naturally
   // empty - no separate fallback needed.
@@ -2588,7 +2810,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
 
   // Confirmed via direct testing in Nuvio that a forced rank-prefix isn't
   // actually needed - Nuvio respects our intended order as returned.
-  const streams = streamsToReturn.map((s) => {
+  const tierStreams = streamsToReturn.map((s) => {
     return {
       name: s.name,
       title: `\uD83D\uDCC1 ${s.categoryLabel || ''}`,
@@ -2596,8 +2818,34 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     };
   });
 
+  const { streams, mode, note } = networks.buildStreamList({
+    sportKey, networkKey, linkStreams, tierStreams
+  });
+
+  // The only channel available for telling the user something is wrong -
+  // once a URL reaches the player, this app never learns whether it
+  // worked. An entry here is not playable, so it says so plainly rather
+  // than looking like a stream that simply failed.
+  const finalStreams = [...streams];
+  if (mode === 'no-links') {
+    finalStreams.unshift({
+      name: '\u26A0\uFE0F Not configured',
+      title: `${note} - add one in the Sportio dashboard. Showing search results instead.`,
+      url: ''
+    });
+  }
+  if (linkProblems.length > 0) {
+    finalStreams.unshift({
+      name: '\u26A0\uFE0F Broken link',
+      title: `${linkProblems.length} saved ${networks.getNetworkLabel(networkKey)} channel(s) are missing from your playlist - check the dashboard.`,
+      url: ''
+    });
+  }
+
+  console.log(`[Stream] ${sportKey} ${idVal} network=${networkKey || 'none'} mode=${mode} links=${linkStreams.length} tiers=${tierStreams.length} -> ${finalStreams.length}`);
+
   res.setHeader('Content-Type', 'application/json');
-  res.json({ streams });
+  res.json({ streams: finalStreams });
 });
 
 app.listen(PORT, '0.0.0.0', () => {
