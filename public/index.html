@@ -2050,11 +2050,9 @@
       // A probed result is a measurement; link.quality is only what the
       // channel's NAME claimed. When both exist the measurement wins, and
       // it carries the frame rate the name never does - "1080p60" rather
-      // than "1080p".
-      const probedBadge = renderProbeBadge(key, link.url, false);
-      const quality = probedBadge || (link.quality
-        ? `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#3b8fc4]/25 text-[#5aa8d1]">${escapeHtml(link.quality)}</span>`
-        : '');
+      // than "1080p". Passing link.quality as the fallback means this one
+      // element covers both cases and can be refreshed in place.
+      const quality = renderProbeBadge(key, link.url, false, link.quality || '');
       const healedNote = healed
         ? `<div class="text-[10px] text-[#c9992e] mt-0.5"><i class="fa-solid fa-wrench mr-1"></i>Channel moved - relinked automatically (${escapeHtml(healed.note)})</div>`
         : '';
@@ -2151,6 +2149,7 @@
             </div>
             <div class="pt-1">
               <input type="text" id="network-search-${key}"
+                     value="${escapeHtml((document.getElementById(`network-search-${key}`) || {}).value || '')}"
                      oninput="onNetworkSearchInput('${key}')"
                      placeholder="Search your playlist to add a channel..."
                      class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
@@ -2300,9 +2299,45 @@
       renderNetworkSearchResults(key);
     }
 
-    function renderProbeBadge(key, url, interactive) {
+    // A badge is wrapped in a element tagged with the URL it describes, so
+    // a probe result can be pushed to every place that URL is shown
+    // without re-rendering anything. The same stream appears in two
+    // independent lists - the search results and the saved links - and
+    // re-rendering one left the other showing a stale result.
+    //
+    // fallbackLabel is the name-derived quality ("1080p") shown when no
+    // probe result exists. It rides along in a data attribute so the badge
+    // can be regenerated later from the element alone.
+    function renderProbeBadge(key, url, interactive, fallbackLabel) {
+      return `<span data-probe-url="${escapeHtml(url)}"
+                    data-probe-key="${escapeHtml(key)}"
+                    data-probe-interactive="${interactive ? '1' : '0'}"
+                    data-probe-fallback="${escapeHtml(fallbackLabel || '')}"
+              >${probeBadgeInner(key, url, interactive, fallbackLabel)}</span>`;
+    }
+
+    // Pushes a fresh result to every rendering of one URL - search results
+    // and saved links alike. Compares dataset values rather than building a
+    // CSS attribute selector, since URLs contain characters that would need
+    // escaping in one.
+    function refreshProbeBadges(url) {
+      document.querySelectorAll('[data-probe-url]').forEach(el => {
+        if (el.dataset.probeUrl !== url) return;
+        el.innerHTML = probeBadgeInner(
+          el.dataset.probeKey, url,
+          el.dataset.probeInteractive === '1',
+          el.dataset.probeFallback
+        );
+      });
+    }
+
+    function probeBadgeInner(key, url, interactive, fallbackLabel) {
       const probed = probeResults[url];
-      if (!probed) return '';
+      if (!probed) {
+        return fallbackLabel
+          ? `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#3b8fc4]/25 text-[#5aa8d1]">${escapeHtml(fallbackLabel)}</span>`
+          : '';
+      }
       if (probed.checking) {
         return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#3b8fc4]/25 text-[#5aa8d1]"><i class="fa-solid fa-spinner fa-spin"></i></span>`;
       }
@@ -2408,9 +2443,11 @@
         probeResults[url] = data.ok
           ? { label: data.label, fps: data.fps, height: data.height }
           : { error: data.error || 'probe failed' };
+        refreshProbeBadges(url);
         return !!data.cached;
       } catch (err) {
         probeResults[url] = { error: 'Network error' };
+        refreshProbeBadges(url);
         return false;
       }
     }
@@ -2425,6 +2462,7 @@
       }
       probeInProgress = true;
       probeResults[url] = { checking: true };
+      refreshProbeBadges(url);
       renderNetworkSearchResults(key);
       try {
         await probeOneChannel(url, true);
