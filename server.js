@@ -2561,6 +2561,30 @@ function buildNetworkArtSvg(label, width, height) {
   </svg>`;
 }
 
+// Cache-buster for the network artwork URLs.
+//
+// The art is served with a long max-age because it genuinely never
+// changes for a given network - but that meant a fix to the RENDERING
+// was invisible: clients kept showing the cached image at the unchanged
+// URL for a day. Observed exactly that, where a wrapping fix deployed
+// correctly but every poster still rendered clipped.
+//
+// Derived from the source of the render function rather than a manual
+// version constant, so it changes automatically whenever the artwork
+// logic does and there is nothing to remember to bump.
+const NETWORK_ART_VERSION = crypto
+  .createHash('sha1')
+  .update(buildNetworkArtSvg.toString())
+  .digest('hex')
+  .slice(0, 8);
+
+function networkArtUrls(hostUrl, key) {
+  return {
+    poster: `${hostUrl}/network/${key}/poster.svg?v=${NETWORK_ART_VERSION}`,
+    background: `${hostUrl}/network/${key}/background.svg?v=${NETWORK_ART_VERSION}`
+  };
+}
+
 app.get('/network/:key/poster.svg', (req, res) => {
   res.setHeader('Content-Type', 'image/svg+xml');
   res.setHeader('Cache-Control', 'public, max-age=86400');
@@ -2657,8 +2681,7 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
       id: `net:${network.key}`,
       type: 'sports',
       name: network.label,
-      poster: `${hostUrl}/network/${network.key}/poster.svg`,
-      background: `${hostUrl}/network/${network.key}/background.svg`
+      ...networkArtUrls(hostUrl, network.key)
     }));
 
     res.setHeader('Content-Type', 'application/json');
@@ -2726,8 +2749,7 @@ app.get('/user/:uuid/meta/sports/:id.json', async (req, res) => {
         id: req.params.id,
         type: 'sports',
         name: network.label,
-        poster: `${hostUrl}/network/${network.key}/poster.svg`,
-        background: `${hostUrl}/network/${network.key}/background.svg`
+        ...networkArtUrls(hostUrl, network.key)
         // No description. It listed every channel, but the client renders
         // the field as one paragraph - newlines are collapsed - so ten
         // channels became an unreadable run-on. The stream list directly
