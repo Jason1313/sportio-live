@@ -2087,32 +2087,38 @@
         </div>`;
     }
 
-    function buildNetworkSection(network) {
-      const key = network.key;
+    // The three regions of a section that change when the saved links
+    // change. Split out so they can be updated on their own, leaving the
+    // search box and its results list untouched.
+    //
+    // This matters because replacing the whole section resets the results
+    // list's scroll position to the top - every add, move or remove
+    // yanked the user back to the start of a long list they were part way
+    // down. Same root cause as the search text and the quality badges
+    // being wiped: rebuilding markup throws away state that lives in the
+    // DOM rather than in a variable.
+    function buildNetworkHeaderBadges(key) {
       const links = readNetworkLinks(key);
-      const suggestions = networkSuggestions[key] || [];
-      const status = networkStatus[key] || {};
-      const problems = status.problems || [];
-      const isOpen = !!networkExpanded[key];
-
-      const badgeClass = links.length > 0
-        ? 'bg-[#3b8fc4] text-white'
-        : 'bg-[#3b4d58] text-[#e6e6e6]/55';
-
-      // A missing link is the one failure the user can't see from
-      // Stremio, so it gets a loud marker on the collapsed header rather
-      // than only being visible once expanded.
+      const problems = ((networkStatus[key] || {}).problems) || [];
+      const badgeClass = links.length > 0 ? 'bg-[#3b8fc4] text-white' : 'bg-[#3b4d58] text-[#e6e6e6]/55';
       const problemBadge = problems.length > 0
         ? `<span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-[#c0392b] text-white"><i class="fa-solid fa-triangle-exclamation mr-1"></i>${problems.length}</span>`
         : '';
+      return `${problemBadge}<span class="text-xs font-semibold px-2 py-0.5 rounded-full ${badgeClass}">${links.length}/${networkMaxLinks}</span>`;
+    }
+
+    function buildNetworkLinksListHtml(key) {
+      const network = networkRegistry.find(n => n.key === key) || { kind: '' };
+      const links = readNetworkLinks(key);
+      const problems = ((networkStatus[key] || {}).problems) || [];
 
       // The empty state has to describe the right policy. An event bucket
       // (UFC) ADDS its channels on top of category search, while a real
-      // network REPLACES it - saying "will use category search" under UFC
-      // would describe behaviour that only applies to the other kind.
+      // network REPLACES it.
       const emptyText = network.kind === 'event'
         ? 'No channels set - only category search results will show.'
         : 'No channels set - games on this network will use category search.';
+
       const rows = links.length > 0
         ? links.map((link, i) => buildNetworkLinkRow(key, link, i, links.length)).join('')
         : `<div class="text-xs text-[#e6e6e6]/40 italic px-3 py-2">${emptyText}</div>`;
@@ -2123,29 +2129,69 @@
           <span>Slot ${p.slot} (${escapeHtml(p.name || '')}) is no longer in your playlist - ${escapeHtml(p.reason || '')}. Remove it or pick a replacement.</span>
         </div>`).join('');
 
+      return `<div class="space-y-1.5">${rows}</div>${problemRows}`;
+    }
+
+    function buildNetworkActionsHtml(key) {
+      const links = readNetworkLinks(key);
+      const suggestions = networkSuggestions[key] || [];
+
       const suggestBtn = suggestions.length > 0
         ? `<button onclick="applyNetworkSuggestions('${key}')" class="text-[11px] font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
              <i class="fa-solid fa-wand-magic-sparkles"></i>Use ${suggestions.length} suggestion${suggestions.length === 1 ? '' : 's'}
            </button>`
         : `<span class="text-[11px] text-[#e6e6e6]/35 italic">No automatic matches - use search below</span>`;
 
-      const resultRows = buildSearchResultsHtml(key);
-
       // Same labelling rules as the search button: report only outstanding
       // work, so it never implies it will re-check what is already known.
-      const savedPending = links.filter(l => !probeResults[l.url]).length;
-      const savedFailed = links.filter(l => probeResults[l.url] && probeResults[l.url].error).length;
-      const savedOutstanding = savedPending + savedFailed;
-      const savedProbeDisabled = probeInProgress || savedOutstanding === 0;
-      const savedProbeLabel = savedOutstanding === 0
+      const pending = links.filter(l => !probeResults[l.url]).length;
+      const failedCount = links.filter(l => probeResults[l.url] && probeResults[l.url].error).length;
+      const outstanding = pending + failedCount;
+      const disabled = probeInProgress || outstanding === 0;
+      const label = outstanding === 0
         ? 'All checked'
-        : (savedPending === 0 ? `Retry ${savedFailed} failed` : `Check quality (${savedOutstanding})`);
+        : (pending === 0 ? `Retry ${failedCount} failed` : `Check quality (${outstanding})`);
       const savedProbeBtn = links.length === 0 ? '' : `
-        <button id="network-saved-probe-btn-${key}" onclick="probeSavedLinks('${key}')" ${savedProbeDisabled ? 'disabled' : ''}
-                class="text-[11px] font-bold transition ${savedProbeDisabled ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd]'}">
-          <i class="fa-solid fa-gauge-high mr-1"></i>${savedProbeLabel}
+        <button id="network-saved-probe-btn-${key}" onclick="probeSavedLinks('${key}')" ${disabled ? 'disabled' : ''}
+                class="text-[11px] font-bold transition ${disabled ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd]'}">
+          <i class="fa-solid fa-gauge-high mr-1"></i>${label}
         </button>`;
 
+      return `
+        <div class="flex items-center justify-between gap-3 px-1 pt-1">
+          ${suggestBtn}
+          <span class="flex items-center gap-3 shrink-0">
+            ${savedProbeBtn}
+            ${links.length > 0 ? `<button onclick="clearNetworkLinks('${key}')" class="text-[11px] font-bold text-[#e56a6a]/70 hover:text-[#e56a6a] transition">Clear all</button>` : ''}
+          </span>
+        </div>`;
+    }
+
+    // Updates ONLY the regions affected by a change to the saved links.
+    // The search input keeps its text, focus and caret, and the results
+    // list keeps its scroll position, because neither is touched.
+    function refreshNetworkLinksRegion(key) {
+      const header = document.getElementById(`network-header-${key}`);
+      const list = document.getElementById(`network-links-list-${key}`);
+      const actions = document.getElementById(`network-actions-${key}`);
+      if (!header || !list || !actions) return renderNetworkLinks();
+
+      const chevron = header.querySelector('i.fa-chevron-down');
+      header.innerHTML = buildNetworkHeaderBadges(key);
+      if (chevron) header.appendChild(chevron);
+
+      list.innerHTML = buildNetworkLinksListHtml(key);
+      actions.innerHTML = buildNetworkActionsHtml(key);
+    }
+
+    function buildNetworkSection(network) {
+      const key = network.key;
+      const isOpen = !!networkExpanded[key];
+      const resultRows = buildSearchResultsHtml(key);
+
+      // Everything that changes with the saved links now comes from the
+      // three builders above, so it can be re-rendered without disturbing
+      // the search box or its scrolled results list.
       return `
         <div class="bg-[#3b4d58]/40 border border-[#e6e6e6]/10 rounded-lg overflow-hidden">
           <button onclick="toggleNetworkSection('${key}')" class="w-full flex items-center justify-between px-4 py-3 hover:bg-[#3b4d58]/60 transition">
@@ -2153,22 +2199,14 @@
               <span class="font-bold text-sm">${escapeHtml(network.label)}</span>
               <span class="text-[10px] uppercase tracking-wider text-[#e6e6e6]/35">${escapeHtml(network.kind)}</span>
             </span>
-            <span class="flex items-center gap-2">
-              ${problemBadge}
-              <span class="text-xs font-semibold px-2 py-0.5 rounded-full ${badgeClass}">${links.length}/${networkMaxLinks}</span>
+            <span id="network-header-${key}" class="flex items-center gap-2">
+              ${buildNetworkHeaderBadges(key)}
               <i class="fa-solid fa-chevron-down text-xs text-[#e6e6e6]/45 transition-transform ${isOpen ? 'rotate-180' : ''}"></i>
             </span>
           </button>
-          <div class="${isOpen ? '' : 'hidden'} px-3 pb-3 space-y-2">
-            <div class="space-y-1.5">${rows}</div>
-            ${problemRows}
-            <div class="flex items-center justify-between gap-3 px-1 pt-1">
-              ${suggestBtn}
-              <span class="flex items-center gap-3 shrink-0">
-                ${savedProbeBtn}
-                ${links.length > 0 ? `<button onclick="clearNetworkLinks('${key}')" class="text-[11px] font-bold text-[#e56a6a]/70 hover:text-[#e56a6a] transition">Clear all</button>` : ''}
-              </span>
-            </div>
+          <div id="network-body-${key}" class="${isOpen ? '' : 'hidden'} px-3 pb-3 space-y-2">
+            <div id="network-links-list-${key}">${buildNetworkLinksListHtml(key)}</div>
+            <div id="network-actions-${key}">${buildNetworkActionsHtml(key)}</div>
             <div class="pt-1">
               <input type="text" id="network-search-${key}"
                      value="${escapeHtml((document.getElementById(`network-search-${key}`) || {}).value || '')}"
@@ -2195,22 +2233,26 @@
       container.innerHTML = networkRegistry.map(buildNetworkSection).join('');
     }
 
-    // Re-renders only the one section being interacted with, so typing in
-    // one network's search box doesn't tear down and rebuild every other
-    // section (which would drop focus and scroll position).
-    function rerenderNetworkSection(key) {
-      const network = networkRegistry.find(n => n.key === key);
-      if (!network) return;
-      const container = document.getElementById('network-links-container');
-      const sections = container.children;
-      const index = networkRegistry.findIndex(n => n.key === key);
-      if (!sections[index]) return renderNetworkLinks();
-      sections[index].outerHTML = buildNetworkSection(network);
-    }
+    // Deliberately no whole-section re-render function any more.
+    //
+    // There used to be one, and every add/move/remove/toggle called it.
+    // Replacing a section's outerHTML discards everything the DOM was
+    // holding for it - the search text, the quality badges, and the
+    // results list's scroll position - which surfaced as three separate
+    // bugs before the cause was common to all of them. Use
+    // refreshNetworkLinksRegion (saved links) or renderNetworkSearchResults
+    // (search list) instead: each touches only what it owns.
 
     function toggleNetworkSection(key) {
       networkExpanded[key] = !networkExpanded[key];
-      rerenderNetworkSection(key);
+      // Toggling a class rather than re-rendering: rebuilding the
+      // whole section to flip one class also rebuilt the results
+      // list, discarding its scroll position and the search text.
+      const body = document.getElementById(`network-body-${key}`);
+      if (!body) return renderNetworkLinks();
+      body.classList.toggle('hidden', !networkExpanded[key]);
+      const chevron = document.querySelector(`#network-header-${key} i.fa-chevron-down`);
+      if (chevron) chevron.classList.toggle('rotate-180', !!networkExpanded[key]);
     }
 
     // Suggestions never silently replace what's already there - they're
@@ -2229,7 +2271,9 @@
       }
       if (added > 0) markDashboardDirty();
       networkExpanded[key] = true;
-      rerenderNetworkSection(key);
+      const openBody = document.getElementById(`network-body-${key}`);
+      if (openBody) openBody.classList.remove('hidden');
+      refreshNetworkLinksRegion(key);
     }
 
     function applyAllNetworkSuggestions() {
@@ -2255,13 +2299,13 @@
     function removeNetworkLink(key, index) {
       getNetworkLinks(key).splice(index, 1);
       markDashboardDirty();
-      rerenderNetworkSection(key);
+      refreshNetworkLinksRegion(key);
     }
 
     function clearNetworkLinks(key) {
       activeUser.networkLinks[key] = [];
       markDashboardDirty();
-      rerenderNetworkSection(key);
+      refreshNetworkLinksRegion(key);
     }
 
     function moveNetworkLink(key, index, delta) {
@@ -2270,7 +2314,7 @@
       if (target < 0 || target >= links.length) return;
       [links[index], links[target]] = [links[target], links[index]];
       markDashboardDirty();
-      rerenderNetworkSection(key);
+      refreshNetworkLinksRegion(key);
     }
 
     function addNetworkLink(key, resultIndex) {
@@ -2293,7 +2337,7 @@
         ? { ...channel, probedQuality: measured.label }
         : channel);
       markDashboardDirty();
-      rerenderNetworkSection(key);
+      refreshNetworkLinksRegion(key);
     }
 
     // --- Stream quality probing ---
@@ -2554,7 +2598,7 @@
           : `Checked ${toProbe.length} saved channel${toProbe.length === 1 ? '' : 's'}.`);
       } finally {
         probeInProgress = false;
-        rerenderNetworkSection(key);
+        refreshNetworkLinksRegion(key);
       }
     }
 
@@ -2623,7 +2667,7 @@
 
       input.value = '';
       markDashboardDirty();
-      rerenderNetworkSection(key);
+      refreshNetworkLinksRegion(key);
       showStatus(known
         ? `Added ${known.name}.`
         : 'Added. This URL is not in your playlist, so it cannot be relinked automatically if the provider changes it.');
