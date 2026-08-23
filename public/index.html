@@ -2052,7 +2052,11 @@
       // it carries the frame rate the name never does - "1080p60" rather
       // than "1080p". Passing link.quality as the fallback means this one
       // element covers both cases and can be refreshed in place.
-      const quality = renderProbeBadge(key, link.url, false, link.quality || '');
+      // Interactive: a failed saved link can be retried by clicking its
+      // badge. This used to be suppressed because a retry re-rendered the
+      // search results rather than the row you clicked - refreshProbeBadges
+      // updates the badge in place now, so it behaves where you click it.
+      const quality = renderProbeBadge(key, link.url, true, link.quality || '');
       const healedNote = healed
         ? `<div class="text-[10px] text-[#c9992e] mt-0.5"><i class="fa-solid fa-wrench mr-1"></i>Channel moved - relinked automatically (${escapeHtml(healed.note)})</div>`
         : '';
@@ -2127,6 +2131,21 @@
 
       const resultRows = buildSearchResultsHtml(key);
 
+      // Same labelling rules as the search button: report only outstanding
+      // work, so it never implies it will re-check what is already known.
+      const savedPending = links.filter(l => !probeResults[l.url]).length;
+      const savedFailed = links.filter(l => probeResults[l.url] && probeResults[l.url].error).length;
+      const savedOutstanding = savedPending + savedFailed;
+      const savedProbeDisabled = probeInProgress || savedOutstanding === 0;
+      const savedProbeLabel = savedOutstanding === 0
+        ? 'All checked'
+        : (savedPending === 0 ? `Retry ${savedFailed} failed` : `Check quality (${savedOutstanding})`);
+      const savedProbeBtn = links.length === 0 ? '' : `
+        <button id="network-saved-probe-btn-${key}" onclick="probeSavedLinks('${key}')" ${savedProbeDisabled ? 'disabled' : ''}
+                class="text-[11px] font-bold transition ${savedProbeDisabled ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd]'}">
+          <i class="fa-solid fa-gauge-high mr-1"></i>${savedProbeLabel}
+        </button>`;
+
       return `
         <div class="bg-[#3b4d58]/40 border border-[#e6e6e6]/10 rounded-lg overflow-hidden">
           <button onclick="toggleNetworkSection('${key}')" class="w-full flex items-center justify-between px-4 py-3 hover:bg-[#3b4d58]/60 transition">
@@ -2143,9 +2162,12 @@
           <div class="${isOpen ? '' : 'hidden'} px-3 pb-3 space-y-2">
             <div class="space-y-1.5">${rows}</div>
             ${problemRows}
-            <div class="flex items-center justify-between px-1 pt-1">
+            <div class="flex items-center justify-between gap-3 px-1 pt-1">
               ${suggestBtn}
-              ${links.length > 0 ? `<button onclick="clearNetworkLinks('${key}')" class="text-[11px] font-bold text-[#e56a6a]/70 hover:text-[#e56a6a] transition">Clear all</button>` : ''}
+              <span class="flex items-center gap-3 shrink-0">
+                ${savedProbeBtn}
+                ${links.length > 0 ? `<button onclick="clearNetworkLinks('${key}')" class="text-[11px] font-bold text-[#e56a6a]/70 hover:text-[#e56a6a] transition">Clear all</button>` : ''}
+              </span>
             </div>
             <div class="pt-1">
               <input type="text" id="network-search-${key}"
@@ -2347,12 +2369,6 @@
         // click and not a re-run of the whole batch. onclick stops
         // propagation so retrying doesn't also add the channel to the
         // network, which is what the surrounding button does.
-        // Retry is offered only in the search list. On a saved-link row
-        // it would re-render the search results instead - a control that
-        // appears to do nothing where you clicked it.
-        if (!interactive) {
-          return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#c0392b]/25 text-[#e56a6a]" title="${escapeHtml(probed.error)}">failed</span>`;
-        }
         return `<span onclick="event.stopPropagation(); retryOneProbe('${key}', '${escapeHtml(url)}')"
                       class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#c0392b]/25 text-[#e56a6a] hover:bg-[#c0392b]/40 cursor-pointer"
                       title="${escapeHtml(probed.error)} - click to retry">failed &#8635;</span>`;
@@ -2449,6 +2465,62 @@
         probeResults[url] = { error: 'Network error' };
         refreshProbeBadges(url);
         return false;
+      }
+    }
+
+    // Checks the quality of the links already SAVED to a network, rather
+    // than of search results. Different starting point, same rules: skip
+    // anything that already returned a resolution, force-retry the
+    // failures, one at a time with a gap between.
+    //
+    // No result cap is needed here the way it is for search - a network
+    // holds at most MAX_LINKS_PER_NETWORK links, which is already below
+    // PROBE_MAX_RESULTS.
+    async function probeSavedLinks(key) {
+      if (probeInProgress) {
+        showStatus('A quality check is already running.', true);
+        return;
+      }
+      const links = readNetworkLinks(key);
+      if (links.length === 0) return;
+
+      const toProbe = links.filter(l => {
+        const prior = probeResults[l.url];
+        return !prior || prior.error;
+      });
+      if (toProbe.length === 0) {
+        showStatus('All of these have already been checked.');
+        return;
+      }
+
+      probeInProgress = true;
+      const button = document.getElementById(`network-saved-probe-btn-${key}`);
+
+      try {
+        for (let i = 0; i < toProbe.length; i++) {
+          const link = toProbe[i];
+          const isRetry = !!(probeResults[link.url] && probeResults[link.url].error);
+          if (button) {
+            button.disabled = true;
+            button.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-1.5"></i>Checking ${i + 1} of ${toProbe.length}...`;
+          }
+
+          // Badges update themselves via refreshProbeBadges, so nothing
+          // needs re-rendering mid-loop - which keeps the search box and
+          // its results untouched while this runs.
+          const wasCached = await probeOneChannel(link.url, isRetry);
+
+          if (!wasCached && i < toProbe.length - 1) {
+            await new Promise(r => setTimeout(r, PROBE_DELAY_MS));
+          }
+        }
+        const failures = toProbe.filter(l => probeResults[l.url] && probeResults[l.url].error).length;
+        showStatus(failures > 0
+          ? `Checked ${toProbe.length}. ${failures} failed - click a red badge to retry just that one.`
+          : `Checked ${toProbe.length} saved channel${toProbe.length === 1 ? '' : 's'}.`);
+      } finally {
+        probeInProgress = false;
+        rerenderNetworkSection(key);
       }
     }
 
