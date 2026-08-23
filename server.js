@@ -8,6 +8,7 @@ const path = require('path');
 const crypto = require('crypto');
 const m3u = require('./m3u.js');
 const networks = require('./networks.js');
+const probe = require('./probe.js');
 
 // Xtream credentials are encrypted at rest in users.json using this key.
 // Must be a 64-character hex string (32 bytes) for AES-256-GCM. Generate one
@@ -2031,6 +2032,34 @@ app.post('/api/networks/search', async (req, res) => {
 
   const results = networks.searchChannels(query, auth.source.channels, 50);
   return res.json({ success: true, channels: results, truncated: results.length >= 50 });
+});
+
+// Probes ONE stream for its resolution and frame rate. One URL per
+// request, not a batch: a batch of eight at ~3s apart would hold an HTTP
+// request open for the better part of a minute, which reverse proxies cut
+// off by default, and it would give the page nothing to show until every
+// probe finished. Per-URL lets results fill in as they arrive.
+//
+// The URL must be one the user's own playlist actually contains. This is
+// the security boundary, not a convenience check: without it the endpoint
+// would fetch any URL a client named, turning the server into a proxy for
+// scanning whatever it can reach on its own network.
+app.post('/api/networks/probe', async (req, res) => {
+  const auth = await authenticateForChannels(req, res);
+  if (!auth) return;
+
+  const { url } = req.body;
+  if (!url || typeof url !== 'string') {
+    return res.status(400).json({ error: 'A stream URL is required.' });
+  }
+
+  const channel = auth.source.channels.find(c => c.streamUrl === url);
+  if (!channel) {
+    return res.status(400).json({ error: 'That stream is not in your playlist.' });
+  }
+
+  const result = await probe.probeStream(url);
+  return res.json({ success: true, url, ...result });
 });
 
 // Resolves the user's SAVED links against the current playlist, so the
