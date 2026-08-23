@@ -1,0 +1,26 @@
+# Secrets. The repo is public - none of this may ever be committed.
+#
+# .env holds ENCRYPTION_KEY, ADMIN_USERNAME and ADMIN_PASSWORD in plain
+# text. Losing the encryption key means losing every saved credential;
+# publishing it means anyone can read them.
+.env
+.env.*
+
+# Registered accounts. Xtream/M3U credentials are encrypted at rest, but
+# this is still user data and has no business in a public repo.
+data/
+
+# Scratch file used by the diagnostic scripts - contains a playlist URL
+# with the provider username and password embedded in the path.
+playlist-url.txt
+
+# Installed inside the Docker image by `npm ci`, never from here.
+node_modules/
+
+# Throwaway diagnostics
+inspect-playlist*.js
+verify-parser.js
+
+npm-debug.log*
+.DS_Store
+Thumbs.db

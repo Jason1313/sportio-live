@@ -430,6 +430,7 @@
     let networkSearchResults = {}; // key -> [channel, ...]
     let networkStatus = {};        // key -> { ok, healed[], problems[] }
     let networkExpanded = {};      // key -> bool
+    let networkNotReady = false;   // playlist cache empty; picker unusable
 
     // Setup wizard state (new-account creation only)
     let wizardSelectedSports = [];
@@ -1928,21 +1929,48 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(credentials)
           });
-          return res.ok ? await res.json() : null;
+          const body = await res.json().catch(() => null);
+          return { ok: res.ok, status: res.status, body };
         } catch (err) {
-          return null;
+          return { ok: false, status: 0, body: null };
         }
       };
 
-      const [suggestData, statusData] = await Promise.all([
+      const [suggestRes, statusRes] = await Promise.all([
         post('/api/networks/suggest'),
         post('/api/networks/status')
       ]);
 
-      networkSuggestions = (suggestData && suggestData.suggestions) || {};
-      networkStatus = (statusData && statusData.status) || {};
+      // A 503 here means the playlist cache is empty - the server has
+      // started a refresh, it just isn't done. Rendering the normal
+      // picker in that state would show 17 empty sections with no
+      // suggestions and a search box that silently returns nothing,
+      // which reads as "this feature is broken" rather than "wait a
+      // moment". Say which it is.
+      networkNotReady = !suggestRes.ok && suggestRes.body && suggestRes.body.notReady;
+      if (networkNotReady) {
+        renderNetworkNotReady(suggestRes.body.error);
+        return;
+      }
+
+      networkSuggestions = (suggestRes.body && suggestRes.body.suggestions) || {};
+      networkStatus = (statusRes.body && statusRes.body.status) || {};
       autoFillNetworkSuggestions();
       renderNetworkLinks();
+    }
+
+    function renderNetworkNotReady(message) {
+      const container = document.getElementById('network-links-container');
+      if (!container) return;
+      container.innerHTML = `
+        <div class="bg-[#3b4d58]/40 border border-[#c9992e]/40 rounded-lg px-4 py-5 text-center">
+          <i class="fa-solid fa-spinner fa-spin text-[#c9992e] mb-2"></i>
+          <p class="text-xs text-[#e6e6e6]/75 mb-1 font-semibold">${escapeHtml(message || 'Your playlist is still loading.')}</p>
+          <p class="text-[11px] text-[#e6e6e6]/45 mb-3">Channel search and suggestions need the playlist. Your saved links are safe and unchanged.</p>
+          <button onclick="loadNetworkLinks()" class="bg-[#3b8fc4] hover:bg-[#4fa3d8] text-xs font-bold py-2 px-4 rounded-lg transition">
+            <i class="fa-solid fa-rotate mr-1.5"></i>Retry
+          </button>
+        </div>`;
     }
 
     // Fills in suggestions without the user having to ask, which is the
