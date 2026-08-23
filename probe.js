@@ -123,8 +123,18 @@ function runFfprobe(url) {
 // Never throws: a channel that won't probe is a normal outcome here (a
 // dead feed is exactly what the user is trying to find), so it's reported
 // as data rather than as an exception the caller has to wrap.
-async function probeStream(url) {
-  const cached = getCached(url);
+// `force` bypasses the cache for one call. Needed because a failure is
+// very often about conditions at that moment rather than the stream
+// itself: providers cap concurrent connections, so probing while you have
+// something playing consumes the last slot and the probe times out. That
+// result is worth remembering (so a search doesn't re-probe dead feeds
+// every time) but must not be permanent - confirmed in practice, where
+// the first two probes failed against an active stream and the rest
+// succeeded.
+async function probeStream(url, options = {}) {
+  const { force = false } = options;
+
+  const cached = force ? null : getCached(url);
   if (cached) return { ...cached, cached: true };
 
   // Serialise against the provider. Awaiting here means concurrent

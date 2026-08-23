@@ -2058,7 +2058,10 @@ app.post('/api/networks/probe', async (req, res) => {
     return res.status(400).json({ error: 'That stream is not in your playlist.' });
   }
 
-  const result = await probe.probeStream(url);
+  // force re-probes a stream whose cached result was a failure - see
+  // probeStream. Still subject to the same server-side throttle, so it
+  // cannot be used to bypass the rate limiting.
+  const result = await probe.probeStream(url, { force: req.body.force === true });
   return res.json({ success: true, url, ...result });
 });
 
