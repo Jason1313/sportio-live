@@ -431,6 +431,8 @@
     let networkStatus = {};        // key -> { ok, healed[], problems[] }
     let networkExpanded = {};      // key -> bool
     let networkNotReady = false;   // playlist cache empty; picker unusable
+    let networkSearchGroups = {};  // key -> [{name, count, excluded}]
+    let networkExcludedGroups = {};// key -> Set of group names hidden from results
 
     // Setup wizard state (new-account creation only)
     let wizardSelectedSports = [];
@@ -2238,8 +2240,9 @@
               <input type="text" id="network-search-${key}"
                      value="${escapeHtml((document.getElementById(`network-search-${key}`) || {}).value || '')}"
                      oninput="onNetworkSearchInput('${key}')"
-                     placeholder="Search your playlist to add a channel..."
+                     placeholder="Search channels...  use &quot;quotes&quot; for an exact name"
                      class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
+              <div id="network-groups-${key}">${buildSearchGroupChipsHtml(key)}</div>
               <div id="network-results-${key}" class="mt-1 max-h-48 overflow-y-auto">${resultRows}</div>
               <div id="network-probe-row-${key}" class="mt-1">${buildSearchProbeButtonHtml(key)}</div>
             </div>
@@ -2731,7 +2734,8 @@
 
       if (query.length < 2) {
         networkSearchResults[key] = [];
-        if (resultsBox) resultsBox.innerHTML = '';
+        networkSearchGroups[key] = [];
+        renderNetworkSearchResults(key);
         return;
       }
 
@@ -2739,12 +2743,19 @@
         const res = await fetch('/api/networks/search', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, query })
+          body: JSON.stringify({
+            uuid: activeUser.uuid,
+            password: activeUser.password,
+            query,
+            excludeGroups: [...(networkExcludedGroups[key] || [])]
+          })
         });
         const data = await res.json();
         networkSearchResults[key] = (data && data.channels) || [];
+        networkSearchGroups[key] = (data && data.groups) || [];
       } catch (err) {
         networkSearchResults[key] = [];
+        networkSearchGroups[key] = [];
       }
 
       // Only the results list is rewritten, never the whole section -
@@ -2786,6 +2797,43 @@
             </div>`).join('');
 
       return rows;
+    }
+
+    // One chip per playlist group present in the current matches, with a
+    // count. Clicking a chip hides that group from the results.
+    //
+    // This is the direct answer to a provider that files ~1,600 per-event
+    // listings under a group named "ESPN+": searching "espn" matched all
+    // of them, and no amount of typing narrowed it, because the thing to
+    // exclude was the group rather than a word.
+    function buildSearchGroupChipsHtml(key) {
+      const groups = networkSearchGroups[key] || [];
+      if (groups.length < 2) return '';   // nothing to choose between
+
+      const excluded = networkExcludedGroups[key] || new Set();
+      const chips = groups.slice(0, 12).map(g => {
+        const off = excluded.has(g.name);
+        return `<button onclick="toggleSearchGroupFilter('${key}', ${JSON.stringify(g.name).replace(/"/g, '&quot;')})"
+                        title="${off ? 'Show' : 'Hide'} ${escapeHtml(g.name)}"
+                        class="text-[10px] px-1.5 py-0.5 rounded border transition ${off
+                          ? 'border-[#c0392b]/40 bg-[#c0392b]/15 text-[#e56a6a] line-through'
+                          : 'border-[#e6e6e6]/15 bg-[#2f3e47] text-[#e6e6e6]/60 hover:text-[#e6e6e6]'}">
+                  ${escapeHtml(g.name)} <span class="opacity-60">${g.count}</span>
+                </button>`;
+      }).join('');
+
+      return `<div class="flex flex-wrap gap-1 mt-1">
+                <span class="text-[10px] text-[#e6e6e6]/35 self-center mr-1">Groups:</span>${chips}
+              </div>`;
+    }
+
+    function toggleSearchGroupFilter(key, groupName) {
+      if (!networkExcludedGroups[key]) networkExcludedGroups[key] = new Set();
+      const set = networkExcludedGroups[key];
+      if (set.has(groupName)) set.delete(groupName); else set.add(groupName);
+      // Re-run the search so the server applies the exclusion; the chips
+      // themselves come back with it, keeping counts honest.
+      searchNetworkChannels(key);
     }
 
     // The search-side quality button, rendered OUTSIDE the results list.
@@ -2834,8 +2882,11 @@
         const html = buildSearchResultsHtml(key);
         box.innerHTML = html || '<div class="text-[10px] text-[#e6e6e6]/40 italic px-3 py-1.5">No channels matched.</div>';
       }
-      // The button lives outside the scroll box now, so it needs updating
-      // separately - its label depends on the same state as the list.
+      // The chips and the button live outside the scroll box, so they
+      // need updating separately - both depend on the same state as the
+      // list they sit around.
+      const chips = document.getElementById(`network-groups-${key}`);
+      if (chips) chips.innerHTML = buildSearchGroupChipsHtml(key);
       const row = document.getElementById(`network-probe-row-${key}`);
       if (row) row.innerHTML = buildSearchProbeButtonHtml(key);
     }

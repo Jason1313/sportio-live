@@ -2034,8 +2034,17 @@ app.post('/api/networks/search', async (req, res) => {
     return res.status(400).json({ error: 'Enter at least 2 characters to search.' });
   }
 
-  const results = networks.searchChannels(query, auth.source.channels, 50);
-  return res.json({ success: true, channels: results, truncated: results.length >= 50 });
+  // excludeGroups lets the page hide whole playlist groups from the
+  // results - the practical answer to a provider that files 1,600
+  // per-event listings under a group named after a real channel.
+  const excludeGroups = Array.isArray(req.body.excludeGroups)
+    ? req.body.excludeGroups.filter(g => typeof g === 'string').slice(0, 50)
+    : [];
+
+  const { channels, groups, truncated } = networks.searchChannels(
+    query, auth.source.channels, { limit: 50, excludeGroups }
+  );
+  return res.json({ success: true, channels, groups, truncated });
 });
 
 // Probes ONE stream for its resolution and frame rate. One URL per

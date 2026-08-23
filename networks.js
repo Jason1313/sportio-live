@@ -837,31 +837,104 @@ function suggestAllNetworks(channels, limit = MAX_SUGGESTIONS) {
   return out;
 }
 
-// Free-text channel search for the manual-override picker. Every token in
-// the query must appear somewhere in the name or group, so "fox phil"
-// narrows to the Philadelphia FOX affiliate rather than returning all 426
-// channels with "fox" in them.
-function searchChannels(query, channels, limit = 50) {
-  const tokens = String(query || '').toLowerCase().split(/\s+/).filter(Boolean);
-  if (tokens.length === 0) return [];
+// Splits a query into quoted phrases and loose tokens.
+//
+//   ESPN            -> tokens ['espn']
+//   "ESPN"          -> phrases ['espn']
+//   "ESPN" boston   -> phrases ['espn'], tokens ['boston']
+function parseSearchQuery(query) {
+  const phrases = [];
+  const rest = String(query || '').replace(/"([^"]*)"/g, (_, p) => {
+    const trimmed = p.trim();
+    if (trimmed) phrases.push(trimmed.toLowerCase());
+    return ' ';
+  });
+  return {
+    phrases,
+    tokens: rest.toLowerCase().split(/\s+/).filter(Boolean)
+  };
+}
 
-  const results = [];
-  for (const channel of channels || []) {
-    const haystack = `${channel.name} ${(channel.categories || []).join(' ')}`.toLowerCase();
-    if (!tokens.every(t => haystack.includes(t))) continue;
-    results.push({
-      ...makeLinkEntry({
-        url: channel.streamUrl,
-        tvgId: channel.id,
-        name: channel.name,
-        group: channel.categories?.[0] || '',
-        type: 'm3u',
-      }),
-      groups: channel.categories || [],
-    });
-    if (results.length >= limit) break;
+// A quoted phrase means the channel IS that thing, not that it mentions
+// it. Compared against the decoration-stripped name, so "ESPN" still
+// matches "ESPN [Boston] 1080p" and "ESPN (720p)" - the market and
+// quality are not part of the channel's identity - while excluding
+// "ESPN 2", "ESPN News" and "ESPN+". The raw name is checked too, so
+// quoting a full listing like "NCAAF 11: SEC NETWORK" also works.
+function matchesPhrase(channel, phrase) {
+  const target = normalizeNetworkName(phrase);
+  if (!target) return false;
+  return normalizeNetworkName(stripChannelDecorations(channel.name)) === target
+    || normalizeNetworkName(channel.name) === target;
+}
+
+// Free-text channel search for the manual-override picker.
+//
+// Returns { channels, groups, truncated }, where `groups` counts the
+// playlist groups present in the matches so the caller can offer to
+// filter them out.
+//
+// Two things stop a common word from burying the result you want:
+//
+//   - Loose tokens still match group names (so "college football" finds
+//     that bundle), but a channel matched ONLY through its group ranks
+//     below one matched by name. Searching "espn" used to return ~1,600
+//     per-event ESPN+ listings ahead of the actual ESPN channel, purely
+//     because their GROUP is called "ESPN+".
+//   - excludeGroups drops whole groups outright, which is the blunt
+//     instrument for exactly that case.
+function searchChannels(query, channels, options = {}) {
+  const { limit = 50, excludeGroups = [] } = options;
+  const { phrases, tokens } = parseSearchQuery(query);
+  if (phrases.length === 0 && tokens.length === 0) {
+    return { channels: [], groups: [], truncated: false };
   }
-  return results;
+
+  const excluded = new Set(excludeGroups);
+  const matched = [];
+  const groupCounts = new Map();
+
+  for (const channel of channels || []) {
+    if (!phrases.every(p => matchesPhrase(channel, p))) continue;
+
+    const name = String(channel.name || '').toLowerCase();
+    const groups = channel.categories || [];
+    const groupText = groups.join(' ').toLowerCase();
+
+    const inName = tokens.every(t => name.includes(t));
+    if (!inName && !tokens.every(t => `${name} ${groupText}`.includes(t))) continue;
+
+    // Counted before exclusion so a group the user has hidden still shows
+    // its chip, and can be un-hidden.
+    for (const g of groups) groupCounts.set(g, (groupCounts.get(g) || 0) + 1);
+    if (groups.some(g => excluded.has(g))) continue;
+
+    matched.push({
+      rank: inName ? 0 : 1,
+      entry: {
+        ...makeLinkEntry({
+          url: channel.streamUrl,
+          tvgId: channel.id,
+          name: channel.name,
+          group: groups[0] || '',
+          type: 'm3u',
+        }),
+        groups,
+      }
+    });
+  }
+
+  // Stable within a rank: Array.prototype.sort is stable in Node, so
+  // playlist order is preserved among equally-ranked matches.
+  matched.sort((a, b) => a.rank - b.rank);
+
+  return {
+    channels: matched.slice(0, limit).map(m => m.entry),
+    groups: [...groupCounts.entries()]
+      .map(([name, count]) => ({ name, count, excluded: excluded.has(name) }))
+      .sort((a, b) => b.count - a.count),
+    truncated: matched.length > limit
+  };
 }
 
 module.exports = {
@@ -894,4 +967,6 @@ module.exports = {
   suggestChannelsForNetwork,
   suggestAllNetworks,
   searchChannels,
+  parseSearchQuery,
+  matchesPhrase,
 };
