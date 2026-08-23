@@ -31,7 +31,7 @@ if (!ENCRYPTION_KEY_CONFIGURED) {
   console.error('The app will start, but account registration/login stay disabled until a real key is set.');
   console.error('Visit the homepage to generate one, or generate it directly with:');
   console.error("  node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"");
-  console.error('Then set it in docker-compose.yml under this service\'s environment section as:');
+  console.error('Then set it in compose.yaml under this service\'s environment section as:');
   console.error('  - ENCRYPTION_KEY=<the generated value>');
   console.error('...and restart the container - this is only read once, at startup.');
   console.error('');
@@ -292,7 +292,7 @@ let m3uSettings = loadM3uSettings();
 
 // App-managed admin credentials - lets a fresh install set an admin
 // password through the UI itself, rather than requiring a manual
-// docker-compose.yml/.env edit and restart before the admin panel is
+// compose.yaml/.env edit and restart before the admin panel is
 // usable at all. Password is bcrypt-hashed, same as regular user
 // accounts - being local-only config doesn't mean it's fine to store in
 // plaintext. ADMIN_USERNAME/ADMIN_PASSWORD env vars, if set, always take
@@ -1900,11 +1900,49 @@ app.post('/api/m3u/categories', async (req, res) => {
     // A brand-new source the scheduler hasn't completed its first fetch
     // for yet, or a genuinely failed/unreachable source - either way,
     // there's honestly nothing to show right now, not an error to hide.
+    // Triggering a refresh here means the account recovers on its own
+    // instead of waiting for the next scheduled slot.
+    warmM3uSourceInBackground(user);
     return res.json({ success: true, categories: [], notReady: true });
   }
 
   return res.json({ success: true, categories: source.categoryList });
 });
+
+// Kicks off a refresh when something needed a source and found the cache
+// empty, rather than leaving the account broken until the next scheduled
+// slot - which, on a twice-daily cadence, can be twelve hours away. A
+// failed startup fetch used to mean exactly that: categories, the
+// network-link picker and stream matching all dead until 06:00 came
+// round again.
+//
+// Fire-and-forget: the caller still gets an immediate "not ready"
+// response rather than being held for a multi-second parse. The cooldown
+// stops a dashboard that retries, or several tabs, from stacking up
+// concurrent fetches of the same 150MB file.
+const m3uWarmAttempts = new Map(); // playlistUrl -> last attempt timestamp
+const M3U_WARM_COOLDOWN_MS = 2 * 60 * 1000;
+
+function warmM3uSourceInBackground(user) {
+  const playlistUrl = user && user.m3u && user.m3u.playlistUrl;
+  const epgUrl = user && user.m3u && user.m3u.epgUrl;
+  if (!playlistUrl || !epgUrl) return;
+
+  const lastAttempt = m3uWarmAttempts.get(playlistUrl) || 0;
+  if (Date.now() - lastAttempt < M3U_WARM_COOLDOWN_MS) return;
+  m3uWarmAttempts.set(playlistUrl, Date.now());
+
+  console.log(`[M3U] Cache empty for ${playlistUrl} - starting an on-demand refresh.`);
+  m3u.refreshM3USource(playlistUrl, epgUrl, { allowEpgFailure: true })
+    .then(source => {
+      console.log(`[M3U] On-demand refresh done: ${source.channels.length} channels, EPG ${source.epgAvailable ? 'ok' : 'UNAVAILABLE'}`);
+    })
+    .catch(err => {
+      console.error(`[M3U] On-demand refresh FAILED for ${playlistUrl}: ${err.message}` +
+        (err.playlistFailed ? ` (playlist: ${err.playlistError})` : '') +
+        (err.epgFailed ? ` (epg: ${err.epgError})` : ''));
+    });
+}
 
 // Shared front half of every network-links endpoint: rate limit, verify
 // credentials, and hand back the user's parsed playlist. Factored out
@@ -1942,7 +1980,14 @@ async function authenticateForChannels(req, res) {
 
   const source = m3u.getCachedM3USource(user.m3u.playlistUrl);
   if (!source) {
-    res.status(503).json({ error: 'Your playlist has not finished importing yet. Try again in a moment.' });
+    warmM3uSourceInBackground(user);
+    // notReady distinguishes "still loading" from a real failure, so the
+    // dashboard can say which and offer a retry rather than rendering an
+    // empty picker that looks broken.
+    res.status(503).json({
+      error: 'Your playlist is still loading. This can take a minute after a restart.',
+      notReady: true
+    });
     return null;
   }
 

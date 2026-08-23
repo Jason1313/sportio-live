@@ -230,36 +230,79 @@ function getCandidateStreamsForGame(source, configuredCategoryIds, gameTimestamp
 // failure can be attributed to the correct URL - Promise.all would fail
 // fast and lose which one was actually the problem, but the wizard needs
 // to tell the user which of their two URLs is bad.
-async function fetchAndParseM3USource(playlistUrl, epgUrl) {
+// allowEpgFailure decides whether a failed EPG fetch is fatal.
+//
+// It is NOT fatal for the background refresh. The EPG is a large file
+// (150MB+ in practice) fetched over a link that can be slow or flaky, and
+// treating it as mandatory meant one slow fetch discarded the playlist
+// too - taking down category listing, the network-link picker and stream
+// matching all at once, for an account whose playlist had downloaded and
+// parsed perfectly. Almost everything here needs only the playlist; the
+// EPG adds programme text to tier matching and nothing else. Degrading to
+// "channels but no programme data" keeps the app working.
+//
+// It IS fatal for the setup wizard, which passes allowEpgFailure: false.
+// There the whole point is validating both URLs the user just typed, and
+// silently accepting a bad EPG URL would store it broken forever.
+async function fetchAndParseM3USource(playlistUrl, epgUrl, options = {}) {
+  const { allowEpgFailure = false } = options;
+
   const [playlistResult, epgResult] = await Promise.allSettled([
     axios.get(playlistUrl, { timeout: 30000, responseType: 'text', transformResponse: [d => d] }),
-    axios.get(epgUrl, { timeout: 60000, responseType: 'text', transformResponse: [d => d] })
+    // 150MB over a slow link needs more than a minute. The old 60s
+    // timeout was tight enough to fail intermittently on a healthy EPG.
+    axios.get(epgUrl, { timeout: 180000, responseType: 'text', transformResponse: [d => d] })
   ]);
 
-  if (playlistResult.status === 'rejected' || epgResult.status === 'rejected') {
+  const playlistFailed = playlistResult.status === 'rejected';
+  const epgFailed = epgResult.status === 'rejected';
+
+  // No playlist means no channels, which is unrecoverable either way.
+  if (playlistFailed || (epgFailed && !allowEpgFailure)) {
     const err = new Error('Failed to fetch M3U source');
-    err.playlistFailed = playlistResult.status === 'rejected';
-    err.epgFailed = epgResult.status === 'rejected';
-    err.playlistError = playlistResult.status === 'rejected' ? playlistResult.reason.message : null;
-    err.epgError = epgResult.status === 'rejected' ? epgResult.reason.message : null;
+    err.playlistFailed = playlistFailed;
+    err.epgFailed = epgFailed;
+    err.playlistError = playlistFailed ? playlistResult.reason.message : null;
+    err.epgError = epgFailed ? epgResult.reason.message : null;
     throw err;
   }
 
-  const { channels, categoryList } = parseM3UPlaylist(playlistResult.value.data);
+  const playlistText = playlistResult.value.data;
+  const { channels, categoryList } = parseM3UPlaylist(playlistText);
   if (channels.length === 0) {
-    const err = new Error('Playlist parsed but contained no usable channels');
+    // File-sharing hosts (Google Drive in particular) answer 200 OK with
+    // an HTML quota/consent page rather than the file when they're
+    // throttling. That arrives as a perfectly successful HTTP response
+    // containing no #EXTINF lines, and "contained no usable channels" is
+    // a misleading way to describe it - the playlist is fine, the host
+    // just didn't serve it. Naming the real cause saves a long hunt.
+    const head = String(playlistText || '').slice(0, 500).toLowerCase();
+    const looksLikeHtml = head.includes('<html') || head.includes('<!doctype html');
+    const err = new Error(looksLikeHtml
+      ? 'Host returned an HTML page instead of the playlist (usually a download quota or consent interstitial, common with Google Drive links)'
+      : 'Playlist parsed but contained no usable channels');
     err.playlistFailed = true;
     err.epgFailed = false;
     throw err;
   }
 
+  if (epgFailed) {
+    console.error(`[M3U] EPG failed for ${playlistUrl} (${epgResult.reason.message}) - continuing with playlist only. Channel-name matching still works; programme-text matching does not.`);
+  }
+
   const relevantIds = new Set(channels.map(c => c.id));
-  const programmesByChannel = parseXMLTVEpg(epgResult.value.data, relevantIds);
+  const programmesByChannel = epgFailed
+    ? new Map()
+    : parseXMLTVEpg(epgResult.value.data, relevantIds);
 
   return {
     channels,
     categoryList,
     programmesByChannel,
+    // Lets callers tell "no programme data because the EPG failed" apart
+    // from "no programme data for this channel", which look identical
+    // downstream otherwise.
+    epgAvailable: !epgFailed,
     fetchedAt: Date.now()
   };
 }
@@ -278,8 +321,8 @@ async function fetchAndParseM3USource(playlistUrl, epgUrl) {
 // parse produced, independent of how the refresh was triggered.
 const m3uSourceCache = new Map(); // playlistUrl -> parsed source result
 
-async function refreshM3USource(playlistUrl, epgUrl) {
-  const parsed = await fetchAndParseM3USource(playlistUrl, epgUrl);
+async function refreshM3USource(playlistUrl, epgUrl, options = {}) {
+  const parsed = await fetchAndParseM3USource(playlistUrl, epgUrl, options);
   m3uSourceCache.set(playlistUrl, parsed);
   return parsed;
 }
@@ -368,17 +411,37 @@ async function refreshAllM3USources(getActiveSources) {
   }
 
   const results = await Promise.allSettled(
-    [...uniqueByPlaylistUrl.values()].map(({ playlistUrl, epgUrl }) => refreshM3USource(playlistUrl, epgUrl))
+    // allowEpgFailure: a background refresh should never throw away a
+    // good playlist because the EPG was slow - see fetchAndParseM3USource.
+    [...uniqueByPlaylistUrl.values()].map(({ playlistUrl, epgUrl }) =>
+      refreshM3USource(playlistUrl, epgUrl, { allowEpgFailure: true }))
   );
+
+  let succeeded = 0;
+  let failed = 0;
 
   results.forEach((result, i) => {
     const { playlistUrl } = [...uniqueByPlaylistUrl.values()][i];
     if (result.status === 'rejected') {
-      console.error(`[M3U scheduler] Failed to refresh source ${playlistUrl}:`, result.reason.message);
+      failed++;
+      // The bare message is always "Failed to fetch M3U source", which
+      // says nothing about which URL broke or why. The reason object
+      // carries that detail, so spell it out - a failure here takes the
+      // whole account offline and "Failed to fetch" is not enough to act
+      // on.
+      const err = result.reason;
+      const detail = [
+        err.playlistFailed ? `playlist: ${err.playlistError || 'failed'}` : null,
+        err.epgFailed ? `epg: ${err.epgError || 'failed'}` : null,
+      ].filter(Boolean).join('; ');
+      console.error(`[M3U scheduler] Failed to refresh source ${playlistUrl}: ${err.message}${detail ? ` (${detail})` : ''}`);
     } else {
-      console.log(`[M3U scheduler] Refreshed ${playlistUrl}: ${result.value.channels.length} channels, ${result.value.categoryList.length} categories`);
+      succeeded++;
+      console.log(`[M3U scheduler] Refreshed ${playlistUrl}: ${result.value.channels.length} channels, ${result.value.categoryList.length} categories, EPG ${result.value.epgAvailable ? 'ok' : 'UNAVAILABLE'}`);
     }
   });
+
+  return { total: uniqueByPlaylistUrl.size, succeeded, failed };
 }
 
 // Starts the self-rescheduling background refresh loop. Fetches
@@ -391,9 +454,38 @@ async function refreshAllM3USources(getActiveSources) {
 // live (not a snapshot taken once at startup), for exactly this reason.
 let schedulerTimeoutHandle = null;
 
+// Retry schedule used when a refresh cycle fails outright. Doubling from
+// 2 minutes up to a 30-minute ceiling: quick enough that a transient host
+// error recovers in minutes, slow enough not to hammer a provider that is
+// rate-limiting us - which is the most likely cause of a fast failure in
+// the first place.
+const RETRY_BASE_MS = 2 * 60 * 1000;
+const RETRY_MAX_MS = 30 * 60 * 1000;
+
 function startM3uScheduler(getActiveSources, getSettings) {
+  let consecutiveFailures = 0;
+
   async function runAndReschedule() {
-    await refreshAllM3USources(getActiveSources);
+    const result = await refreshAllM3USources(getActiveSources);
+
+    // Every source failed and there was at least one to fetch. Waiting
+    // for the next scheduled slot would leave the account with an empty
+    // cache - no categories, no channel picker, and no streams at all -
+    // for up to twelve hours on a twice-daily cadence. Observed exactly
+    // that: a boot-time failure at 23:06 with the next slot at 10:00.
+    //
+    // A source that fails now keeps whatever it last parsed, so this only
+    // matters when the cache is cold. It is still worth retrying either
+    // way, since stale data is worse than fresh.
+    if (result.total > 0 && result.succeeded === 0) {
+      consecutiveFailures++;
+      const delay = Math.min(RETRY_BASE_MS * Math.pow(2, consecutiveFailures - 1), RETRY_MAX_MS);
+      console.error(`[M3U scheduler] All ${result.total} source(s) failed (attempt ${consecutiveFailures}). Retrying in ${(delay / 60000).toFixed(1)} minutes.`);
+      schedulerTimeoutHandle = setTimeout(runAndReschedule, delay);
+      return;
+    }
+    consecutiveFailures = 0;
+
     const { daysOfWeek, times, timeZone } = getSettings();
     const nextRun = computeNextScheduledRun(daysOfWeek, times, timeZone);
     if (!nextRun) {

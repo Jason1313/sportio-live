@@ -82,7 +82,7 @@ Every account has its own configured timezone with the actual date and time bake
 
 ### HTTPS
 
-Sportio Live doesn't handle TLS itself. Running it behind a reverse proxy (Nginx Proxy Manager, Caddy, Traefik) with a real certificate is strongly recommended, since IPTV credentials pass through the wizard and dashboard. If your proxy shares a Docker network with other containers, make sure Sportio Live joins that same network in `docker-compose.yml`.
+Sportio Live doesn't handle TLS itself. Running it behind a reverse proxy (Nginx Proxy Manager, Caddy, Traefik) with a real certificate is strongly recommended, since IPTV credentials pass through the wizard and dashboard. If your proxy shares a Docker network with other containers, make sure Sportio Live joins that same network in `compose.yaml`.
 
 ---
 
