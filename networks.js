@@ -498,67 +498,22 @@ function buildStreamList({ sportKey, networkKey, linkStreams, tierStreams }) {
 }
 
 // ---------------------------------------------------------------------
-// Per-sport link ordering
+// Link ordering
 // ---------------------------------------------------------------------
-
-// Providers bundle the same network feed into sport-specific groups, so a
-// single saved list can contain both "NCAAF 05: CBS" (from the College
-// Football bundle) and "CBS [Minnesota] 1080p" (from NFL Sunday Ticket).
-// Which of those should come first genuinely depends on the sport being
-// watched, and one global ordering can't be right for both.
 //
-// This reorders at request time rather than making the user maintain a
-// separate list per sport. It is safe to do precisely because these are
-// the same underlying channels: the provider's "NCAAF 01" feed was
-// confirmed to share a stream URL with its plain "ESPN" listing. So the
-// bundle label is a hint about intent, never a restriction on content -
-// no link becomes unplayable for the "wrong" sport, it just sorts lower.
-const SPORT_GROUP_HINTS = {
-  NCAAFB: [/college football/i, /\bncaaf\b/i, /\bcfb\b/i],
-  NFL: [/nfl sunday ticket/i, /\bnfl\b/i],
-  UFC: [/\bufc\b/i, /fight pass/i, /\bmma\b/i],
-};
-
-// +40 for the sport's own bundle, -10 for a different sport's bundle,
-// 0 for a general listing. The negative is deliberately small: a college
-// football feed carrying an NFL game is mildly less likely to be what you
-// want, not wrong.
-function sportAffinity(link, sportKey) {
-  const sport = String(sportKey || '').toUpperCase();
-  const ownHints = SPORT_GROUP_HINTS[sport];
-
-  // No hints for this sport means no basis to reorder. Returning 0 for
-  // everything leaves the user's own ordering completely intact, which is
-  // the only defensible answer here - scoring the "other sport" penalty
-  // without a matching bonus to balance it would quietly demote every
-  // bundle-labelled feed and promote whatever generic listing happened to
-  // be saved, reordering on the basis of sports the user isn't watching.
-  if (!ownHints) return 0;
-
-  const haystack = `${link.name || ''} ${link.group || ''} ${(link.groups || []).join(' ')}`;
-
-  if (ownHints.some(re => re.test(haystack))) return 40;
-
-  for (const [otherSport, hints] of Object.entries(SPORT_GROUP_HINTS)) {
-    if (otherSport === sport) continue;
-    if (hints.some(re => re.test(haystack))) return -10;
-  }
-  return 0;
-}
-
-// Sorts by sport affinity first, then by the user's own slot order.
+// There is deliberately no reordering. Links are served in exactly the
+// order the user arranged them in the dashboard, for every sport and for
+// the TV Networks catalog alike.
 //
-// The user's ordering is preserved WITHIN each affinity band rather than
-// discarded - so their explicit preference still decides between two
-// equally-relevant feeds, and affinity only decides between bands. The
-// x10 weighting guarantees affinity dominates slot number, since slots
-// only ever run 1..5.
-function orderLinksForSport(links, sportKey) {
-  return [...(links || [])]
-    .map((link, index) => ({ link, index, affinity: sportAffinity(link, sportKey) }))
-    .sort((a, b) => (b.affinity - a.affinity) * 10 || a.index - b.index)
-    .map(({ link, affinity }) => ({ ...link, sportAffinity: affinity }));
-}
+// A per-sport reorder used to live here: it scored each link on whether
+// its playlist group matched the sport being watched, so an NFL game
+// preferred a network's "NFL Sunday Ticket" feed over its general one.
+// The logic was sound and the outcome still wrong - a hand-curated,
+// deliberately ordered, quality-checked list already encodes the
+// preference, and reordering it meant slot 1 in the dashboard appeared
+// sixth in the stream list with no explanation. Predictability beat
+// cleverness here.
+
 
 // ---------------------------------------------------------------------
 // Channel suggestion
@@ -927,8 +882,6 @@ module.exports = {
   COMBINE_AT_OR_BELOW,
   needsTiers,
   isDeadChannel,
-  sportAffinity,
-  orderLinksForSport,
   getEventNetworkForSport,
   getLinkPolicy,
   dedupeByUrl,

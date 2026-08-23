@@ -2920,7 +2920,15 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     // Reordered for this specific sport, so a college-football game
     // prefers the CFB bundle feed and an NFL game prefers the Sunday
     // Ticket one - from the same single saved list.
-    linkStreams = networks.orderLinksForSport(resolved, sportKey).map(link => ({
+    // The user's own slot order, unchanged. There used to be a per-sport
+    // reorder here that floated a network's sport-specific feeds to the
+    // top - an NFL game preferring the Sunday Ticket copy of FOX over the
+    // TV Guide one. It worked as designed and was still wrong: once the
+    // list is curated by hand, ordered deliberately and quality-checked,
+    // the order IS the preference, and silently overriding it meant the
+    // channel sitting at slot 1 in the dashboard showed up sixth for a
+    // game. Same list, same order, everywhere.
+    linkStreams = resolved.map(link => ({
       name: link.name,
       title: buildLinkTitle(networkKey, link),
       url: link.url

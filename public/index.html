@@ -1956,7 +1956,27 @@
       networkSuggestions = (suggestRes.body && suggestRes.body.suggestions) || {};
       networkStatus = (statusRes.body && statusRes.body.status) || {};
       autoFillNetworkSuggestions();
+      seedProbeResultsFromSavedLinks();
       renderNetworkLinks();
+    }
+
+    // Restores quality badges for links already measured in a previous
+    // session. The measurement is saved on the link, but probeResults only
+    // holds what was checked since this page loaded - so after logging back
+    // in every badge was blank until each channel was re-checked, even
+    // though Stremio was happily showing the stored value.
+    //
+    // Marked `persisted` so the UI can tell a stored reading from one taken
+    // just now; it does NOT mark the dashboard dirty, since nothing changed.
+    function seedProbeResultsFromSavedLinks() {
+      for (const links of Object.values((activeUser && activeUser.networkLinks) || {})) {
+        if (!Array.isArray(links)) continue;
+        for (const link of links) {
+          if (link.probedQuality && !probeResults[link.url]) {
+            probeResults[link.url] = { label: link.probedQuality, persisted: true };
+          }
+        }
+      }
     }
 
     function renderNetworkNotReady(message) {
@@ -2147,13 +2167,20 @@
       const pending = links.filter(l => !probeResults[l.url]).length;
       const failedCount = links.filter(l => probeResults[l.url] && probeResults[l.url].error).length;
       const outstanding = pending + failedCount;
-      const disabled = probeInProgress || outstanding === 0;
-      const label = outstanding === 0
-        ? 'All checked'
+      // Never a dead end. Once everything has a reading the button offers
+      // to take them again rather than going disabled - a saved
+      // resolution can be months old, and there was previously no way to
+      // ask for a fresh one.
+      const allChecked = outstanding === 0;
+      const label = allChecked
+        ? `Re-check all (${links.length})`
         : (pending === 0 ? `Retry ${failedCount} failed` : `Check quality (${outstanding})`);
+      const call = allChecked
+        ? `probeSavedLinks('${key}', { force: true })`
+        : `probeSavedLinks('${key}')`;
       const savedProbeBtn = links.length === 0 ? '' : `
-        <button id="network-saved-probe-btn-${key}" onclick="probeSavedLinks('${key}')" ${disabled ? 'disabled' : ''}
-                class="text-[11px] font-bold transition ${disabled ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd]'}">
+        <button id="network-saved-probe-btn-${key}" onclick="${call}" ${probeInProgress ? 'disabled' : ''}
+                class="text-[11px] font-bold transition ${probeInProgress ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd]'}">
           <i class="fa-solid fa-gauge-high mr-1"></i>${label}
         </button>`;
 
@@ -2214,6 +2241,7 @@
                      placeholder="Search your playlist to add a channel..."
                      class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
               <div id="network-results-${key}" class="mt-1 max-h-48 overflow-y-auto">${resultRows}</div>
+              <div id="network-probe-row-${key}" class="mt-1">${buildSearchProbeButtonHtml(key)}</div>
             </div>
             <div class="flex gap-2 pt-1">
               <input type="text" id="network-paste-${key}"
@@ -2412,20 +2440,25 @@
       if (probed.checking) {
         return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#3b8fc4]/25 text-[#5aa8d1]"><i class="fa-solid fa-spinner fa-spin"></i></span>`;
       }
+      // EVERY result is clickable to re-check, not just failures. A
+      // successful reading goes stale too - the provider can re-encode a
+      // channel at any time - and once a badge showed a resolution there
+      // was previously no way to ask again. onclick stops propagation so
+      // re-checking doesn't also add the channel to the network, which is
+      // what the surrounding button does.
+      const retry = `event.stopPropagation(); retryOneProbe('${key}', '${escapeHtml(url)}')`;
+
       if (probed.error) {
-        // Clickable: a failure is usually a busy connection slot rather
-        // than a bad stream, so retrying one channel needs to be a single
-        // click and not a re-run of the whole batch. onclick stops
-        // propagation so retrying doesn't also add the channel to the
-        // network, which is what the surrounding button does.
-        return `<span onclick="event.stopPropagation(); retryOneProbe('${key}', '${escapeHtml(url)}')"
+        return `<span onclick="${retry}"
                       class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#c0392b]/25 text-[#e56a6a] hover:bg-[#c0392b]/40 cursor-pointer"
-                      title="${escapeHtml(probed.error)} - click to retry">failed &#8635;</span>`;
+                      title="${escapeHtml(probed.error)} - click to re-check">failed &#8635;</span>`;
       }
-      return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#4a9d52]/25 text-[#7fc98a]">${escapeHtml(probed.label)}</span>`;
+      return `<span onclick="${retry}"
+                    class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#4a9d52]/25 text-[#7fc98a] hover:bg-[#4a9d52]/40 cursor-pointer"
+                    title="${probed.persisted ? 'Saved from an earlier check' : 'Measured just now'} - click to re-check">${escapeHtml(probed.label)}</span>`;
     }
 
-    async function probeSearchResults(key) {
+    async function probeSearchResults(key, options = {}) {
       if (probeInProgress) {
         showStatus('A quality check is already running.', true);
         return;
@@ -2446,19 +2479,25 @@
         return;
       }
 
-      // Channels that already returned a resolution are skipped entirely -
-      // no request at all. Ones that FAILED are re-probed with force, so
-      // clicking again is how you retry: a failure usually means the
-      // provider's connection limit was busy at that moment, not that the
-      // stream is bad, and without this a transient failure would be
-      // permanent for the session.
-      const toProbe = results.filter(c => {
+      // What gets probed depends on how explicit the request was.
+      //
+      // An EXPLICIT target - channels the user ticked, or a click when
+      // everything is already checked - re-checks everything in it,
+      // forcing past cached results. That is the only reading of "check
+      // these" that makes sense, and without it a channel could never be
+      // measured a second time.
+      //
+      // Otherwise the default is the cheap one: skip anything that already
+      // returned a resolution, and re-probe only failures. That keeps a
+      // routine click from opening connections it doesn't need.
+      const explicit = selected.size > 0 || !!options.force;
+      const toProbe = explicit ? results : results.filter(c => {
         const prior = probeResults[c.url];
         return !prior || prior.error;
       });
 
       if (toProbe.length === 0) {
-        showStatus('All of these have already been checked.');
+        showStatus('All of these have already been checked - tick them, or use Re-check all.');
         return;
       }
 
@@ -2468,7 +2507,7 @@
       try {
         for (let i = 0; i < toProbe.length; i++) {
           const channel = toProbe[i];
-          const isRetry = !!(probeResults[channel.url] && probeResults[channel.url].error);
+          const isRetry = !!probeResults[channel.url];
           if (button) {
             button.disabled = true;
             button.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-1.5"></i>Checking ${i + 1} of ${toProbe.length}...`;
@@ -2554,7 +2593,7 @@
     // No result cap is needed here the way it is for search - a network
     // holds at most MAX_LINKS_PER_NETWORK links, which is already below
     // PROBE_MAX_RESULTS.
-    async function probeSavedLinks(key) {
+    async function probeSavedLinks(key, options = {}) {
       if (probeInProgress) {
         showStatus('A quality check is already running.', true);
         return;
@@ -2562,7 +2601,9 @@
       const links = readNetworkLinks(key);
       if (links.length === 0) return;
 
-      const toProbe = links.filter(l => {
+      // force re-checks everything, which is what the button offers once
+      // nothing is outstanding - see buildNetworkActionsHtml.
+      const toProbe = options.force ? links : links.filter(l => {
         const prior = probeResults[l.url];
         return !prior || prior.error;
       });
@@ -2577,7 +2618,7 @@
       try {
         for (let i = 0; i < toProbe.length; i++) {
           const link = toProbe[i];
-          const isRetry = !!(probeResults[link.url] && probeResults[link.url].error);
+          const isRetry = !!probeResults[link.url];
           if (button) {
             button.disabled = true;
             button.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-1.5"></i>Checking ${i + 1} of ${toProbe.length}...`;
@@ -2744,40 +2785,59 @@
               </button>
             </div>`).join('');
 
-      // Probing is offered only when the result set is small enough to
-      // check without a long run of connections to the provider.
-      // What a click would actually probe: the ticked channels if any are
-      // ticked, otherwise everything. Successes are skipped, so the count
-      // reflects only outstanding work - offering to "check 20" when 18
-      // are already done would misrepresent both how long it takes and
-      // how many connections it opens.
-      const target = selected.size > 0 ? results.filter(c => selected.has(c.url)) : results;
-      const tooMany = target.length > PROBE_MAX_RESULTS;
+      return rows;
+    }
+
+    // The search-side quality button, rendered OUTSIDE the results list.
+    //
+    // It used to be the last row inside the scrolling box, so on a long
+    // result set it scrolled out of sight - the control for acting on the
+    // list was hidden by the list itself.
+    function buildSearchProbeButtonHtml(key) {
+      const all = networkSearchResults[key] || [];
+      if (all.length === 0) return '';
+
+      const selected = probeSelection[key] || new Set();
+      const target = selected.size > 0 ? all.filter(c => selected.has(c.url)) : all;
+
+      if (target.length > PROBE_MAX_RESULTS) {
+        return `<div class="text-[10px] text-[#e6e6e6]/40 italic px-3 py-1.5 text-center">${target.length} to check - tick the ones you want, or narrow to ${PROBE_MAX_RESULTS} or fewer.</div>`;
+      }
+
       const pending = target.filter(c => !probeResults[c.url]).length;
       const failedCount = target.filter(c => probeResults[c.url] && probeResults[c.url].error).length;
       const outstanding = pending + failedCount;
 
-      const scope = selected.size > 0 ? `${selected.size} selected` : `${target.length}`;
-      const buttonLabel = outstanding === 0
-        ? (selected.size > 0 ? 'Selected already checked' : 'All checked')
-        : (pending === 0 ? `Retry ${failedCount} failed` : `Check quality (${scope})`);
-      const disabled = probeInProgress || outstanding === 0;
+      // A ticked selection always means "check these", even if they all
+      // already have a reading - that is the whole point of ticking them.
+      let label, call;
+      if (selected.size > 0) {
+        label = `Check ${selected.size} selected`;
+        call = `probeSearchResults('${key}')`;
+      } else if (outstanding === 0) {
+        label = `Re-check all (${target.length})`;
+        call = `probeSearchResults('${key}', { force: true })`;
+      } else {
+        label = pending === 0 ? `Retry ${failedCount} failed` : `Check quality (${outstanding})`;
+        call = `probeSearchResults('${key}')`;
+      }
 
-      const probeRow = tooMany
-        ? `<div class="text-[10px] text-[#e6e6e6]/40 italic px-3 py-1.5">${target.length} to check - tick the ones you want, or narrow to ${PROBE_MAX_RESULTS} or fewer.</div>`
-        : `<button id="network-probe-btn-${key}" onclick="probeSearchResults('${key}')" ${disabled ? 'disabled' : ''}
-                   class="w-full text-[11px] font-bold py-1.5 rounded transition ${disabled ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd] hover:bg-[#3b4d58]'}">
-             <i class="fa-solid fa-gauge-high mr-1.5"></i>${buttonLabel}
-           </button>`;
-
-      return rows + probeRow;
+      return `<button id="network-probe-btn-${key}" onclick="${call}" ${probeInProgress ? 'disabled' : ''}
+                      class="w-full text-[11px] font-bold py-1.5 rounded transition ${probeInProgress ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd] hover:bg-[#3b4d58]'}">
+                <i class="fa-solid fa-gauge-high mr-1.5"></i>${label}
+              </button>`;
     }
 
     function renderNetworkSearchResults(key) {
       const box = document.getElementById(`network-results-${key}`);
-      if (!box) return;
-      const html = buildSearchResultsHtml(key);
-      box.innerHTML = html || '<div class="text-[10px] text-[#e6e6e6]/40 italic px-3 py-1.5">No channels matched.</div>';
+      if (box) {
+        const html = buildSearchResultsHtml(key);
+        box.innerHTML = html || '<div class="text-[10px] text-[#e6e6e6]/40 italic px-3 py-1.5">No channels matched.</div>';
+      }
+      // The button lives outside the scroll box now, so it needs updating
+      // separately - its label depends on the same state as the list.
+      const row = document.getElementById(`network-probe-row-${key}`);
+      if (row) row.innerHTML = buildSearchProbeButtonHtml(key);
     }
 
     function renderSportsConfig() {
