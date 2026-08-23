@@ -2705,8 +2705,13 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     }));
   }
 
-  // Tier results are only reachable when they can actually be used.
-  const skipTiers = networks.getLinkPolicy(sportKey) === 'replace' && linkStreams.length > 0;
+  // Tier results are only computed when they can actually be used. The
+  // decision lives in networks.needsTiers so it cannot drift from
+  // buildStreamList - a short link list now wants the tiers as a backstop,
+  // where previously any links at all suppressed them.
+  const skipTiers = !networks.needsTiers({
+    sportKey, networkKey, linkCount: linkStreams.length
+  });
 
   // Normalizes both sources into the same {name, description,
   // startTimestamp, streamUrl, categoryLabel} shape, so every bit of

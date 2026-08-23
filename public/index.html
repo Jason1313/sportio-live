@@ -2047,7 +2047,14 @@
     function buildNetworkLinkRow(key, link, index, total) {
       const status = networkStatus[key] || {};
       const healed = (status.healed || []).find(h => h.slot === index + 1);
-      const quality = link.quality ? `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#3b8fc4]/25 text-[#5aa8d1]">${escapeHtml(link.quality)}</span>` : '';
+      // A probed result is a measurement; link.quality is only what the
+      // channel's NAME claimed. When both exist the measurement wins, and
+      // it carries the frame rate the name never does - "1080p60" rather
+      // than "1080p".
+      const probedBadge = renderProbeBadge(key, link.url, false);
+      const quality = probedBadge || (link.quality
+        ? `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#3b8fc4]/25 text-[#5aa8d1]">${escapeHtml(link.quality)}</span>`
+        : '');
       const healedNote = healed
         ? `<div class="text-[10px] text-[#c9992e] mt-0.5"><i class="fa-solid fa-wrench mr-1"></i>Channel moved - relinked automatically (${escapeHtml(healed.note)})</div>`
         : '';
@@ -2280,7 +2287,20 @@
     let probeResults = {};
     let probeInProgress = false;
 
-    function renderProbeBadge(key, url) {
+    // key -> Set of URLs ticked for checking. Lets a specific few channels
+    // be probed out of a large result set, which matters because each
+    // probe competes with your own playback for a provider connection
+    // slot - checking 3 of 18 is 3 connections, not 18.
+    let probeSelection = {};
+
+    function toggleProbeSelection(key, url) {
+      if (!probeSelection[key]) probeSelection[key] = new Set();
+      const set = probeSelection[key];
+      if (set.has(url)) set.delete(url); else set.add(url);
+      renderNetworkSearchResults(key);
+    }
+
+    function renderProbeBadge(key, url, interactive) {
       const probed = probeResults[url];
       if (!probed) return '';
       if (probed.checking) {
@@ -2292,6 +2312,12 @@
         // click and not a re-run of the whole batch. onclick stops
         // propagation so retrying doesn't also add the channel to the
         // network, which is what the surrounding button does.
+        // Retry is offered only in the search list. On a saved-link row
+        // it would re-render the search results instead - a control that
+        // appears to do nothing where you clicked it.
+        if (!interactive) {
+          return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#c0392b]/25 text-[#e56a6a]" title="${escapeHtml(probed.error)}">failed</span>`;
+        }
         return `<span onclick="event.stopPropagation(); retryOneProbe('${key}', '${escapeHtml(url)}')"
                       class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#c0392b]/25 text-[#e56a6a] hover:bg-[#c0392b]/40 cursor-pointer"
                       title="${escapeHtml(probed.error)} - click to retry">failed &#8635;</span>`;
@@ -2304,10 +2330,19 @@
         showStatus('A quality check is already running.', true);
         return;
       }
-      const results = networkSearchResults[key] || [];
-      if (results.length === 0) return;
+      const all = networkSearchResults[key] || [];
+      if (all.length === 0) return;
+
+      // Ticked channels only, when any are ticked. That's the point of the
+      // checkboxes: a broad search can be left broad, and only the two or
+      // three candidates worth comparing get probed. With nothing ticked
+      // it falls back to the whole result set, which is where the cap
+      // matters.
+      const selected = probeSelection[key] || new Set();
+      const results = selected.size > 0 ? all.filter(c => selected.has(c.url)) : all;
+
       if (results.length > PROBE_MAX_RESULTS) {
-        showStatus(`${results.length} channels matched - narrow your search to ${PROBE_MAX_RESULTS} or fewer to check quality.`, true);
+        showStatus(`${results.length} channels matched - tick the ones you want, or narrow your search to ${PROBE_MAX_RESULTS} or fewer.`, true);
         return;
       }
 
@@ -2498,36 +2533,50 @@
       const results = networkSearchResults[key] || [];
       if (results.length === 0) return '';
 
+      // Row is a container rather than one big button, because it now has
+      // two independent targets: the checkbox marks a channel for quality
+      // checking, the rest of the row adds it to the network. Nesting a
+      // checkbox inside a button would make every tick also add the link.
+      const selected = probeSelection[key] || new Set();
       const rows = results.map((c, i) => `
-            <button onclick="addNetworkLink('${key}', ${i})" class="w-full text-left flex items-center gap-2 px-3 py-1.5 hover:bg-[#3b4d58] rounded transition">
-              <i class="fa-solid fa-plus text-[10px] text-[#5aa8d1] shrink-0"></i>
-              <span class="flex-1 min-w-0">
-                <span class="flex items-center gap-2">
-                  <span class="text-xs truncate">${escapeHtml(c.name)}</span>
-                  ${renderProbeBadge(key, c.url)}
+            <div class="flex items-center gap-2 px-2 py-1.5 hover:bg-[#3b4d58] rounded transition">
+              <input type="checkbox" ${selected.has(c.url) ? 'checked' : ''}
+                     onchange="toggleProbeSelection('${key}', '${escapeHtml(c.url)}')"
+                     title="Select for quality check"
+                     class="shrink-0 accent-[#3b8fc4] cursor-pointer">
+              <button onclick="addNetworkLink('${key}', ${i})" class="flex-1 min-w-0 text-left flex items-center gap-2">
+                <i class="fa-solid fa-plus text-[10px] text-[#5aa8d1] shrink-0"></i>
+                <span class="flex-1 min-w-0">
+                  <span class="flex items-center gap-2">
+                    <span class="text-xs truncate">${escapeHtml(c.name)}</span>
+                    ${renderProbeBadge(key, c.url, true)}
+                  </span>
+                  <span class="block text-[10px] text-[#e6e6e6]/45 truncate"><span class="font-mono text-[#5aa8d1]/70">#${escapeHtml(streamIdFromUrl(c.url))}</span> &middot; ${escapeHtml((c.groups || []).join(' | '))}</span>
                 </span>
-                <span class="block text-[10px] text-[#e6e6e6]/45 truncate"><span class="font-mono text-[#5aa8d1]/70">#${escapeHtml(streamIdFromUrl(c.url))}</span> &middot; ${escapeHtml((c.groups || []).join(' | '))}</span>
-              </span>
-            </button>`).join('');
+              </button>
+            </div>`).join('');
 
       // Probing is offered only when the result set is small enough to
       // check without a long run of connections to the provider.
-      const tooMany = results.length > PROBE_MAX_RESULTS;
-
-      // Count what a click would actually do. Successes are kept, so the
-      // button reflects only the outstanding work - offering to "check
-      // 20" when 18 are already done would be a lie about how long it
-      // takes and how many connections it opens.
-      const pending = results.filter(c => !probeResults[c.url]).length;
-      const failedCount = results.filter(c => probeResults[c.url] && probeResults[c.url].error).length;
+      // What a click would actually probe: the ticked channels if any are
+      // ticked, otherwise everything. Successes are skipped, so the count
+      // reflects only outstanding work - offering to "check 20" when 18
+      // are already done would misrepresent both how long it takes and
+      // how many connections it opens.
+      const target = selected.size > 0 ? results.filter(c => selected.has(c.url)) : results;
+      const tooMany = target.length > PROBE_MAX_RESULTS;
+      const pending = target.filter(c => !probeResults[c.url]).length;
+      const failedCount = target.filter(c => probeResults[c.url] && probeResults[c.url].error).length;
       const outstanding = pending + failedCount;
+
+      const scope = selected.size > 0 ? `${selected.size} selected` : `${target.length}`;
       const buttonLabel = outstanding === 0
-        ? 'All checked'
-        : (pending === 0 ? `Retry ${failedCount} failed` : `Check quality (${outstanding})`);
+        ? (selected.size > 0 ? 'Selected already checked' : 'All checked')
+        : (pending === 0 ? `Retry ${failedCount} failed` : `Check quality (${scope})`);
       const disabled = probeInProgress || outstanding === 0;
 
       const probeRow = tooMany
-        ? `<div class="text-[10px] text-[#e6e6e6]/40 italic px-3 py-1.5">${results.length} matches - narrow to ${PROBE_MAX_RESULTS} or fewer to check quality.</div>`
+        ? `<div class="text-[10px] text-[#e6e6e6]/40 italic px-3 py-1.5">${target.length} to check - tick the ones you want, or narrow to ${PROBE_MAX_RESULTS} or fewer.</div>`
         : `<button id="network-probe-btn-${key}" onclick="probeSearchResults('${key}')" ${disabled ? 'disabled' : ''}
                    class="w-full text-[11px] font-bold py-1.5 rounded transition ${disabled ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd] hover:bg-[#3b4d58]'}">
              <i class="fa-solid fa-gauge-high mr-1.5"></i>${buttonLabel}

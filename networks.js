@@ -198,7 +198,24 @@ function resolveNetworkFromCompetition(competition) {
 // Saved link storage
 // ---------------------------------------------------------------------
 
-const MAX_LINKS_PER_NETWORK = 5;
+const MAX_LINKS_PER_NETWORK = 10;
+
+// Auto-fill deliberately stops well short of the cap. The extra slots
+// exist so specific feeds can be added by hand - a particular affiliate,
+// a 1080p60 variant found by probing - not so the picker can fill ten
+// guesses. Filling all ten automatically would also silently defeat
+// COMBINE_AT_OR_BELOW below, since no network would ever sit at three or
+// fewer links.
+const MAX_SUGGESTIONS = 5;
+
+// At or below this many links, a 'replace' sport ALSO shows tier results
+// (after the links). The reasoning is coverage: a network with one or two
+// channels configured is probably not covering every situation - a
+// blacked-out affiliate, a regional split - and the search results are
+// worth having as a backstop. Once there are four or more, the list is
+// deliberate enough to stand on its own, and mixing in guesses would just
+// bury the good entries.
+const COMBINE_AT_OR_BELOW = 3;
 
 // A saved link identifies a channel by its stream URL, because that is
 // the only genuinely unique identifier a playlist offers. tvg-id is NOT
@@ -404,6 +421,20 @@ function dedupeByUrl(streams) {
   return out;
 }
 
+// Whether tier results will be used at all for this game. The stream
+// route calls this BEFORE doing the tier work, which for an Xtream
+// account means one EPG request per channel - all of it wasted if the
+// links are going to replace it. Kept next to buildStreamList because the
+// two must agree: if this says tiers aren't needed and buildStreamList
+// then asks for them, the result is a silently short stream list.
+function needsTiers({ sportKey, networkKey, linkCount }) {
+  const policy = getLinkPolicy(sportKey);
+  if (policy !== 'replace') return true;      // tiers-only and combine both use them
+  if (!networkKey) return true;               // streaming-only game
+  if (!linkCount) return true;                // no links: tiers are the fallback
+  return linkCount <= COMBINE_AT_OR_BELOW;    // short list: tiers as backstop
+}
+
 // Decides the final ordered stream list for one game.
 //
 // Returns { streams, mode, note } where mode explains which branch ran -
@@ -448,6 +479,13 @@ function buildStreamList({ sportKey, networkKey, linkStreams, tierStreams }) {
       mode: 'no-links',
       note: `No ${getNetworkLabel(networkKey)} channels configured`
     };
+  }
+
+  // A short list gets the tier results appended as a backstop - see
+  // COMBINE_AT_OR_BELOW. Links still rank first either way; the only
+  // question is whether anything follows them.
+  if (links.length <= COMBINE_AT_OR_BELOW) {
+    return { streams: dedupeByUrl([...links, ...tiers]), mode: 'links-plus-tiers', note: '' };
   }
 
   return { streams: dedupeByUrl(links), mode: 'links-only', note: '' };
@@ -802,7 +840,7 @@ const MIN_SUGGESTION_SCORE = 100;
 // networks the "right" answer is whichever market the user actually wants
 // and nothing in the playlist can reveal that. So this proposes, and the
 // user disposes.
-function suggestChannelsForNetwork(networkKey, channels, limit = MAX_LINKS_PER_NETWORK) {
+function suggestChannelsForNetwork(networkKey, channels, limit = MAX_SUGGESTIONS) {
   const network = NETWORK_BY_KEY.get(networkKey);
   if (!network) return [];
 
@@ -830,7 +868,7 @@ function suggestChannelsForNetwork(networkKey, channels, limit = MAX_LINKS_PER_N
   }));
 }
 
-function suggestAllNetworks(channels, limit = MAX_LINKS_PER_NETWORK) {
+function suggestAllNetworks(channels, limit = MAX_SUGGESTIONS) {
   const out = {};
   for (const network of NETWORKS) {
     out[network.key] = suggestChannelsForNetwork(network.key, channels, limit);
@@ -879,6 +917,9 @@ module.exports = {
   resolveNetworkLinks,
   getNetworkLabel,
   MIN_SUGGESTION_SCORE,
+  MAX_SUGGESTIONS,
+  COMBINE_AT_OR_BELOW,
+  needsTiers,
   isDeadChannel,
   sportAffinity,
   orderLinksForSport,
