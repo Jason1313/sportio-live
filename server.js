@@ -156,7 +156,11 @@ const app = express();
 // say http:// even when the public-facing site is https://.
 app.set('trust proxy', true);
 const PORT = process.env.PORT || 2323;
-const DATA_DIR = path.join(__dirname, 'data');
+// Overridable so a test run can point at a throwaway directory instead of
+// writing accounts into the real one. In Docker this is left unset and
+// resolves to ./data, which is the path compose.yaml mounts the volume at
+// - so normal deployments are unaffected.
+const DATA_DIR = process.env.SPORTIO_DATA_DIR || path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'users.json');
 const M3U_SETTINGS_FILE = path.join(DATA_DIR, 'm3u-settings.json');
 const ADMIN_CONFIG_FILE = path.join(DATA_DIR, 'admin-config.json');
@@ -2457,6 +2461,61 @@ app.post('/api/admin/user/delete', async (req, res) => {
   return res.json({ success: true });
 });
 
+// ---------------------------------------------------------------------
+// TV Networks catalog
+// ---------------------------------------------------------------------
+//
+// A browsable row of the networks the user has configured channels for,
+// independent of whether a game is on. The link lists already exist for
+// game matching; this exposes them directly, so "put ESPN on" doesn't
+// require finding a game that happens to be showing there.
+//
+// Networks with no links are omitted rather than shown empty - an entry
+// that opens to nothing is worse than no entry at all.
+function getConfiguredNetworks(user) {
+  const links = user.networkLinks || {};
+  return networks.NETWORKS
+    .filter(n => Array.isArray(links[n.key]) && links[n.key].length > 0)
+    .map(n => ({ ...n, linkCount: links[n.key].length }));
+}
+
+const NETWORKS_CATALOG_ID = 'networks';
+
+// Poster/background for a network block. Deliberately generated rather
+// than taken from the playlist's tvg-logo: those point at arbitrary
+// third-party image hosts that may be dead, rate-limited or simply wrong,
+// and a broken poster in a catalog row reads as a broken addon.
+function buildNetworkArtSvg(label, width, height) {
+  const fontSize = Math.round(Math.min(width * 0.16, height * 0.16));
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
+    <defs>
+      <radialGradient id="netBg" cx="50%" cy="45%" r="75%">
+        <stop offset="0%" stop-color="#2b3a44" />
+        <stop offset="100%" stop-color="#0b1114" />
+      </radialGradient>
+    </defs>
+    <rect width="${width}" height="${height}" fill="url(#netBg)" />
+    <text x="${width / 2}" y="${height / 2 + fontSize * 0.35}"
+          font-family="'Trebuchet MS', Verdana, sans-serif" font-size="${fontSize}"
+          font-weight="800" fill="#f8fafc" text-anchor="middle">${escapeXml(label)}</text>
+    <text x="${width / 2}" y="${height / 2 + fontSize * 1.4}"
+          font-family="'Trebuchet MS', Verdana, sans-serif" font-size="${Math.round(fontSize * 0.28)}"
+          font-weight="600" fill="#5aa8d1" text-anchor="middle" letter-spacing="3">LIVE CHANNEL</text>
+  </svg>`;
+}
+
+app.get('/network/:key/poster.svg', (req, res) => {
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.send(buildNetworkArtSvg(networks.getNetworkLabel(req.params.key), 600, 900));
+});
+
+app.get('/network/:key/background.svg', (req, res) => {
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+  res.send(buildNetworkArtSvg(networks.getNetworkLabel(req.params.key), 1920, 1080));
+});
+
 app.get('/user/:uuid/manifest.json', (req, res) => {
   const user = userConfigs[req.params.uuid];
   if (!user) return res.status(404).json({ error: 'Invalid manifest UUID' });
@@ -2500,6 +2559,17 @@ app.get('/user/:uuid/manifest.json', (req, res) => {
     name: `${getSportDisplayName(sport)} Live Games`
   }));
 
+  // Listed last so it sits below the live-game rows, which are the
+  // time-sensitive ones. Omitted entirely when nothing is configured,
+  // rather than installing a row that never fills in.
+  if (getConfiguredNetworks(user).length > 0) {
+    catalogs.push({
+      type: 'sports',
+      id: NETWORKS_CATALOG_ID,
+      name: 'TV Networks'
+    });
+  }
+
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
@@ -2521,6 +2591,25 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
   if (!user) return res.json({ metas: [] });
 
   const hostUrl = `${req.protocol}://${req.get('host')}`;
+
+  // The networks catalog is not a sport and carries no date, so it has to
+  // be handled before the sb_{sport}_{date} parsing below - which would
+  // otherwise find no sport in it and silently fall back to MLB.
+  if (req.params.id === NETWORKS_CATALOG_ID) {
+    const metas = getConfiguredNetworks(user).map(network => ({
+      id: `net:${network.key}`,
+      type: 'sports',
+      name: network.label,
+      poster: `${hostUrl}/network/${network.key}/poster.svg`,
+      background: `${hostUrl}/network/${network.key}/background.svg`,
+      description: `${network.linkCount} channel${network.linkCount === 1 ? '' : 's'} configured for ${network.label}.`
+    }));
+
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    return res.json({ metas });
+  }
+
   // Catalog ids are always constructed as sb_{sport}_{date} (see the
   // manifest route), and the date portion uses dashes rather than
   // underscores, so splitting on "_" and taking the second segment
@@ -2568,6 +2657,26 @@ app.get('/user/:uuid/meta/sports/:id.json', async (req, res) => {
 
   const hostUrl = `${req.protocol}://${req.get('host')}`;
   const [prefix, sport, idVal] = req.params.id.split(':');
+
+  // net:{NETWORK} - a TV Networks block. Two segments, not three, so it
+  // must be handled before the branches below try to read idVal.
+  if (prefix === 'net') {
+    const network = networks.NETWORKS.find(n => n.key === sport);
+    const links = (user.networkLinks || {})[sport] || [];
+    if (!network || links.length === 0) return res.json({ meta: {} });
+
+    return res.json({
+      meta: {
+        id: req.params.id,
+        type: 'sports',
+        name: network.label,
+        poster: `${hostUrl}/network/${network.key}/poster.svg`,
+        background: `${hostUrl}/network/${network.key}/background.svg`,
+        description: `${links.length} channel${links.length === 1 ? '' : 's'} configured for ${network.label}.\n\n`
+          + links.map((l, i) => `${i + 1}. ${l.name || l.url}`).join('\n')
+      }
+    });
+  }
 
   if (prefix === 'sb') {
     if (idVal === 'none') {
@@ -2634,8 +2743,40 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   // first segment no longer needs to be captured now that the dead
   // sbstream-prefixed branch (unreachable - nothing in the app ever
   // constructed that shape of id) has been removed.
-  const [, sport, idVal] = req.params.id.split(':');
+  const [idPrefix, sport, idVal] = req.params.id.split(':');
   if (idVal === 'none') return res.json({ streams: [] });
+
+  // net:{NETWORK} - the user asked for a network directly rather than for
+  // a game. No ESPN lookup and no tier matching: just that network's own
+  // channels, in the order they were arranged in the dashboard.
+  if (idPrefix === 'net') {
+    const networkKey = sport;
+    if (!networks.NETWORKS.some(n => n.key === networkKey)) return res.json({ streams: [] });
+
+    let netSource = null;
+    if (user.connectionType === 'm3u') {
+      if (!user.m3u || !user.m3u.playlistUrl) return res.json({ streams: [] });
+      netSource = m3u.getCachedM3USource(user.m3u.playlistUrl);
+      if (!netSource) return res.json({ streams: [] });
+    }
+
+    const { resolved, problems } = networks.resolveNetworkLinks(
+      user.networkLinks, networkKey, netSource,
+      (streamId) => (user.xtream && user.xtream.url)
+        ? `${user.xtream.url.replace(/\/+$/, '')}/live/${encodeURIComponent(user.xtream.username)}/${encodeURIComponent(user.xtream.password)}/${streamId}.m3u8`
+        : null
+    );
+
+    const netStreams = resolved.map(link => ({
+      name: link.name,
+      title: `📡 ${networks.getNetworkLabel(networkKey)}  📁 ${link.group || ''}`,
+      url: link.url
+    }));
+
+    console.log(`[Stream] NETWORK ${networkKey} links=${netStreams.length} missing=${problems.length}`);
+    res.setHeader('Content-Type', 'application/json');
+    return res.json({ streams: netStreams });
+  }
 
   const hostUrl = `${req.protocol}://${req.get('host')}`;
   const sportCategoryIds = user.sportCategories?.[sport.toUpperCase()] || [];
