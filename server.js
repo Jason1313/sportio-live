@@ -2481,12 +2481,71 @@ function getConfiguredNetworks(user) {
 
 const NETWORKS_CATALOG_ID = 'networks';
 
+// The quality label to show against a link in Stremio, or '' if unknown.
+//
+// Prefers a live reading from the probe cache, falling back to whatever
+// was recorded on the link when it was last checked in the dashboard. The
+// cache is memory-only and expires, so after a restart the stored value is
+// all there is - without it, quality labels would silently vanish from
+// Stremio until the user happened to re-check every channel.
+//
+// Never probes. This runs on every stream request, and opening a
+// connection to the provider just to decorate a title would compete with
+// the playback the user is about to start.
+function qualityLabelForLink(link) {
+  return probe.getCachedProbeLabel(link.url) || link.probedQuality || '';
+}
+
+// "📡 FOX · 1080p60  📁 TV Guide (USA)". The channel's own name stays in
+// the stream's `name`, which is where the market ("[Birmingham]") shows.
+function buildLinkTitle(networkKey, link) {
+  const quality = qualityLabelForLink(link);
+  const networkPart = `📡 ${networks.getNetworkLabel(networkKey)}${quality ? ` · ${quality}` : ''}`;
+  return link.group ? `${networkPart}  📁 ${link.group}` : networkPart;
+}
+
 // Poster/background for a network block. Deliberately generated rather
 // than taken from the playlist's tvg-logo: those point at arbitrary
 // third-party image hosts that may be dead, rate-limited or simply wrong,
 // and a broken poster in a catalog row reads as a broken addon.
+// Average glyph width as a fraction of font-size for the bold sans stack
+// used here. An approximation, not real text measurement - good enough to
+// keep a label inside its box, which is all that's needed. Deliberately
+// not TIME_CHAR_WIDTH_RATIOS: that table only covers digits and the nine
+// letters that appear in a formatted time, so most network names would
+// fall straight through it.
+const NETWORK_LABEL_CHAR_RATIO = 0.62;
+
 function buildNetworkArtSvg(label, width, height) {
-  const fontSize = Math.round(Math.min(width * 0.16, height * 0.16));
+  const text = String(label || '').trim() || 'Network';
+
+  // Long names get wrapped rather than shrunk to nothing. "CBS Sports
+  // Network" on one line at a readable size is far wider than the poster,
+  // which is what was clipping the ends off.
+  const lines = text.length > 9 ? splitNameForWrap(text) : [text];
+  const longest = lines.reduce((a, b) => (a.length >= b.length ? a : b), '');
+
+  // Two competing limits: the box, and the text. Take whichever is
+  // smaller so a long name shrinks to fit while a short one doesn't
+  // balloon to fill the poster.
+  const maxByBox = lines.length > 1
+    ? Math.min(width * 0.17, height * 0.11)
+    : Math.min(width * 0.20, height * 0.13);
+  const maxByWidth = (width * 0.82) / Math.max(1, longest.length * NETWORK_LABEL_CHAR_RATIO);
+  const fontSize = Math.round(Math.max(14, Math.min(maxByBox, maxByWidth)));
+
+  const lineHeight = fontSize * 1.12;
+  // Vertically centre the block of lines on the poster's midpoint.
+  const firstBaseline = height / 2 - ((lines.length - 1) * lineHeight) / 2 + fontSize * 0.34;
+
+  const labelMarkup = lines.map((line, i) =>
+    `<text x="${width / 2}" y="${firstBaseline + i * lineHeight}"
+           font-family="'Trebuchet MS', Verdana, sans-serif" font-size="${fontSize}"
+           font-weight="800" fill="#f8fafc" text-anchor="middle">${escapeXml(line)}</text>`
+  ).join('');
+
+  const subtitleY = firstBaseline + (lines.length - 1) * lineHeight + fontSize * 0.95;
+
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
     <defs>
       <radialGradient id="netBg" cx="50%" cy="45%" r="75%">
@@ -2495,11 +2554,9 @@ function buildNetworkArtSvg(label, width, height) {
       </radialGradient>
     </defs>
     <rect width="${width}" height="${height}" fill="url(#netBg)" />
-    <text x="${width / 2}" y="${height / 2 + fontSize * 0.35}"
-          font-family="'Trebuchet MS', Verdana, sans-serif" font-size="${fontSize}"
-          font-weight="800" fill="#f8fafc" text-anchor="middle">${escapeXml(label)}</text>
-    <text x="${width / 2}" y="${height / 2 + fontSize * 1.4}"
-          font-family="'Trebuchet MS', Verdana, sans-serif" font-size="${Math.round(fontSize * 0.28)}"
+    ${labelMarkup}
+    <text x="${width / 2}" y="${subtitleY}"
+          font-family="'Trebuchet MS', Verdana, sans-serif" font-size="${Math.round(fontSize * 0.26)}"
           font-weight="600" fill="#5aa8d1" text-anchor="middle" letter-spacing="3">LIVE CHANNEL</text>
   </svg>`;
 }
@@ -2601,8 +2658,7 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
       type: 'sports',
       name: network.label,
       poster: `${hostUrl}/network/${network.key}/poster.svg`,
-      background: `${hostUrl}/network/${network.key}/background.svg`,
-      description: `${network.linkCount} channel${network.linkCount === 1 ? '' : 's'} configured for ${network.label}.`
+      background: `${hostUrl}/network/${network.key}/background.svg`
     }));
 
     res.setHeader('Content-Type', 'application/json');
@@ -2671,9 +2727,12 @@ app.get('/user/:uuid/meta/sports/:id.json', async (req, res) => {
         type: 'sports',
         name: network.label,
         poster: `${hostUrl}/network/${network.key}/poster.svg`,
-        background: `${hostUrl}/network/${network.key}/background.svg`,
-        description: `${links.length} channel${links.length === 1 ? '' : 's'} configured for ${network.label}.\n\n`
-          + links.map((l, i) => `${i + 1}. ${l.name || l.url}`).join('\n')
+        background: `${hostUrl}/network/${network.key}/background.svg`
+        // No description. It listed every channel, but the client renders
+        // the field as one paragraph - newlines are collapsed - so ten
+        // channels became an unreadable run-on. The stream list directly
+        // below already names them all, each with its own row, so this was
+        // duplicating that badly rather than adding anything.
       }
     });
   }
@@ -2769,7 +2828,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
 
     const netStreams = resolved.map(link => ({
       name: link.name,
-      title: `📡 ${networks.getNetworkLabel(networkKey)}  📁 ${link.group || ''}`,
+      title: buildLinkTitle(networkKey, link),
       url: link.url
     }));
 
@@ -2841,7 +2900,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     // Ticket one - from the same single saved list.
     linkStreams = networks.orderLinksForSport(resolved, sportKey).map(link => ({
       name: link.name,
-      title: `📡 ${networks.getNetworkLabel(networkKey)}  📁 ${link.group || ''}`,
+      title: buildLinkTitle(networkKey, link),
       url: link.url
     }));
   }

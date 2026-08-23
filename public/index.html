@@ -2286,7 +2286,12 @@
         showStatus('That channel is already in this network.', true);
         return;
       }
-      links.push(channel);
+      // Carry across a quality already measured for this channel, so
+      // adding an already-checked stream doesn't lose the reading.
+      const measured = probeResults[channel.url];
+      links.push(measured && !measured.error && measured.label
+        ? { ...channel, probedQuality: measured.label }
+        : channel);
       markDashboardDirty();
       rerenderNetworkSection(key);
     }
@@ -2445,6 +2450,34 @@
       }
     }
 
+    // Records a measured quality onto any saved link with this URL, so it
+    // can be shown in Stremio.
+    //
+    // The server's probe cache is memory-only and expires, so without
+    // storing it on the link the quality label would disappear from
+    // Stremio the next time the container restarted. Marking the dashboard
+    // dirty is what tells the user the new reading needs saving to take
+    // effect - a probe is now a change to their data, not just a display.
+    //
+    // Only successes are recorded. A failure says the stream was
+    // unreachable at that moment, which is not a fact worth persisting.
+    function applyProbeToSavedLinks(url) {
+      const result = probeResults[url];
+      if (!result || result.error || !result.label) return;
+
+      let changed = false;
+      for (const links of Object.values((activeUser && activeUser.networkLinks) || {})) {
+        if (!Array.isArray(links)) continue;
+        for (const link of links) {
+          if (link.url === url && link.probedQuality !== result.label) {
+            link.probedQuality = result.label;
+            changed = true;
+          }
+        }
+      }
+      if (changed) markDashboardDirty();
+    }
+
     // Probes one URL and stores the outcome. Returns whether the answer
     // came from cache, which is what decides if the caller needs to pause
     // before the next one.
@@ -2460,6 +2493,7 @@
           ? { label: data.label, fps: data.fps, height: data.height }
           : { error: data.error || 'probe failed' };
         refreshProbeBadges(url);
+        applyProbeToSavedLinks(url);
         return !!data.cached;
       } catch (err) {
         probeResults[url] = { error: 'Network error' };

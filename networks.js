@@ -226,7 +226,7 @@ const COMBINE_AT_OR_BELOW = 3;
 // tvgId/name/group ride along purely as healing metadata: if the exact URL
 // stops appearing after a playlist refresh, they're what we search by to
 // find where that channel moved to. See resolveLinkEntry.
-function makeLinkEntry({ url, tvgId, name, group, streamId, type }) {
+function makeLinkEntry({ url, tvgId, name, group, streamId, type, probedQuality }) {
   return {
     type: type || (streamId ? 'xtream' : 'm3u'),
     url: url || '',
@@ -234,6 +234,12 @@ function makeLinkEntry({ url, tvgId, name, group, streamId, type }) {
     tvgId: tvgId || '',
     name: name || '',
     group: group || '',
+    // Last measured resolution/frame rate, e.g. "1080p60". Stored so the
+    // label survives a restart - the probe cache is memory-only, so
+    // without this a stream would show its quality in Stremio only until
+    // the container next restarted. It is a record of the last check, not
+    // a live reading; the dashboard is where it gets refreshed.
+    probedQuality: probedQuality || '',
   };
 }
 

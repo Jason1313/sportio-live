@@ -85,6 +85,18 @@ function clearProbeCache() {
   probeCache.clear();
 }
 
+// Reads a previous result WITHOUT probing. Used by the stream routes to
+// label a channel with its measured quality - they must never open a
+// connection to the provider just to decorate a title, and they run on
+// every catalog click.
+//
+// Returns null when nothing has been probed, which is the normal case
+// after a restart. Callers fall back to whatever the link itself recorded.
+function getCachedProbeLabel(url) {
+  const cached = getCached(url);
+  return cached && cached.ok && cached.label ? cached.label : null;
+}
+
 function runFfprobe(url) {
   return new Promise((resolve, reject) => {
     execFile(FFPROBE_BIN, [
@@ -175,6 +187,7 @@ async function probeStream(url, options = {}) {
 
 module.exports = {
   probeStream,
+  getCachedProbeLabel,
   parseFrameRate,
   formatQualityLabel,
   clearProbeCache,
