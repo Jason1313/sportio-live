@@ -129,6 +129,19 @@ function decryptM3uFromStorage(m3u) {
 // Only the url is encrypted. tvgId/name/group are healing metadata with
 // no secret in them, and leaving them readable keeps a users.json dump
 // diagnosable without the key.
+// Saved channels carry the same credential-bearing URLs as network
+// links, so they get the same treatment. Stored as a flat array rather
+// than keyed by network, hence its own pair of helpers.
+function encryptSavedChannelsForStorage(savedChannels) {
+  if (!Array.isArray(savedChannels)) return savedChannels;
+  return savedChannels.map(c => ({ ...c, url: c.url ? encrypt(c.url) : c.url }));
+}
+
+function decryptSavedChannelsFromStorage(savedChannels) {
+  if (!Array.isArray(savedChannels)) return savedChannels;
+  return savedChannels.map(c => ({ ...c, url: c.url ? decrypt(c.url) : c.url }));
+}
+
 function encryptNetworkLinksForStorage(networkLinks) {
   if (!networkLinks || typeof networkLinks !== 'object') return networkLinks;
   const out = {};
@@ -233,7 +246,8 @@ if (fs.existsSync(DATA_FILE)) {
         ...user,
         xtream: decryptXtreamFromStorage(user.xtream),
         m3u: decryptM3uFromStorage(user.m3u),
-        networkLinks: decryptNetworkLinksFromStorage(user.networkLinks)
+        networkLinks: decryptNetworkLinksFromStorage(user.networkLinks),
+        savedChannels: decryptSavedChannelsFromStorage(user.savedChannels)
       };
     }
   } catch (err) {
@@ -249,7 +263,8 @@ function saveUserConfigs() {
         ...user,
         xtream: encryptXtreamForStorage(user.xtream),
         m3u: encryptM3uForStorage(user.m3u),
-        networkLinks: encryptNetworkLinksForStorage(user.networkLinks)
+        networkLinks: encryptNetworkLinksForStorage(user.networkLinks),
+        savedChannels: encryptSavedChannelsForStorage(user.savedChannels)
       };
     }
     fs.writeFileSync(DATA_FILE, JSON.stringify(toWrite, null, 2), 'utf8');
@@ -294,6 +309,40 @@ function saveM3uSettings(settings) {
 }
 
 let m3uSettings = loadM3uSettings();
+
+// Preferred tvg-ids per network, shared by the whole instance.
+//
+// Deliberately IDS ONLY - no URLs, no credentials, nothing tied to one
+// provider account. tvg-ids come from shared EPG naming rather than any
+// one provider's playlist, which is exactly what makes them portable to
+// a different IPTV service. That portability is the point: switch
+// provider and the channels you already chose are suggested again.
+const NETWORK_DEFAULTS_FILE = path.join(DATA_DIR, 'network-defaults.json');
+
+function loadNetworkDefaults() {
+  if (!fs.existsSync(NETWORK_DEFAULTS_FILE)) return {};
+  try {
+    const raw = JSON.parse(fs.readFileSync(NETWORK_DEFAULTS_FILE, 'utf8'));
+    const out = {};
+    for (const [key, ids] of Object.entries(raw)) {
+      if (Array.isArray(ids)) out[key] = ids.filter(id => typeof id === 'string' && id);
+    }
+    return out;
+  } catch (err) {
+    console.error('[Storage] Error loading network-defaults.json:', err.message);
+    return {};
+  }
+}
+
+function saveNetworkDefaults(defaults) {
+  try {
+    fs.writeFileSync(NETWORK_DEFAULTS_FILE, JSON.stringify(defaults, null, 2), 'utf8');
+  } catch (err) {
+    console.error('[Storage] Failed to save network-defaults.json:', err.message);
+  }
+}
+
+let networkDefaults = loadNetworkDefaults();
 
 // App-managed admin credentials - lets a fresh install set an admin
 // password through the UI itself, rather than requiring a manual
@@ -2017,8 +2066,10 @@ app.post('/api/networks/suggest', async (req, res) => {
   const auth = await authenticateForChannels(req, res);
   if (!auth) return;
 
-  const suggestions = networks.suggestAllNetworks(auth.source.channels);
-  return res.json({ success: true, suggestions });
+  const suggestions = networks.suggestAllNetworks(auth.source.channels, {
+    defaults: networkDefaults
+  });
+  return res.json({ success: true, suggestions, defaults: networkDefaults });
 });
 
 // Free-text search over the whole playlist, for overriding a suggestion
@@ -2045,6 +2096,45 @@ app.post('/api/networks/search', async (req, res) => {
     query, auth.source.channels, { limit: 50, excludeGroups }
   );
   return res.json({ success: true, channels, groups, truncated });
+});
+
+// The user's saved channels, resolved against the current playlist so a
+// rotated URL is healed rather than silently dead. This is what the watch
+// page plays from.
+app.post('/api/networks/saved', async (req, res) => {
+  const auth = await authenticateForChannels(req, res);
+  if (!auth) return;
+
+  const { resolved, problems } = networks.resolveSavedChannels(
+    auth.user.savedChannels, auth.source
+  );
+  return res.json({ success: true, channels: resolved, problems });
+});
+
+// Reads and writes the instance-wide preferred tvg-ids.
+//
+// A POST with `fromNetworkLinks` derives them from whatever the caller
+// currently has configured - which is the "make these my defaults"
+// button. Only ids are kept; the URLs those links carry are account
+// credentials and never leave the account record.
+app.post('/api/networks/defaults', async (req, res) => {
+  const auth = await authenticateForChannels(req, res);
+  if (!auth) return;
+
+  if (req.body.fromNetworkLinks === true) {
+    const derived = {};
+    for (const [networkKey, links] of Object.entries(auth.user.networkLinks || {})) {
+      if (!Array.isArray(links)) continue;
+      const ids = [...new Set(links.map(l => l.tvgId).filter(Boolean))];
+      if (ids.length > 0) derived[networkKey] = ids;
+    }
+    networkDefaults = derived;
+    saveNetworkDefaults(networkDefaults);
+    const total = Object.values(derived).reduce((n, ids) => n + ids.length, 0);
+    console.log(`[Defaults] Saved ${total} tvg-id(s) across ${Object.keys(derived).length} network(s)`);
+  }
+
+  return res.json({ success: true, defaults: networkDefaults });
 });
 
 // Probes ONE stream for its resolution and frame rate. One URL per
@@ -2107,7 +2197,7 @@ app.post('/api/user/register', async (req, res) => {
   if (!ENCRYPTION_KEY_CONFIGURED) {
     return res.status(503).json({ error: 'Encryption key not configured yet. See the homepage for setup instructions.' });
   }
-  const { xtream, m3u, connectionType, selectedSports, sportCategories, password, timeZone, sportOrder, networkLinks } = req.body;
+  const { xtream, m3u, connectionType, selectedSports, sportCategories, password, timeZone, sportOrder, networkLinks, savedChannels } = req.body;
   if (!password || typeof password !== 'string' || password.length === 0) {
     return res.status(400).json({ error: 'A password is required.' });
   }
@@ -2130,6 +2220,7 @@ app.post('/api/user/register', async (req, res) => {
     timeZone: timeZone || 'America/New_York',
     sportOrder,
     networkLinks: networkLinks || {},
+    savedChannels: savedChannels || [],
     createdAt: new Date().toISOString()
   };
   saveUserConfigs();
@@ -2170,12 +2261,13 @@ app.post('/api/user/login', async (req, res) => {
     timeZone: user.timeZone || 'America/New_York',
     sportOrder: user.sportOrder || [],
     networkLinks: user.networkLinks || {},
+    savedChannels: user.savedChannels || [],
     manifestUrl: `/user/${uuid}/manifest.json` 
   });
 });
 
 app.post('/api/user/update', async (req, res) => {
-  const { uuid, password, xtream, m3u, selectedSports, sportCategories, timeZone, sportOrder, networkLinks } = req.body;
+  const { uuid, password, xtream, m3u, selectedSports, sportCategories, timeZone, sportOrder, networkLinks, savedChannels } = req.body;
   const ip = req.ip;
 
   if (isRateLimited(ip)) {
@@ -2221,6 +2313,12 @@ app.post('/api/user/update', async (req, res) => {
       validated[networkKey] = result.links;
     }
     user.networkLinks = validated;
+  }
+
+  if (savedChannels !== undefined) {
+    const result = networks.validateSavedChannels(savedChannels);
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    user.savedChannels = result.channels;
   }
 
   saveUserConfigs();

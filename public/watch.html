@@ -29,10 +29,13 @@
 <section id="gate" class="hidden max-w-md mx-auto mt-24 px-5">
   <h1 class="text-xl font-bold mb-1">Connect to your account</h1>
   <p class="text-xs text-[#e6e6e6]/55 mb-4">
-    Paste the UUID from your Sportio Live dashboard. It is stored in this browser only.
+    Paste the UUID and password from your Sportio Live dashboard. Both are stored in this browser only. The password is needed to search your playlist and save channels.
   </p>
   <input id="gate-uuid" type="text" placeholder="00000000-0000-0000-0000-000000000000"
-         class="w-full bg-[#1f2b36] border border-white/15 rounded-lg px-3 py-2.5 text-sm font-mono focus:border-[#3b8fc4] focus:outline-none mb-3">
+         class="w-full bg-[#1f2b36] border border-white/15 rounded-lg px-3 py-2.5 text-sm font-mono focus:border-[#3b8fc4] focus:outline-none mb-2">
+  <input id="gate-password" type="password" placeholder="Account password"
+         onkeydown="if(event.key==='Enter')saveUuid()"
+         class="w-full bg-[#1f2b36] border border-white/15 rounded-lg px-3 py-2.5 text-sm focus:border-[#3b8fc4] focus:outline-none mb-3">
   <button onclick="saveUuid()" class="w-full bg-[#3b8fc4] hover:bg-[#4fa3d8] font-bold py-2.5 rounded-lg text-sm transition">Continue</button>
   <p id="gate-error" class="hidden text-xs text-[#e56a6a] mt-3"></p>
 </section>
@@ -106,6 +109,25 @@
 
 <!-- Main browsing area -->
 <main id="browse" class="hidden max-w-[1600px] mx-auto px-5 py-6">
+  <!-- Saved channels: search the playlist directly for one-off events
+       that have no network of their own. -->
+  <section id="saved-panel" class="hidden mb-8">
+    <p class="text-xs text-[#e6e6e6]/55 mb-3 leading-relaxed max-w-3xl">
+      Search your playlist for anything - a one-off event, a channel that only exists while it is on.
+      Tick a few and check their quality before you commit, then save them here for next time.
+    </p>
+    <div class="flex gap-2 max-w-2xl mb-2">
+      <input id="saved-search" type="text" oninput="onSavedSearchInput()"
+             placeholder="Search channels...  use &quot;quotes&quot; for an exact name"
+             class="flex-1 bg-[#1f2b36] border border-white/15 rounded-lg px-3 py-2 text-sm focus:border-[#3b8fc4] focus:outline-none">
+    </div>
+    <div id="saved-groups" class="max-w-2xl"></div>
+    <div id="saved-results" class="max-w-2xl max-h-64 overflow-y-auto mt-1"></div>
+    <div id="saved-probe-row" class="max-w-2xl mt-1"></div>
+    <h3 class="font-bold text-sm text-[#e6e6e6]/75 mt-6 mb-2">Saved</h3>
+    <div id="saved-list" class="max-w-2xl space-y-1.5"></div>
+  </section>
+
   <div id="grid" class="grid gap-4" style="grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));"></div>
   <p id="grid-empty" class="hidden text-sm text-[#e6e6e6]/45 py-16 text-center"></p>
 </main>
@@ -135,6 +157,22 @@
   const PROTOCOL = 'sportio';
 
   let uuid = localStorage.getItem('sportio.uuid') || new URLSearchParams(location.search).get('uuid') || '';
+  let password = localStorage.getItem('sportio.password') || '';
+
+  // Saved channels: the user's own list, unattached to any network.
+  const SAVED_CATALOG_ID = 'saved';
+  const PROBE_MAX_RESULTS = 20;
+  const PROBE_DELAY_MS = 5000;
+  let savedChannels = [];
+  let savedResults = [];
+  let savedGroups = [];
+  let savedExcluded = new Set();
+  let savedSelection = new Set();
+  let probeResults = {};
+  let probeInProgress = false;
+  let savedSearchTimer = null;
+
+  const credentials = () => ({ uuid, password });
   let catalogs = [];
   let activeCatalog = null;
 
@@ -330,16 +368,49 @@
   // --- Account -------------------------------------------------------
   function saveUuid() {
     const value = document.getElementById('gate-uuid').value.trim();
+    const pass = document.getElementById('gate-password').value;
     const err = document.getElementById('gate-error');
     if (!/^[0-9a-f-]{30,}$/i.test(value)) {
       err.textContent = 'That does not look like a UUID.';
       err.classList.remove('hidden');
       return;
     }
+    if (!pass) {
+      err.textContent = 'The password is needed to search and save channels.';
+      err.classList.remove('hidden');
+      return;
+    }
     uuid = value;
+    password = pass;
     localStorage.setItem('sportio.uuid', uuid);
+    localStorage.setItem('sportio.password', password);
     err.classList.add('hidden');
     boot();
+  }
+
+  function forgetAccount(message) {
+    localStorage.removeItem('sportio.uuid');
+    localStorage.removeItem('sportio.password');
+    uuid = '';
+    password = '';
+    show('gate');
+    const el = document.getElementById('gate-error');
+    el.textContent = message;
+    el.classList.remove('hidden');
+  }
+
+  async function postJson(url, body) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...credentials(), ...(body || {}) })
+      });
+      const data = await res.json().catch(() => null);
+      return { ok: res.ok, status: res.status, data };
+    } catch (err) {
+      return { ok: false, status: 0, data: null };
+    }
   }
 
   // --- Browsing ------------------------------------------------------
@@ -351,20 +422,34 @@
       const manifest = await res.json();
       catalogs = manifest.catalogs || [];
     } catch (err) {
-      localStorage.removeItem('sportio.uuid');
-      uuid = '';
-      show('gate');
-      const el = document.getElementById('gate-error');
-      el.textContent = 'That UUID was not recognised by the server.';
-      el.classList.remove('hidden');
+      forgetAccount('That UUID was not recognised by the server.');
       return;
     }
 
+    // Verifying the password here rather than on first use means a wrong
+    // one is caught at the gate, not silently when a search returns
+    // nothing.
+    const savedRes = await postJson('/api/networks/saved');
+    if (savedRes.status === 401) {
+      forgetAccount('That password was not accepted.');
+      return;
+    }
+    savedChannels = (savedRes.data && savedRes.data.channels) || [];
+    seedProbeResultsFromSaved();
+
+    // Listed first: it is the only tab whose contents the user curates.
+    catalogs = [{ id: SAVED_CATALOG_ID, name: 'My Channels' }, ...catalogs];
+
     renderTabs();
     show('browse');
-    if (catalogs.length > 0) selectCatalog(catalogs[0].id);
-    else {
-      document.getElementById('grid').innerHTML = '';
+
+    // Open on the first real league if there is one; "My Channels" is
+    // always present, so its own presence says nothing about whether
+    // anything is configured.
+    if (catalogs.length > 1) {
+      selectCatalog(catalogs[1].id);
+    } else {
+      selectCatalog(SAVED_CATALOG_ID);
       showEmpty('No leagues configured yet. Set them up in the dashboard first.');
     }
   }
@@ -394,6 +479,17 @@
     activeCatalog = id;
     highlightTab();
     const grid = document.getElementById('grid');
+    const savedPanel = document.getElementById('saved-panel');
+
+    savedPanel.classList.toggle('hidden', id !== SAVED_CATALOG_ID);
+    if (id === SAVED_CATALOG_ID) {
+      grid.innerHTML = '';
+      showEmpty('');
+      renderSavedList();
+      renderSavedResults();
+      return;
+    }
+
     grid.innerHTML = '';
     showEmpty('Loading...');
 
@@ -467,6 +563,240 @@
                 <i class="fa-solid fa-arrow-up-right-from-square text-[10px] text-[#e6e6e6]/25 shrink-0"></i>
               </a>`;
     }).join('');
+  }
+
+  // ------------------------------------------------------------------
+  // Saved channels
+  // ------------------------------------------------------------------
+
+  // A quality measured in a previous session is stored on the channel, so
+  // the badge is there on load rather than blank until re-checked.
+  function seedProbeResultsFromSaved() {
+    for (const channel of savedChannels) {
+      if (channel.probedQuality && !probeResults[channel.url]) {
+        probeResults[channel.url] = { label: channel.probedQuality, persisted: true };
+      }
+    }
+  }
+
+  function streamIdFromUrl(url) {
+    const match = String(url || '').match(/\/([^\/?#]+?)(?:\.[a-z0-9]+)?(?:[?#].*)?$/i);
+    return match ? match[1] : '';
+  }
+
+  function probeBadge(url) {
+    const probed = probeResults[url];
+    if (!probed) return '';
+    if (probed.checking) {
+      return '<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#3b8fc4]/25 text-[#5aa8d1]"><i class="fa-solid fa-spinner fa-spin"></i></span>';
+    }
+    if (probed.error) {
+      return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#c0392b]/25 text-[#e56a6a]" title="${escapeHtml(probed.error)}">failed</span>`;
+    }
+    return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#4a9d52]/25 text-[#7fc98a]">${escapeHtml(probed.label)}</span>`;
+  }
+
+  function onSavedSearchInput() {
+    clearTimeout(savedSearchTimer);
+    savedSearchTimer = setTimeout(runSavedSearch, 250);
+  }
+
+  async function runSavedSearch() {
+    const query = document.getElementById('saved-search').value.trim();
+    if (query.length < 2) {
+      savedResults = [];
+      savedGroups = [];
+      renderSavedResults();
+      return;
+    }
+    const res = await postJson('/api/networks/search', {
+      query,
+      excludeGroups: [...savedExcluded]
+    });
+    savedResults = (res.data && res.data.channels) || [];
+    savedGroups = (res.data && res.data.groups) || [];
+    renderSavedResults();
+  }
+
+  function toggleSavedGroup(name) {
+    if (savedExcluded.has(name)) savedExcluded.delete(name); else savedExcluded.add(name);
+    runSavedSearch();
+  }
+
+  function toggleSavedSelection(url) {
+    if (savedSelection.has(url)) savedSelection.delete(url); else savedSelection.add(url);
+    renderSavedResults();
+  }
+
+  function renderSavedResults() {
+    const groupsBox = document.getElementById('saved-groups');
+    const resultsBox = document.getElementById('saved-results');
+    const probeRow = document.getElementById('saved-probe-row');
+    if (!groupsBox || !resultsBox || !probeRow) return;
+
+    groupsBox.innerHTML = savedGroups.length < 2 ? '' :
+      `<div class="flex flex-wrap gap-1 mt-1">
+         <span class="text-[10px] text-[#e6e6e6]/35 self-center mr-1">Groups:</span>
+         ${savedGroups.slice(0, 12).map(g => {
+           const off = savedExcluded.has(g.name);
+           return `<button onclick="toggleSavedGroup(${JSON.stringify(g.name).replace(/"/g, '&quot;')})"
+                           class="text-[10px] px-1.5 py-0.5 rounded border transition ${off
+                             ? 'border-[#c0392b]/40 bg-[#c0392b]/15 text-[#e56a6a] line-through'
+                             : 'border-white/15 bg-[#1f2b36] text-[#e6e6e6]/60 hover:text-[#e6e6e6]'}">
+                     ${escapeHtml(g.name)} <span class="opacity-60">${g.count}</span>
+                   </button>`;
+         }).join('')}
+       </div>`;
+
+    const savedUrls = new Set(savedChannels.map(c => c.url));
+    resultsBox.innerHTML = savedResults.length === 0 ? '' : savedResults.map(c => `
+      <div class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-white/5 transition">
+        <input type="checkbox" ${savedSelection.has(c.url) ? 'checked' : ''}
+               onchange="toggleSavedSelection('${escapeHtml(c.url)}')"
+               title="Select for quality check"
+               class="shrink-0 accent-[#3b8fc4] cursor-pointer">
+        <span class="flex-1 min-w-0">
+          <span class="flex items-center gap-2">
+            <span class="text-xs truncate">${escapeHtml(c.name)}</span>
+            ${probeBadge(c.url)}
+          </span>
+          <span class="block text-[10px] text-[#e6e6e6]/45 truncate">
+            <span class="font-mono text-[#5aa8d1]/70">#${escapeHtml(streamIdFromUrl(c.url))}</span>
+            &middot; ${escapeHtml((c.groups || []).join(' | '))}
+          </span>
+        </span>
+        ${savedUrls.has(c.url)
+          ? '<span class="text-[10px] text-[#7fc98a] shrink-0">saved</span>'
+          : `<button onclick="addSavedChannel('${escapeHtml(c.url)}')"
+                     class="text-[10px] font-bold text-[#5aa8d1] hover:text-[#6bb5dd] shrink-0">Save</button>`}
+      </div>`).join('');
+
+    // Same rule as the dashboard picker: ticked channels if any are
+    // ticked, otherwise the whole result set, and never more than the cap.
+    const target = savedSelection.size > 0
+      ? savedResults.filter(c => savedSelection.has(c.url))
+      : savedResults;
+
+    if (target.length === 0) { probeRow.innerHTML = ''; return; }
+    if (target.length > PROBE_MAX_RESULTS) {
+      probeRow.innerHTML = `<div class="text-[10px] text-[#e6e6e6]/40 italic px-2 py-1.5 text-center">${target.length} to check - tick the ones you want, or narrow to ${PROBE_MAX_RESULTS} or fewer.</div>`;
+      return;
+    }
+    const label = savedSelection.size > 0 ? `Check ${savedSelection.size} selected` : `Check quality (${target.length})`;
+    probeRow.innerHTML = `<button onclick="probeSavedSearch()" ${probeInProgress ? 'disabled' : ''}
+        class="w-full text-[11px] font-bold py-1.5 rounded transition ${probeInProgress
+          ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd] hover:bg-white/5'}">
+        <i class="fa-solid fa-gauge-high mr-1.5"></i>${label}</button>`;
+  }
+
+  async function probeSavedSearch() {
+    if (probeInProgress) { showToast('A quality check is already running.', true); return; }
+    const target = savedSelection.size > 0
+      ? savedResults.filter(c => savedSelection.has(c.url))
+      : savedResults;
+    if (target.length === 0 || target.length > PROBE_MAX_RESULTS) return;
+
+    probeInProgress = true;
+    renderSavedResults();
+    try {
+      for (let i = 0; i < target.length; i++) {
+        const channel = target[i];
+        probeResults[channel.url] = { checking: true };
+        renderSavedResults();
+
+        const res = await postJson('/api/networks/probe', {
+          url: channel.url,
+          force: true    // an explicit request always re-measures
+        });
+        const data = res.data || {};
+        probeResults[channel.url] = data.ok
+          ? { label: data.label }
+          : { error: data.error || 'probe failed' };
+
+        // Keep a measured quality with the channel if it is already saved.
+        const savedEntry = savedChannels.find(c => c.url === channel.url);
+        if (savedEntry && data.ok) savedEntry.probedQuality = data.label;
+
+        renderSavedResults();
+        renderSavedList();
+        if (!data.cached && i < target.length - 1) {
+          await new Promise(r => setTimeout(r, PROBE_DELAY_MS));
+        }
+      }
+      showToast(`Checked ${target.length} channel${target.length === 1 ? '' : 's'}.`);
+    } finally {
+      probeInProgress = false;
+      renderSavedResults();
+    }
+  }
+
+  async function addSavedChannel(url) {
+    const channel = savedResults.find(c => c.url === url);
+    if (!channel) return;
+    if (savedChannels.some(c => c.url === url)) { showToast('Already saved.', true); return; }
+
+    const measured = probeResults[url];
+    savedChannels.push({
+      type: 'm3u',
+      url: channel.url,
+      tvgId: channel.tvgId || '',
+      name: channel.name || '',
+      group: channel.group || '',
+      probedQuality: measured && !measured.error && measured.label ? measured.label : ''
+    });
+    renderSavedList();
+    renderSavedResults();
+    await persistSavedChannels(`Saved ${channel.name}.`);
+  }
+
+  async function removeSavedChannel(url) {
+    savedChannels = savedChannels.filter(c => c.url !== url);
+    renderSavedList();
+    renderSavedResults();
+    await persistSavedChannels('Removed.');
+  }
+
+  async function persistSavedChannels(successMessage) {
+    const res = await postJson('/api/user/update', {
+      savedChannels: savedChannels.map(c => ({
+        type: 'm3u', url: c.url, tvgId: c.tvgId, name: c.name,
+        group: c.group, probedQuality: c.probedQuality || ''
+      }))
+    });
+    if (!res.ok || !res.data || !res.data.success) {
+      showToast((res.data && res.data.error) || 'Could not save.', true);
+      return;
+    }
+    showToast(successMessage);
+  }
+
+  function renderSavedList() {
+    const box = document.getElementById('saved-list');
+    if (!box) return;
+    if (savedChannels.length === 0) {
+      box.innerHTML = '<p class="text-xs text-[#e6e6e6]/40 italic">Nothing saved yet. Search above to add a channel.</p>';
+      return;
+    }
+    box.innerHTML = savedChannels.map(c => `
+      <div class="flex items-center gap-3 bg-[#1f2b36] border border-white/10 rounded-lg px-3 py-2">
+        <a href="${escapeHtml(playLink(c.url))}" onclick="notePlaying()" class="flex-1 min-w-0 flex items-center gap-3">
+          <i class="fa-solid fa-play text-[10px] text-[#5aa8d1] shrink-0"></i>
+          <span class="flex-1 min-w-0">
+            <span class="flex items-center gap-2">
+              <span class="text-xs font-semibold truncate">${escapeHtml(c.name || c.url)}</span>
+              ${probeBadge(c.url)}
+            </span>
+            <span class="block text-[10px] text-[#e6e6e6]/45 truncate">
+              <span class="font-mono text-[#5aa8d1]/70">#${escapeHtml(streamIdFromUrl(c.url))}</span>
+              ${c.group ? '&middot; ' + escapeHtml(c.group) : ''}
+            </span>
+          </span>
+        </a>
+        <button onclick="removeSavedChannel('${escapeHtml(c.url)}')" title="Remove"
+                class="text-xs px-1.5 py-1 rounded text-[#e56a6a]/70 hover:text-[#e56a6a] hover:bg-white/5 transition shrink-0">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>`).join('');
   }
 
   function notePlaying() {

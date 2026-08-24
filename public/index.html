@@ -242,12 +242,22 @@
            built from the parsed playlist. Hidden entirely for Xtream until
            that path exists, rather than shown-but-broken. -->
       <div id="network-links-block" class="hidden">
-        <div class="flex items-center justify-between mb-2 mt-8">
+        <div class="flex items-center justify-between gap-3 mb-2 mt-8 flex-wrap">
           <h3 class="font-bold text-sm text-[#e6e6e6]/75">Network Links</h3>
-          <button id="network-suggest-all-btn" onclick="applyAllNetworkSuggestions()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
-            <i class="fa-solid fa-wand-magic-sparkles"></i>
-            Use All Suggestions
-          </button>
+          <div class="flex items-center gap-4">
+            <button id="network-check-all-btn" onclick="checkQualityForAllNetworks()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
+              <i class="fa-solid fa-gauge-high"></i>
+              Check All Quality
+            </button>
+            <button id="network-defaults-btn" onclick="saveNetworkDefaults()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
+              <i class="fa-solid fa-thumbtack"></i>
+              Save As Defaults
+            </button>
+            <button id="network-suggest-all-btn" onclick="applyAllNetworkSuggestions()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
+              <i class="fa-solid fa-wand-magic-sparkles"></i>
+              Use All Suggestions
+            </button>
+          </div>
         </div>
         <p class="text-xs text-[#e6e6e6]/55 mb-3 leading-relaxed">
           When ESPN says an NFL or college football game is on one of these networks, Sportio shows your channels for that network <span class="text-[#e6e6e6]/80 font-semibold">instead of</span> searching. Networks left empty fall back to category search, so nothing is ever missing entirely.
@@ -2533,6 +2543,140 @@
       } finally {
         probeInProgress = false;
         renderNetworkSearchResults(key);
+      }
+    }
+
+    // Formats a duration as "3m 30s" / "45s". Used for the time estimate
+    // before a long run of probes, because "147 seconds" is not something
+    // anyone converts in their head while deciding whether to wait.
+    function formatDuration(totalSeconds) {
+      const secs = Math.max(0, Math.round(totalSeconds));
+      const mins = Math.floor(secs / 60);
+      const rem = secs % 60;
+      return mins > 0 ? `${mins}m ${rem}s` : `${rem}s`;
+    }
+
+    // Roughly what one probe costs end to end: the deliberate gap between
+    // probes plus the time ffprobe itself takes to pull enough of the
+    // stream to read a frame.
+    const PROBE_SECONDS_EACH = 7;
+
+    // Checks every channel across every network, in one pass.
+    //
+    // Warns first with a time estimate, because this is minutes rather
+    // than seconds and each probe opens a connection to the provider -
+    // starting it unaware is how you end up wondering why your own
+    // playback just dropped.
+    async function checkQualityForAllNetworks() {
+      if (probeInProgress) {
+        showStatus('A quality check is already running.', true);
+        return;
+      }
+
+      const targets = [];
+      for (const network of networkRegistry) {
+        for (const link of readNetworkLinks(network.key)) {
+          const prior = probeResults[link.url];
+          // Skip channels already measured in this session; a full
+          // re-check is available per network.
+          if (prior && !prior.error) continue;
+          targets.push({ key: network.key, label: network.label, link });
+        }
+      }
+
+      if (targets.length === 0) {
+        showStatus('Every configured channel has already been checked.');
+        return;
+      }
+
+      const estimate = formatDuration(targets.length * PROBE_SECONDS_EACH);
+      const ok = confirm(
+        `Check the quality of ${targets.length} channel${targets.length === 1 ? '' : 's'} across ` +
+        `${new Set(targets.map(t => t.key)).size} network${new Set(targets.map(t => t.key)).size === 1 ? '' : 's'}.\n\n` +
+        `This takes about ${estimate}. Channels are checked one at a time on purpose - ` +
+        `each one opens a connection to your provider, and doing them at once risks ` +
+        `interrupting anything you are currently watching.\n\nStart now?`
+      );
+      if (!ok) return;
+
+      probeInProgress = true;
+      const button = document.getElementById('network-check-all-btn');
+      const touched = new Set();
+
+      try {
+        for (let i = 0; i < targets.length; i++) {
+          const target = targets[i];
+          touched.add(target.key);
+          const remaining = formatDuration((targets.length - i) * PROBE_SECONDS_EACH);
+          if (button) {
+            button.disabled = true;
+            button.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${i + 1}/${targets.length} &middot; ~${remaining} left`;
+          }
+
+          const wasCached = await probeOneChannel(target.link.url, !!probeResults[target.link.url]);
+          refreshNetworkLinksRegion(target.key);
+
+          if (!wasCached && i < targets.length - 1) {
+            await new Promise(r => setTimeout(r, PROBE_DELAY_MS));
+          }
+        }
+
+        const failed = targets.filter(t => probeResults[t.link.url] && probeResults[t.link.url].error).length;
+        showStatus(failed > 0
+          ? `Checked ${targets.length}. ${failed} failed - click a red badge to retry one.`
+          : `Checked all ${targets.length} channels.`);
+      } finally {
+        probeInProgress = false;
+        if (button) {
+          button.disabled = false;
+          button.innerHTML = '<i class="fa-solid fa-gauge-high"></i> Check All Quality';
+        }
+        touched.forEach(key => refreshNetworkLinksRegion(key));
+      }
+    }
+
+    // Pins the tvg-ids of the currently configured channels as the
+    // instance's default suggestions.
+    //
+    // Only ids travel - never a URL, which for M3U carries the provider
+    // username and password in its path. tvg-ids come from shared EPG
+    // naming rather than one provider's playlist, which is what lets them
+    // survive a change of IPTV service.
+    async function saveNetworkDefaults() {
+      const summary = [];
+      let total = 0;
+      for (const network of networkRegistry) {
+        const ids = [...new Set(readNetworkLinks(network.key).map(l => l.tvgId).filter(Boolean))];
+        if (ids.length > 0) { summary.push(`${network.label}: ${ids.length}`); total += ids.length; }
+      }
+
+      if (total === 0) {
+        showStatus('No channels configured yet, so there is nothing to pin.', true);
+        return;
+      }
+
+      const ok = confirm(
+        `Pin ${total} channel id${total === 1 ? '' : 's'} as the default suggestions for this Sportio instance?\n\n` +
+        `${summary.join('\n')}\n\n` +
+        `Only the channel ids are stored - no URLs, no provider credentials. ` +
+        `They will be suggested first if you switch IPTV provider.\n\nThis replaces any previously pinned defaults.`
+      );
+      if (!ok) return;
+
+      try {
+        const res = await fetch('/api/networks/defaults', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, fromNetworkLinks: true })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          showStatus(data.error || 'Could not save defaults.', true);
+          return;
+        }
+        showStatus(`Pinned ${total} channel id${total === 1 ? '' : 's'} as defaults.`);
+      } catch (err) {
+        showStatus('Network error while saving defaults.', true);
       }
     }
 

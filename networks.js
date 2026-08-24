@@ -284,6 +284,47 @@ function validateNetworkLinks(networkKey, rawLinks) {
 }
 
 // ---------------------------------------------------------------------
+// Saved channels
+// ---------------------------------------------------------------------
+
+// Channels the user keeps for their own sake, unattached to any network.
+//
+// Providers spin up temporary channels for one-off events - a wrestling
+// card, a title fight - named after the event rather than any station.
+// There is no network to file those under, and no reason for the game
+// matcher to know about them, but they are still worth keeping to hand
+// once found.
+//
+// Same entry shape as network links, so healing, quality probing and
+// encryption at rest all apply unchanged.
+const MAX_SAVED_CHANNELS = 50;
+
+function validateSavedChannels(rawChannels) {
+  if (!Array.isArray(rawChannels)) {
+    return { ok: false, error: 'Saved channels must be an array.' };
+  }
+  if (rawChannels.length > MAX_SAVED_CHANNELS) {
+    return { ok: false, error: `At most ${MAX_SAVED_CHANNELS} saved channels.` };
+  }
+
+  const channels = [];
+  const seenUrls = new Set();
+  for (const raw of rawChannels) {
+    if (!raw || typeof raw !== 'object') {
+      return { ok: false, error: 'Each saved channel must be an object.' };
+    }
+    const entry = makeLinkEntry(raw);
+    if (!/^https?:\/\//i.test(entry.url)) {
+      return { ok: false, error: 'Saved channels need an http(s) stream URL.' };
+    }
+    if (seenUrls.has(entry.url)) continue;   // silently dedupe rather than reject
+    seenUrls.add(entry.url);
+    channels.push(entry);
+  }
+  return { ok: true, channels };
+}
+
+// ---------------------------------------------------------------------
 // Link resolution + healing
 // ---------------------------------------------------------------------
 
@@ -363,6 +404,34 @@ function resolveNetworkLinks(networkLinks, networkKey, source, buildXtreamUrl) {
       return;
     }
 
+    resolved.push({
+      ...entry,
+      url: result.url,
+      name: result.channel?.name || entry.name,
+      group: result.channel?.categories?.[0] || entry.group,
+      slot: index + 1,
+      status: result.status,
+      note: result.note,
+    });
+  });
+
+  return { resolved, problems };
+}
+
+// Resolves saved channels against the current playlist, healing rotated
+// URLs exactly as network links are healed. Returns the same
+// { resolved, problems } split so the caller can tell "gone" from
+// "moved".
+function resolveSavedChannels(savedChannels, source) {
+  const resolved = [];
+  const problems = [];
+
+  (savedChannels || []).forEach((entry, index) => {
+    const result = resolveLinkEntry(entry, source);
+    if (result.status === 'missing') {
+      problems.push({ slot: index + 1, name: entry.name || entry.url, reason: result.note });
+      return;
+    }
     resolved.push({
       ...entry,
       url: result.url,
@@ -746,7 +815,15 @@ function isDeadChannel(categories) {
 // Scores one channel as a candidate for one network. Returns null when
 // the channel isn't a plausible match at all, which is the common case -
 // only an exact match on the cleaned name or on the tvg-id qualifies.
-function scoreChannelForNetwork(channel, network) {
+// A channel whose tvg-id the user has previously chosen for this network
+// outranks everything else. Carried across IPTV providers because tvg-ids
+// come from shared EPG naming ("espn.us", "secnetwork.us") rather than
+// from any one provider's playlist - which is what makes them portable,
+// and why they are the only thing stored as a default. No URL, no
+// credentials, nothing account-specific.
+const PREFERRED_TVG_BONUS = 200;
+
+function scoreChannelForNetwork(channel, network, preferredTvgIds) {
   const aliases = new Set(network.aliases.map(normalizeNetworkName));
   const coreName = normalizeNetworkName(stripChannelDecorations(channel.name));
   const idCore = normalizeTvgId(channel.id);
@@ -757,6 +834,8 @@ function scoreChannelForNetwork(channel, network) {
 
   // Dead channels are never suggested, however well they otherwise match.
   if (isDeadChannel(channel.categories)) return null;
+
+  const preferred = preferredTvgIds && preferredTvgIds.has(channel.id);
 
   let score = 0;
   if (nameHit) score += 100;
@@ -781,6 +860,12 @@ function scoreChannelForNetwork(channel, network) {
   // pick when the non-backup feed is right there beside it.
   if (/\bbackup\b/i.test(foldSuperscripts(channel.name))) score -= 8;
 
+  // Applied last and large enough to clear MIN_SUGGESTION_SCORE on
+  // its own: a channel the user picked before is a stated
+  // preference, which beats anything this function can infer from
+  // a name.
+  if (preferred) score += PREFERRED_TVG_BONUS;
+
   return score;
 }
 
@@ -801,21 +886,26 @@ const MIN_SUGGESTION_SCORE = 100;
 // networks the "right" answer is whichever market the user actually wants
 // and nothing in the playlist can reveal that. So this proposes, and the
 // user disposes.
-function suggestChannelsForNetwork(networkKey, channels, limit = MAX_SUGGESTIONS) {
+function suggestChannelsForNetwork(networkKey, channels, options = {}) {
+  const limit = options.limit || MAX_SUGGESTIONS;
+  const preferredTvgIds = options.preferredTvgIds instanceof Set
+    ? options.preferredTvgIds
+    : new Set(options.preferredTvgIds || []);
+
   const network = NETWORK_BY_KEY.get(networkKey);
   if (!network) return [];
 
   const scored = [];
   for (const channel of channels || []) {
-    const score = scoreChannelForNetwork(channel, network);
+    const score = scoreChannelForNetwork(channel, network, preferredTvgIds);
     if (score === null) continue;
     if (score < MIN_SUGGESTION_SCORE) continue;
-    scored.push({ channel, score });
+    scored.push({ channel, score, preferred: preferredTvgIds.has(channel.id) });
   }
 
   scored.sort((a, b) => b.score - a.score || a.channel.name.localeCompare(b.channel.name));
 
-  return scored.slice(0, limit).map(({ channel, score }) => ({
+  return scored.slice(0, limit).map(({ channel, score, preferred }) => ({
     ...makeLinkEntry({
       url: channel.streamUrl,
       tvgId: channel.id,
@@ -824,15 +914,20 @@ function suggestChannelsForNetwork(networkKey, channels, limit = MAX_SUGGESTIONS
       type: 'm3u',
     }),
     score,
+    preferred,
     quality: detectQuality(channel.name).label,
     groups: channel.categories || [],
   }));
 }
 
-function suggestAllNetworks(channels, limit = MAX_SUGGESTIONS) {
+function suggestAllNetworks(channels, options = {}) {
+  const defaults = options.defaults || {};
   const out = {};
   for (const network of NETWORKS) {
-    out[network.key] = suggestChannelsForNetwork(network.key, channels, limit);
+    out[network.key] = suggestChannelsForNetwork(network.key, channels, {
+      limit: options.limit,
+      preferredTvgIds: new Set(defaults[network.key] || []),
+    });
   }
   return out;
 }
@@ -952,6 +1047,10 @@ module.exports = {
   getNetworkLabel,
   MIN_SUGGESTION_SCORE,
   MAX_SUGGESTIONS,
+  MAX_SAVED_CHANNELS,
+  PREFERRED_TVG_BONUS,
+  validateSavedChannels,
+  resolveSavedChannels,
   COMBINE_AT_OR_BELOW,
   needsTiers,
   isDeadChannel,
