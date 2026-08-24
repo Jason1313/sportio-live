@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sportio Live - Watch</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    body { background-color: #16202a; color: #e6e6e6; }
+    .card { transition: transform .12s ease, box-shadow .12s ease; }
+    .card:hover, .card:focus { transform: translateY(-3px); box-shadow: 0 10px 24px rgba(0,0,0,.45); outline: none; }
+    .card:focus .poster { border-color: #5aa8d1; }
+  </style>
+</head>
+<body class="min-h-screen">
+
+<header class="sticky top-0 z-30 bg-[#16202a]/95 backdrop-blur border-b border-white/10">
+  <div class="max-w-[1600px] mx-auto px-5 py-3 flex items-center gap-4">
+    <span class="font-black tracking-tight text-lg">SPORTIO <span class="text-[#5aa8d1]">LIVE</span></span>
+    <nav id="catalog-tabs" class="flex-1 flex flex-wrap gap-1.5"></nav>
+    <button onclick="toggleSetup()" class="text-xs font-bold text-[#e6e6e6]/60 hover:text-[#e6e6e6] transition shrink-0">
+      <i class="fa-solid fa-gear mr-1.5"></i>Player setup
+    </button>
+  </div>
+</header>
+
+<!-- UUID gate -->
+<section id="gate" class="hidden max-w-md mx-auto mt-24 px-5">
+  <h1 class="text-xl font-bold mb-1">Connect to your account</h1>
+  <p class="text-xs text-[#e6e6e6]/55 mb-4">
+    Paste the UUID from your Sportio Live dashboard. It is stored in this browser only.
+  </p>
+  <input id="gate-uuid" type="text" placeholder="00000000-0000-0000-0000-000000000000"
+         class="w-full bg-[#1f2b36] border border-white/15 rounded-lg px-3 py-2.5 text-sm font-mono focus:border-[#3b8fc4] focus:outline-none mb-3">
+  <button onclick="saveUuid()" class="w-full bg-[#3b8fc4] hover:bg-[#4fa3d8] font-bold py-2.5 rounded-lg text-sm transition">Continue</button>
+  <p id="gate-error" class="hidden text-xs text-[#e56a6a] mt-3"></p>
+</section>
+
+<!-- Player setup -->
+<section id="setup" class="hidden max-w-3xl mx-auto mt-8 px-5 pb-16">
+  <h1 class="text-xl font-bold mb-1">One-time player setup</h1>
+  <p class="text-xs text-[#e6e6e6]/55 mb-5 leading-relaxed">
+    Clicking a stream hands its URL to a <code class="text-[#5aa8d1]">sportio:</code> link, which Windows passes
+    straight to mpv. Nothing is downloaded &mdash; the browser never fetches the stream, it only passes the address along.
+    This is the same mechanism Stremio already uses on this machine.
+  </p>
+
+  <div class="bg-[#1f2b36] border border-white/10 rounded-lg p-4 mb-4">
+    <label class="block text-xs font-bold text-[#e6e6e6]/70 mb-1.5">Path to mpv.exe</label>
+    <input id="mpv-path" type="text" value="C:\Program Files\mpv\mpv.exe" oninput="renderSetupFiles()"
+           class="w-full bg-[#16202a] border border-white/15 rounded px-3 py-2 text-xs font-mono focus:border-[#3b8fc4] focus:outline-none">
+    <label class="block text-xs font-bold text-[#e6e6e6]/70 mt-3 mb-1.5">Where to save the helper script</label>
+    <input id="script-path" type="text" value="C:\Users\Public\sportio-play.ps1" oninput="renderSetupFiles()"
+           class="w-full bg-[#16202a] border border-white/15 rounded px-3 py-2 text-xs font-mono focus:border-[#3b8fc4] focus:outline-none">
+  </div>
+
+  <ol class="text-xs text-[#e6e6e6]/70 space-y-4 leading-relaxed">
+    <li>
+      <span class="font-bold text-[#e6e6e6]">1.</span> Save this as the helper script at the path above.
+      <button onclick="copyBox('ps1-box','Script copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
+      <pre id="ps1-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre"></pre>
+    </li>
+    <li>
+      <span class="font-bold text-[#e6e6e6]">2.</span> Save this as <code>sportio.reg</code> and double-click it.
+      It writes to <code>HKEY_CURRENT_USER</code> only, so no administrator rights are needed.
+      <button onclick="copyBox('reg-box','Registry file copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
+      <pre id="reg-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre"></pre>
+    </li>
+    <li>
+      <span class="font-bold text-[#e6e6e6]">3.</span> Click any stream. Your browser will ask once whether to open it &mdash;
+      tick &ldquo;always allow&rdquo; and it will not ask again.
+    </li>
+  </ol>
+
+  <button onclick="toggleSetup()" class="mt-6 bg-[#3f5460] hover:bg-[#56707d] text-xs font-bold py-2 px-4 rounded-lg transition">
+    Back to browsing
+  </button>
+</section>
+
+<!-- Main browsing area -->
+<main id="browse" class="hidden max-w-[1600px] mx-auto px-5 py-6">
+  <div id="grid" class="grid gap-4" style="grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));"></div>
+  <p id="grid-empty" class="hidden text-sm text-[#e6e6e6]/45 py-16 text-center"></p>
+</main>
+
+<!-- Stream picker -->
+<div id="streams" class="hidden fixed inset-0 z-40 bg-black/70 backdrop-blur-sm" onclick="if(event.target===this)closeStreams()">
+  <div class="max-w-2xl mx-auto mt-20 bg-[#1f2b36] border border-white/10 rounded-xl overflow-hidden shadow-2xl">
+    <div class="flex items-start gap-3 px-5 py-4 border-b border-white/10">
+      <div class="flex-1 min-w-0">
+        <h2 id="streams-title" class="font-bold text-sm truncate"></h2>
+        <p id="streams-sub" class="text-[11px] text-[#e6e6e6]/45 mt-0.5 whitespace-pre-line"></p>
+      </div>
+      <button onclick="closeStreams()" class="text-[#e6e6e6]/45 hover:text-[#e6e6e6] transition shrink-0"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <div id="streams-list" class="max-h-[60vh] overflow-y-auto p-2"></div>
+  </div>
+</div>
+
+<div id="toast" class="hidden fixed bottom-5 right-5 z-50 bg-[#1f3a21]/95 border border-[#4a9d52] text-[#a8e0ac] text-sm font-semibold rounded-lg px-4 py-3 shadow-2xl"></div>
+
+<script>
+  // The addon's own catalog/meta/stream endpoints already return everything
+  // a browsing UI needs, keyed by the account UUID. This page consumes them
+  // directly rather than adding a parallel API - which also means Stremio
+  // and this page can never drift apart, because there is only one
+  // implementation behind both.
+  const PROTOCOL = 'sportio';
+
+  let uuid = localStorage.getItem('sportio.uuid') || new URLSearchParams(location.search).get('uuid') || '';
+  let catalogs = [];
+  let activeCatalog = null;
+
+  function showToast(msg, isError) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.className = `fixed bottom-5 right-5 z-50 text-sm font-semibold rounded-lg px-4 py-3 shadow-2xl border ${
+      isError ? 'bg-[#3a1f1f]/95 border-[#c0392b] text-[#f0b8b8]' : 'bg-[#1f3a21]/95 border-[#4a9d52] text-[#a8e0ac]'}`;
+    el.classList.remove('hidden');
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(() => el.classList.add('hidden'), 4000);
+  }
+
+  function show(section) {
+    ['gate', 'setup', 'browse'].forEach(id =>
+      document.getElementById(id).classList.toggle('hidden', id !== section));
+  }
+
+  // --- Player link ---------------------------------------------------
+  //
+  // base64url, not percent-encoding. An IPTV stream URL carries the
+  // account's username and password in its path, so it can contain any
+  // character at all - and a raw '&' or '%' surviving the trip through a
+  // URI, the Windows shell and PowerShell intact is not something to rely
+  // on. base64 makes the payload opaque to every layer in between.
+  //
+  // Deliberately an opaque URI (`sportio:xxx`, no `//`): with an authority
+  // component some browsers normalise the host and can append a trailing
+  // slash, which would corrupt the payload.
+  function toBase64Url(text) {
+    const bytes = new TextEncoder().encode(text);
+    let binary = '';
+    bytes.forEach(b => { binary += String.fromCharCode(b); });
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  function playLink(streamUrl) {
+    return `${PROTOCOL}:${toBase64Url(streamUrl)}`;
+  }
+
+  // --- Setup files ---------------------------------------------------
+  function renderSetupFiles() {
+    const mpv = document.getElementById('mpv-path').value.trim() || 'C:\\Program Files\\mpv\\mpv.exe';
+    const script = document.getElementById('script-path').value.trim() || 'C:\\Users\\Public\\sportio-play.ps1';
+
+    document.getElementById('ps1-box').textContent = [
+      '# Receives a sportio: URI, decodes the stream URL and hands it to mpv.',
+      '# The stream is fetched by mpv directly - nothing is downloaded first.',
+      'param([string]$Uri)',
+      '',
+      '$payload = $Uri -replace "^' + PROTOCOL + ':(//)?(play/)?", ""',
+      '$payload = $payload.TrimEnd("/")',
+      '$payload = $payload.Replace("-", "+").Replace("_", "/")',
+      'switch ($payload.Length % 4) { 2 { $payload += "==" } 3 { $payload += "=" } }',
+      '',
+      '$url = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload))',
+      'Start-Process -FilePath "' + mpv + '" -ArgumentList @($url)'
+    ].join('\n');
+
+    const psExe = 'C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe';
+    const cmd = `\\"${psExe}\\" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \\"${script.replace(/\\/g, '\\\\')}\\" \\"%1\\"`;
+
+    document.getElementById('reg-box').textContent = [
+      'Windows Registry Editor Version 5.00',
+      '',
+      `[HKEY_CURRENT_USER\\SOFTWARE\\Classes\\${PROTOCOL}]`,
+      '@="URL:Sportio Live"',
+      '"URL Protocol"=""',
+      '',
+      `[HKEY_CURRENT_USER\\SOFTWARE\\Classes\\${PROTOCOL}\\shell\\open\\command]`,
+      `@="${cmd}"`,
+      ''
+    ].join('\n');
+  }
+
+  function copyBox(id, msg) {
+    const text = document.getElementById(id).textContent;
+    navigator.clipboard.writeText(text).then(() => showToast(msg), () => showToast('Could not copy.', true));
+  }
+
+  function toggleSetup() {
+    const isSetup = !document.getElementById('setup').classList.contains('hidden');
+    if (isSetup) { show('browse'); }
+    else { renderSetupFiles(); show('setup'); }
+  }
+
+  // --- Account -------------------------------------------------------
+  function saveUuid() {
+    const value = document.getElementById('gate-uuid').value.trim();
+    const err = document.getElementById('gate-error');
+    if (!/^[0-9a-f-]{30,}$/i.test(value)) {
+      err.textContent = 'That does not look like a UUID.';
+      err.classList.remove('hidden');
+      return;
+    }
+    uuid = value;
+    localStorage.setItem('sportio.uuid', uuid);
+    err.classList.add('hidden');
+    boot();
+  }
+
+  // --- Browsing ------------------------------------------------------
+  async function boot() {
+    if (!uuid) { show('gate'); return; }
+    try {
+      const res = await fetch(`/user/${encodeURIComponent(uuid)}/manifest.json`);
+      if (!res.ok) throw new Error('not found');
+      const manifest = await res.json();
+      catalogs = manifest.catalogs || [];
+    } catch (err) {
+      localStorage.removeItem('sportio.uuid');
+      uuid = '';
+      show('gate');
+      const el = document.getElementById('gate-error');
+      el.textContent = 'That UUID was not recognised by the server.';
+      el.classList.remove('hidden');
+      return;
+    }
+
+    renderTabs();
+    show('browse');
+    if (catalogs.length > 0) selectCatalog(catalogs[0].id);
+    else {
+      document.getElementById('grid').innerHTML = '';
+      showEmpty('No leagues configured yet. Set them up in the dashboard first.');
+    }
+  }
+
+  function renderTabs() {
+    document.getElementById('catalog-tabs').innerHTML = catalogs.map(c => `
+      <button onclick="selectCatalog('${c.id}')" data-tab="${c.id}"
+              class="text-xs font-bold px-3 py-1.5 rounded-full transition">${escapeHtml(c.name)}</button>`).join('');
+    highlightTab();
+  }
+
+  function highlightTab() {
+    document.querySelectorAll('#catalog-tabs button').forEach(b => {
+      const on = b.dataset.tab === activeCatalog;
+      b.className = `text-xs font-bold px-3 py-1.5 rounded-full transition ${
+        on ? 'bg-[#3b8fc4] text-white' : 'text-[#e6e6e6]/55 hover:text-[#e6e6e6] hover:bg-white/5'}`;
+    });
+  }
+
+  function showEmpty(msg) {
+    const el = document.getElementById('grid-empty');
+    el.textContent = msg;
+    el.classList.toggle('hidden', !msg);
+  }
+
+  async function selectCatalog(id) {
+    activeCatalog = id;
+    highlightTab();
+    const grid = document.getElementById('grid');
+    grid.innerHTML = '';
+    showEmpty('Loading...');
+
+    let metas = [];
+    try {
+      const res = await fetch(`/user/${encodeURIComponent(uuid)}/catalog/sports/${encodeURIComponent(id)}.json`);
+      metas = (await res.json()).metas || [];
+    } catch (err) {
+      showEmpty('Could not load that catalog.');
+      return;
+    }
+
+    if (metas.length === 0) { showEmpty('Nothing on right now.'); return; }
+    showEmpty('');
+
+    grid.innerHTML = metas.map(m => `
+      <button class="card text-left" onclick="openStreams('${encodeURIComponent(m.id)}')">
+        <img class="poster w-full rounded-lg border border-white/10 bg-[#1f2b36] object-cover" loading="lazy"
+             style="aspect-ratio: 2 / 3"
+             src="${escapeHtml(m.poster || '')}" alt="">
+        <span class="block text-xs mt-2 leading-snug">${escapeHtml(m.name || '')}</span>
+      </button>`).join('');
+  }
+
+  async function openStreams(encodedId) {
+    const id = decodeURIComponent(encodedId);
+    const panel = document.getElementById('streams');
+    const list = document.getElementById('streams-list');
+
+    document.getElementById('streams-title').textContent = 'Loading...';
+    document.getElementById('streams-sub').textContent = '';
+    list.innerHTML = '';
+    panel.classList.remove('hidden');
+
+    let meta = {}, streams = [];
+    try {
+      const [metaRes, streamRes] = await Promise.all([
+        fetch(`/user/${encodeURIComponent(uuid)}/meta/sports/${encodeURIComponent(id)}.json`),
+        fetch(`/user/${encodeURIComponent(uuid)}/stream/sports/${encodeURIComponent(id)}.json`)
+      ]);
+      meta = (await metaRes.json()).meta || {};
+      streams = (await streamRes.json()).streams || [];
+    } catch (err) {
+      document.getElementById('streams-title').textContent = 'Could not load streams';
+      return;
+    }
+
+    document.getElementById('streams-title').textContent = meta.name || 'Streams';
+    document.getElementById('streams-sub').textContent = meta.description || '';
+
+    if (streams.length === 0) {
+      list.innerHTML = '<p class="text-xs text-[#e6e6e6]/45 p-4 text-center">No streams matched this one.</p>';
+      return;
+    }
+
+    list.innerHTML = streams.map(s => {
+      // A stream with no url is an informational entry from the addon (for
+      // example "on FOX, no channels configured"), not something playable.
+      if (!s.url) {
+        return `<div class="px-3 py-2.5 text-[11px] text-[#c9992e] leading-snug">
+                  ${escapeHtml(s.name || '')} ${escapeHtml(s.title || '')}
+                </div>`;
+      }
+      return `<a href="${escapeHtml(playLink(s.url))}" onclick="notePlaying()"
+                 class="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-white/5 transition">
+                <i class="fa-solid fa-play text-[10px] text-[#5aa8d1] shrink-0"></i>
+                <span class="flex-1 min-w-0">
+                  <span class="block text-xs font-semibold truncate">${escapeHtml(s.name || 'Stream')}</span>
+                  <span class="block text-[10px] text-[#e6e6e6]/45 truncate">${escapeHtml(s.title || '')}</span>
+                </span>
+                <i class="fa-solid fa-arrow-up-right-from-square text-[10px] text-[#e6e6e6]/25 shrink-0"></i>
+              </a>`;
+    }).join('');
+  }
+
+  function notePlaying() {
+    // The browser cannot tell us whether mpv actually started, so this says
+    // what was attempted rather than claiming success.
+    showToast('Handed to mpv. If nothing opens, check Player setup.');
+  }
+
+  function closeStreams() {
+    document.getElementById('streams').classList.add('hidden');
+  }
+
+  function escapeHtml(str) {
+    return String(str == null ? '' : str)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+  }
+
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeStreams(); });
+
+  boot();
+</script>
+</body>
+</html>

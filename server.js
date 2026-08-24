@@ -2594,6 +2594,13 @@ function networkArtUrls(hostUrl, key) {
   };
 }
 
+// The browser watch UI. A convenience alias - express.static already
+// serves the file at /watch.html - so the address people actually type is
+// the short one.
+app.get('/watch', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'watch.html'));
+});
+
 app.get('/network/:key/poster.svg', (req, res) => {
   res.setHeader('Content-Type', 'image/svg+xml');
   res.setHeader('Cache-Control', 'public, max-age=86400');
