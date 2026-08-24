@@ -2112,7 +2112,8 @@
               ${quality}
             </div>
             <div class="text-[10px] text-[#e6e6e6]/45 truncate">
-              <span class="font-mono text-[#5aa8d1]/70">#${escapeHtml(streamIdFromUrl(link.url))}</span>
+              <span class="font-mono text-[#5aa8d1]/70" title="Stream id - unique to this feed, specific to your provider">#${escapeHtml(streamIdFromUrl(link.url))}</span>
+              ${link.tvgId ? `<span class="font-mono text-[#e6e6e6]/35" title="Channel id - shared by every feed of this channel, and what Save As Defaults stores">${escapeHtml(link.tvgId)}</span>` : ''}
               ${link.group ? '&middot; ' + escapeHtml(link.group) : ''}
             </div>
             ${healedNote}
@@ -2655,9 +2656,22 @@
     async function saveNetworkDefaults() {
       const summary = [];
       let total = 0;
+      let collapsed = 0;
       for (const network of networkRegistry) {
-        const ids = [...new Set(readNetworkLinks(network.key).map(l => l.tvgId).filter(Boolean))];
-        if (ids.length > 0) { summary.push(`${network.label}: ${ids.length}`); total += ids.length; }
+        const links = readNetworkLinks(network.key);
+        const ids = [...new Set(links.map(l => l.tvgId).filter(Boolean))];
+        if (ids.length === 0) continue;
+        total += ids.length;
+
+        // Several feeds of one channel share a channel id - five CBS Sports
+        // Network entries are five different streams under one
+        // "cbssportsnetwork.us". Saying "1" without saying why looks like
+        // four of them were thrown away, so spell it out.
+        const note = links.length > ids.length
+          ? ` (${links.length} channels share ${ids.length === 1 ? 'it' : 'them'})`
+          : '';
+        if (links.length > ids.length) collapsed++;
+        summary.push(`${network.label}: ${ids.length}${note}`);
       }
 
       if (total === 0) {
@@ -2665,10 +2679,17 @@
         return;
       }
 
+      const explain = collapsed > 0
+        ? `\nChannel ids are shared by every feed of the same channel, which is what makes them ` +
+          `portable to a different provider. The specific feeds you picked stay exactly as they are - ` +
+          `nothing is removed here.\n`
+        : '';
+
       const ok = confirm(
         `Pin ${total} channel id${total === 1 ? '' : 's'} as the default suggestions for this Sportio instance?\n\n` +
-        `${summary.join('\n')}\n\n` +
-        `Only the channel ids are stored - no URLs, no provider credentials. ` +
+        `${summary.join('\n')}\n` +
+        `${explain}\n` +
+        `Only channel ids are stored - no URLs, no stream ids, no provider credentials. ` +
         `They will be suggested first if you switch IPTV provider.\n\nThis replaces any previously pinned defaults.`
       );
       if (!ok) return;
