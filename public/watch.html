@@ -54,6 +54,7 @@
     <label class="block text-xs font-bold text-[#e6e6e6]/70 mt-3 mb-1.5">Media player</label>
     <div class="flex flex-wrap gap-1.5 mb-2">
       <button onclick="usePreset('C:\\Program Files\\mpv\\mpv.exe')" class="text-[10px] px-2 py-1 rounded bg-[#2f3e47] border border-white/10 hover:border-[#3b8fc4] transition">mpv</button>
+      <button onclick="usePreset('C:\\Program Files\\mpv.net\\mpvnet.exe')" class="text-[10px] px-2 py-1 rounded bg-[#2f3e47] border border-white/10 hover:border-[#3b8fc4] transition">mpv.net</button>
       <button onclick="usePreset('C:\\Program Files\\MPC-QT\\mpc-qt.exe')" class="text-[10px] px-2 py-1 rounded bg-[#2f3e47] border border-white/10 hover:border-[#3b8fc4] transition">MPC-QT</button>
       <button onclick="usePreset('C:\\Program Files\\VideoLAN\\VLC\\vlc.exe')" class="text-[10px] px-2 py-1 rounded bg-[#2f3e47] border border-white/10 hover:border-[#3b8fc4] transition">VLC</button>
       <button onclick="usePreset('C:\\Program Files\\DAUM\\PotPlayer\\PotPlayerMini64.exe')" class="text-[10px] px-2 py-1 rounded bg-[#2f3e47] border border-white/10 hover:border-[#3b8fc4] transition">PotPlayer</button>
@@ -245,6 +246,15 @@
       '    Where-Object { $_ -and -not $_.StartsWith("#") })',
       '  if ($lines.Count -ge 1) { $player = $lines[0] }',
       '  if ($lines.Count -ge 2) { $extraArgs = $lines[1..($lines.Count - 1)] }',
+      '}',
+      '',
+      '# A configured path that does not exist is a typo, not a preference.',
+      '# Falling back silently made a mistyped path look like the wrong',
+      '# player being chosen on purpose - observed exactly that, where',
+      '# "\\mpv\\mpvnet.exe" instead of "\\mpv.net\\mpvnet.exe" quietly played',
+      '# plain mpv instead. Still falls back so something plays, but says so.',
+      'if ($player -and -not (Test-Path -LiteralPath $player)) {',
+      '  Warn("Configured player not found:`n$player`n`nFalling back to an installed player. Check $configFile")',
       '}',
       '',
       '# Fall back to whatever is actually installed, so a missing or',
