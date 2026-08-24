@@ -317,11 +317,15 @@ let m3uSettings = loadM3uSettings();
 
 // Preferred tvg-ids per network, shared by the whole instance.
 //
-// Deliberately IDS ONLY - no URLs, no credentials, nothing tied to one
-// provider account. tvg-ids come from shared EPG naming rather than any
-// one provider's playlist, which is exactly what makes them portable to
-// a different IPTV service. That portability is the point: switch
-// provider and the channels you already chose are suggested again.
+// Stream ids only - never a URL, which for M3U carries the provider
+// username and password in its path. A bare id like "429939" is not a
+// credential.
+//
+// Keyed on stream id rather than channel id so a pin identifies the
+// exact feed that was chosen: several feeds of one channel share a
+// channel id and cannot be told apart by it. The trade is that stream
+// ids are assigned per provider, so these are exact here and match
+// nothing on a different IPTV service.
 const NETWORK_DEFAULTS_FILE = path.join(DATA_DIR, 'network-defaults.json');
 
 function loadNetworkDefaults() {
@@ -2130,13 +2134,13 @@ app.post('/api/networks/defaults', async (req, res) => {
     const derived = {};
     for (const [networkKey, links] of Object.entries(auth.user.networkLinks || {})) {
       if (!Array.isArray(links)) continue;
-      const ids = [...new Set(links.map(l => l.tvgId).filter(Boolean))];
+      const ids = [...new Set(links.map(l => networks.streamIdFromUrl(l.url)).filter(Boolean))];
       if (ids.length > 0) derived[networkKey] = ids;
     }
     networkDefaults = derived;
     saveNetworkDefaults(networkDefaults);
     const total = Object.values(derived).reduce((n, ids) => n + ids.length, 0);
-    console.log(`[Defaults] Saved ${total} tvg-id(s) across ${Object.keys(derived).length} network(s)`);
+    console.log(`[Defaults] Saved ${total} stream id(s) across ${Object.keys(derived).length} network(s)`);
   }
 
   return res.json({ success: true, defaults: networkDefaults });

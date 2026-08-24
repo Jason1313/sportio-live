@@ -815,15 +815,33 @@ function isDeadChannel(categories) {
 // Scores one channel as a candidate for one network. Returns null when
 // the channel isn't a plausible match at all, which is the common case -
 // only an exact match on the cleaned name or on the tvg-id qualifies.
-// A channel whose tvg-id the user has previously chosen for this network
+// The trailing id from a stream URL (".../429939.ts" -> "429939").
+//
+// This is what distinguishes one feed from another. A channel id is
+// shared by every feed of the same channel - five CBS Sports Network
+// streams all carry "cbssportsnetwork.us" - so it cannot say WHICH of
+// them was chosen. The stream id can.
+//
+// The cost is portability: a stream id is assigned by one provider and
+// means nothing to another, so pinned defaults are exact on the
+// provider they were captured from and match nothing anywhere else.
+//
+// Not a credential. The URL is .../live/USER/PASS/429939.ts and only
+// the last segment is taken.
+function streamIdFromUrl(url) {
+  const match = String(url || '').match(/\/([^\/?#]+?)(?:\.[a-z0-9]+)?(?:[?#].*)?$/i);
+  return match ? match[1] : '';
+}
+
+// A channel whose stream the user has previously chosen for this network
 // outranks everything else. Carried across IPTV providers because tvg-ids
 // come from shared EPG naming ("espn.us", "secnetwork.us") rather than
 // from any one provider's playlist - which is what makes them portable,
 // and why they are the only thing stored as a default. No URL, no
 // credentials, nothing account-specific.
-const PREFERRED_TVG_BONUS = 200;
+const PREFERRED_STREAM_BONUS = 200;
 
-function scoreChannelForNetwork(channel, network, preferredTvgIds) {
+function scoreChannelForNetwork(channel, network, preferredStreamIds) {
   const aliases = new Set(network.aliases.map(normalizeNetworkName));
   const coreName = normalizeNetworkName(stripChannelDecorations(channel.name));
   const idCore = normalizeTvgId(channel.id);
@@ -835,7 +853,7 @@ function scoreChannelForNetwork(channel, network, preferredTvgIds) {
   // Dead channels are never suggested, however well they otherwise match.
   if (isDeadChannel(channel.categories)) return null;
 
-  const preferred = preferredTvgIds && preferredTvgIds.has(channel.id);
+  const preferred = !!preferredStreamIds && preferredStreamIds.has(streamIdFromUrl(channel.streamUrl));
 
   let score = 0;
   if (nameHit) score += 100;
@@ -864,7 +882,7 @@ function scoreChannelForNetwork(channel, network, preferredTvgIds) {
   // its own: a channel the user picked before is a stated
   // preference, which beats anything this function can infer from
   // a name.
-  if (preferred) score += PREFERRED_TVG_BONUS;
+  if (preferred) score += PREFERRED_STREAM_BONUS;
 
   return score;
 }
@@ -888,19 +906,19 @@ const MIN_SUGGESTION_SCORE = 100;
 // user disposes.
 function suggestChannelsForNetwork(networkKey, channels, options = {}) {
   const limit = options.limit || MAX_SUGGESTIONS;
-  const preferredTvgIds = options.preferredTvgIds instanceof Set
-    ? options.preferredTvgIds
-    : new Set(options.preferredTvgIds || []);
+  const preferredStreamIds = options.preferredStreamIds instanceof Set
+    ? options.preferredStreamIds
+    : new Set(options.preferredStreamIds || []);
 
   const network = NETWORK_BY_KEY.get(networkKey);
   if (!network) return [];
 
   const scored = [];
   for (const channel of channels || []) {
-    const score = scoreChannelForNetwork(channel, network, preferredTvgIds);
+    const score = scoreChannelForNetwork(channel, network, preferredStreamIds);
     if (score === null) continue;
     if (score < MIN_SUGGESTION_SCORE) continue;
-    scored.push({ channel, score, preferred: preferredTvgIds.has(channel.id) });
+    scored.push({ channel, score, preferred: preferredStreamIds.has(streamIdFromUrl(channel.streamUrl)) });
   }
 
   scored.sort((a, b) => b.score - a.score || a.channel.name.localeCompare(b.channel.name));
@@ -926,7 +944,7 @@ function suggestAllNetworks(channels, options = {}) {
   for (const network of NETWORKS) {
     out[network.key] = suggestChannelsForNetwork(network.key, channels, {
       limit: options.limit,
-      preferredTvgIds: new Set(defaults[network.key] || []),
+      preferredStreamIds: new Set(defaults[network.key] || []),
     });
   }
   return out;
@@ -1048,7 +1066,8 @@ module.exports = {
   MIN_SUGGESTION_SCORE,
   MAX_SUGGESTIONS,
   MAX_SAVED_CHANNELS,
-  PREFERRED_TVG_BONUS,
+  PREFERRED_STREAM_BONUS,
+  streamIdFromUrl,
   validateSavedChannels,
   resolveSavedChannels,
   COMBINE_AT_OR_BELOW,

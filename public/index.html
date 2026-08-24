@@ -2646,32 +2646,25 @@
       }
     }
 
-    // Pins the tvg-ids of the currently configured channels as the
-    // instance's default suggestions.
+    // Pins the currently configured channels as the instance's default
+    // suggestions, identified by stream id.
     //
     // Only ids travel - never a URL, which for M3U carries the provider
-    // username and password in its path. tvg-ids come from shared EPG
-    // naming rather than one provider's playlist, which is what lets them
-    // survive a change of IPTV service.
+    // username and password in its path. A bare "429939" is not a
+    // credential.
     async function saveNetworkDefaults() {
+      // Counted by STREAM id, so each feed is its own pin. Counting by
+      // channel id collapsed five CBS Sports Network feeds into one,
+      // because they all share "cbssportsnetwork.us" and it cannot tell
+      // them apart.
       const summary = [];
       let total = 0;
-      let collapsed = 0;
       for (const network of networkRegistry) {
-        const links = readNetworkLinks(network.key);
-        const ids = [...new Set(links.map(l => l.tvgId).filter(Boolean))];
+        const ids = [...new Set(readNetworkLinks(network.key)
+          .map(l => streamIdFromUrl(l.url)).filter(Boolean))];
         if (ids.length === 0) continue;
         total += ids.length;
-
-        // Several feeds of one channel share a channel id - five CBS Sports
-        // Network entries are five different streams under one
-        // "cbssportsnetwork.us". Saying "1" without saying why looks like
-        // four of them were thrown away, so spell it out.
-        const note = links.length > ids.length
-          ? ` (${links.length} channels share ${ids.length === 1 ? 'it' : 'them'})`
-          : '';
-        if (links.length > ids.length) collapsed++;
-        summary.push(`${network.label}: ${ids.length}${note}`);
+        summary.push(`${network.label}: ${ids.length}`);
       }
 
       if (total === 0) {
@@ -2679,18 +2672,13 @@
         return;
       }
 
-      const explain = collapsed > 0
-        ? `\nChannel ids are shared by every feed of the same channel, which is what makes them ` +
-          `portable to a different provider. The specific feeds you picked stay exactly as they are - ` +
-          `nothing is removed here.\n`
-        : '';
-
       const ok = confirm(
-        `Pin ${total} channel id${total === 1 ? '' : 's'} as the default suggestions for this Sportio instance?\n\n` +
-        `${summary.join('\n')}\n` +
-        `${explain}\n` +
-        `Only channel ids are stored - no URLs, no stream ids, no provider credentials. ` +
-        `They will be suggested first if you switch IPTV provider.\n\nThis replaces any previously pinned defaults.`
+        `Pin ${total} channel${total === 1 ? '' : 's'} as the default suggestions for this Sportio instance?\n\n` +
+        `${summary.join('\n')}\n\n` +
+        `Stream ids only - no URLs and no provider credentials.\n\n` +
+        `These identify the exact feeds you picked, which means they apply to this IPTV ` +
+        `provider. A different provider numbers its streams differently, so you would pin ` +
+        `again there.\n\nThis replaces any previously pinned defaults.`
       );
       if (!ok) return;
 
@@ -2705,7 +2693,7 @@
           showStatus(data.error || 'Could not save defaults.', true);
           return;
         }
-        showStatus(`Pinned ${total} channel id${total === 1 ? '' : 's'} as defaults.`);
+        showStatus(`Pinned ${total} channel${total === 1 ? '' : 's'} as defaults.`);
       } catch (err) {
         showStatus('Network error while saving defaults.', true);
       }
