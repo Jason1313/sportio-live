@@ -161,6 +161,7 @@
 
   // Saved channels: the user's own list, unattached to any network.
   const SAVED_CATALOG_ID = 'saved';
+  const HOME_CATALOG_ID = 'home';
   const PROBE_MAX_RESULTS = 20;
   const PROBE_DELAY_MS = 5000;
   let savedChannels = [];
@@ -437,21 +438,18 @@
     savedChannels = (savedRes.data && savedRes.data.channels) || [];
     seedProbeResultsFromSaved();
 
-    // Listed first: it is the only tab whose contents the user curates.
-    catalogs = [{ id: SAVED_CATALOG_ID, name: 'My Channels' }, ...catalogs];
+    // Home first, then the curated list, then the individual leagues.
+    catalogs = [
+      { id: HOME_CATALOG_ID, name: 'Home' },
+      { id: SAVED_CATALOG_ID, name: 'My Channels' },
+      ...catalogs
+    ];
 
     renderTabs();
     show('browse');
 
-    // Open on the first real league if there is one; "My Channels" is
-    // always present, so its own presence says nothing about whether
-    // anything is configured.
-    if (catalogs.length > 1) {
-      selectCatalog(catalogs[1].id);
-    } else {
-      selectCatalog(SAVED_CATALOG_ID);
-      showEmpty('No leagues configured yet. Set them up in the dashboard first.');
-    }
+    // Home handles the no-leagues-configured case itself.
+    selectCatalog(HOME_CATALOG_ID);
   }
 
   function renderTabs() {
@@ -475,9 +473,84 @@
     el.classList.toggle('hidden', !msg);
   }
 
+  // The "Upcoming Schedule" entry every league catalog carries. It is a
+  // placeholder rather than a game, so Home leaves it out - Home is for
+  // what is on now.
+  function isUpcomingPlaceholder(meta) {
+    return String(meta && meta.id || '').endsWith(':none');
+  }
+
+  // Catalogs that hold games, as opposed to TV Networks. Every league
+  // catalog id is built as sb_{sport}_{date}, so this picks them all up
+  // without naming individual leagues - a league added later joins Home
+  // on its own.
+  function gameCatalogs() {
+    return catalogs.filter(c => String(c.id).startsWith('sb_'));
+  }
+
+  async function fetchCatalogMetas(id) {
+    try {
+      const res = await fetch(`/user/${encodeURIComponent(uuid)}/catalog/sports/${encodeURIComponent(id)}.json`);
+      return (await res.json()).metas || [];
+    } catch (err) {
+      return null;   // null means "failed", [] means "nothing on"
+    }
+  }
+
+  function renderGameGrid(metas) {
+    document.getElementById('grid').innerHTML = metas.map(m => `
+      <button class="card text-left" onclick="openStreams('${encodeURIComponent(m.id)}')">
+        <img class="poster w-full rounded-lg border border-white/10 bg-[#1f2b36] object-cover" loading="lazy"
+             style="aspect-ratio: 2 / 3"
+             src="${escapeHtml(m.poster || '')}" alt="">
+        ${m.league ? `<span class="block text-[10px] uppercase tracking-wider text-[#5aa8d1] mt-2">${escapeHtml(m.league)}</span>` : ''}
+        <span class="block text-xs ${m.league ? 'mt-0.5' : 'mt-2'} leading-snug">${escapeHtml(m.name || '')}</span>
+      </button>`).join('');
+  }
+
+  // Every live game across every configured league, on one page.
+  async function loadHome() {
+    const sources = gameCatalogs();
+    if (sources.length === 0) {
+      showEmpty('No leagues configured yet. Set them up in the dashboard first.');
+      return;
+    }
+
+    showEmpty('Loading...');
+    const results = await Promise.all(sources.map(async c => {
+      const metas = await fetchCatalogMetas(c.id);
+      if (metas === null) return { failed: true, metas: [] };
+      // The league name doubles as the badge on each card, so a game is
+      // attributable at a glance when three leagues are mixed together.
+      const league = String(c.name || '').replace(/\s*Live Games$/i, '');
+      return { failed: false, metas: metas.filter(m => !isUpcomingPlaceholder(m)).map(m => ({ ...m, league })) };
+    }));
+
+    const games = results.flatMap(r => r.metas);
+    const failures = results.filter(r => r.failed).length;
+
+    if (games.length === 0) {
+      showEmpty(failures === sources.length
+        ? 'Could not reach the server for any league.'
+        : 'No games on right now. Each league tab has an Upcoming Schedule for what is next.');
+      document.getElementById('grid').innerHTML = '';
+      return;
+    }
+
+    showEmpty(failures > 0 ? `${failures} league${failures === 1 ? '' : 's'} could not be loaded.` : '');
+    renderGameGrid(games);
+  }
+
   async function selectCatalog(id) {
     activeCatalog = id;
     highlightTab();
+
+    // Picking a tab means "show me that", so leave whatever section is
+    // open - otherwise the Player setup page stays up while the tabs
+    // silently change the grid behind it, and the only way back is the
+    // Player setup button.
+    show('browse');
+
     const grid = document.getElementById('grid');
     const savedPanel = document.getElementById('saved-panel');
 
@@ -491,27 +564,19 @@
     }
 
     grid.innerHTML = '';
-    showEmpty('Loading...');
 
-    let metas = [];
-    try {
-      const res = await fetch(`/user/${encodeURIComponent(uuid)}/catalog/sports/${encodeURIComponent(id)}.json`);
-      metas = (await res.json()).metas || [];
-    } catch (err) {
-      showEmpty('Could not load that catalog.');
+    if (id === HOME_CATALOG_ID) {
+      await loadHome();
       return;
     }
 
+    showEmpty('Loading...');
+    const metas = await fetchCatalogMetas(id);
+    if (metas === null) { showEmpty('Could not load that catalog.'); return; }
     if (metas.length === 0) { showEmpty('Nothing on right now.'); return; }
-    showEmpty('');
 
-    grid.innerHTML = metas.map(m => `
-      <button class="card text-left" onclick="openStreams('${encodeURIComponent(m.id)}')">
-        <img class="poster w-full rounded-lg border border-white/10 bg-[#1f2b36] object-cover" loading="lazy"
-             style="aspect-ratio: 2 / 3"
-             src="${escapeHtml(m.poster || '')}" alt="">
-        <span class="block text-xs mt-2 leading-snug">${escapeHtml(m.name || '')}</span>
-      </button>`).join('');
+    showEmpty('');
+    renderGameGrid(metas);
   }
 
   async function openStreams(encodedId) {
