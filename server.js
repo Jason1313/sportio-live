@@ -185,7 +185,12 @@ if (!fs.existsSync(DATA_DIR)) {
 
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public'));
+// Resolved against the app directory, not the working directory. A bare
+// 'public' is relative to process.cwd(), so every static file - the
+// configurator, the watch page, the logo - 404s if the server is ever
+// started from anywhere other than its own folder. In Docker the WORKDIR
+// makes those the same and hides it; outside Docker it does not.
+app.use(express.static(path.join(__dirname, 'public')));
 
 // --- Login rate limiting ---
 // Tracks failed login attempts per IP address in memory.
