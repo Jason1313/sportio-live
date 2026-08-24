@@ -47,31 +47,56 @@
   </p>
 
   <div class="bg-[#1f2b36] border border-white/10 rounded-lg p-4 mb-4">
-    <label class="block text-xs font-bold text-[#e6e6e6]/70 mb-1.5">Path to mpv.exe</label>
-    <input id="mpv-path" type="text" value="C:\Program Files\mpv\mpv.exe" oninput="renderSetupFiles()"
-           class="w-full bg-[#16202a] border border-white/15 rounded px-3 py-2 text-xs font-mono focus:border-[#3b8fc4] focus:outline-none">
-    <label class="block text-xs font-bold text-[#e6e6e6]/70 mt-3 mb-1.5">Where to save the helper script</label>
+    <label class="block text-xs font-bold text-[#e6e6e6]/70 mb-1.5">Where the helper script lives</label>
     <input id="script-path" type="text" value="C:\Users\Public\sportio-play.ps1" oninput="renderSetupFiles()"
            class="w-full bg-[#16202a] border border-white/15 rounded px-3 py-2 text-xs font-mono focus:border-[#3b8fc4] focus:outline-none">
+
+    <label class="block text-xs font-bold text-[#e6e6e6]/70 mt-3 mb-1.5">Media player</label>
+    <div class="flex flex-wrap gap-1.5 mb-2">
+      <button onclick="usePreset('C:\\Program Files\\mpv\\mpv.exe')" class="text-[10px] px-2 py-1 rounded bg-[#2f3e47] border border-white/10 hover:border-[#3b8fc4] transition">mpv</button>
+      <button onclick="usePreset('C:\\Program Files\\MPC-QT\\mpc-qt.exe')" class="text-[10px] px-2 py-1 rounded bg-[#2f3e47] border border-white/10 hover:border-[#3b8fc4] transition">MPC-QT</button>
+      <button onclick="usePreset('C:\\Program Files\\VideoLAN\\VLC\\vlc.exe')" class="text-[10px] px-2 py-1 rounded bg-[#2f3e47] border border-white/10 hover:border-[#3b8fc4] transition">VLC</button>
+      <button onclick="usePreset('C:\\Program Files\\DAUM\\PotPlayer\\PotPlayerMini64.exe')" class="text-[10px] px-2 py-1 rounded bg-[#2f3e47] border border-white/10 hover:border-[#3b8fc4] transition">PotPlayer</button>
+    </div>
+    <input id="player-path" type="text" value="C:\Program Files\mpv\mpv.exe" oninput="renderSetupFiles()"
+           class="w-full bg-[#16202a] border border-white/15 rounded px-3 py-2 text-xs font-mono focus:border-[#3b8fc4] focus:outline-none">
+    <label class="block text-xs font-bold text-[#e6e6e6]/70 mt-3 mb-1.5">Extra arguments <span class="font-normal text-[#e6e6e6]/40">(optional, one per line)</span></label>
+    <textarea id="player-args" rows="2" oninput="renderSetupFiles()" placeholder="--fullscreen"
+              class="w-full bg-[#16202a] border border-white/15 rounded px-3 py-2 text-xs font-mono focus:border-[#3b8fc4] focus:outline-none"></textarea>
   </div>
 
   <ol class="text-xs text-[#e6e6e6]/70 space-y-4 leading-relaxed">
     <li>
-      <span class="font-bold text-[#e6e6e6]">1.</span> Save this as the helper script at the path above.
+      <span class="font-bold text-[#e6e6e6]">1. Save the helper script</span>
+      <span class="text-[#e6e6e6]/45">&mdash; one time only. It contains no player path, so it never needs changing again.</span>
       <button onclick="copyBox('ps1-box','Script copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
       <pre id="ps1-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre"></pre>
     </li>
     <li>
-      <span class="font-bold text-[#e6e6e6]">2.</span> Save this as <code>sportio.reg</code> and double-click it.
-      It writes to <code>HKEY_CURRENT_USER</code> only, so no administrator rights are needed.
+      <span class="font-bold text-[#e6e6e6]">2. Save the player file</span>
+      <span class="text-[#e6e6e6]/45">as <code id="config-path-label" class="text-[#5aa8d1]"></code></span>
+      <button onclick="copyBox('cfg-box','Player file copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
+      <p class="text-[#c9992e] mt-1">This is the only file to change when you want a different player.</p>
+      <pre id="cfg-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre"></pre>
+    </li>
+    <li>
+      <span class="font-bold text-[#e6e6e6]">3. Register the link handler</span>
+      <span class="text-[#e6e6e6]/45">&mdash; save as <code>sportio.reg</code> and double-click. Writes to
+      <code>HKEY_CURRENT_USER</code> only, so no administrator rights are needed. One time only.</span>
       <button onclick="copyBox('reg-box','Registry file copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
       <pre id="reg-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre"></pre>
     </li>
     <li>
-      <span class="font-bold text-[#e6e6e6]">3.</span> Click any stream. Your browser will ask once whether to open it &mdash;
+      <span class="font-bold text-[#e6e6e6]">4.</span> Click any stream. Your browser will ask once whether to open it &mdash;
       tick &ldquo;always allow&rdquo; and it will not ask again.
     </li>
   </ol>
+
+  <p class="text-[11px] text-[#e6e6e6]/45 mt-6 leading-relaxed border-t border-white/10 pt-4">
+    <span class="font-bold text-[#c9992e]">Already set this up before?</span>
+    The earlier version of the script had the player path written into it, so editing the field above did nothing to an
+    installed copy. Re-save step 1 and add step 2, and the player will follow this page from then on. Step 3 is unchanged.
+  </p>
 
   <button onclick="toggleSetup()" class="mt-6 bg-[#3f5460] hover:bg-[#56707d] text-xs font-bold py-2 px-4 rounded-lg transition">
     Back to browsing
@@ -150,22 +175,119 @@
   }
 
   // --- Setup files ---------------------------------------------------
+  //
+  // The player is NOT written into the script. It is read at launch from a
+  // plain text file sitting beside it, so switching players is editing one
+  // line rather than re-saving code - which is what went wrong before:
+  // changing the path on this page did nothing to an already-installed
+  // script, because the path had been baked into it.
+  //
+  // The player also never travels in the URI. Any web page can navigate to
+  // a sportio: link, so a URI that carried an executable path would let any
+  // site run an arbitrary program with an arbitrary argument. Keeping the
+  // choice local means a link can only ever start the player you configured.
+  const CONFIG_FILENAME = 'sportio-player.txt';
+
+  function configPathFor(scriptPath) {
+    const cut = Math.max(scriptPath.lastIndexOf('\\'), scriptPath.lastIndexOf('/'));
+    const dir = cut >= 0 ? scriptPath.slice(0, cut) : 'C:\\Users\\Public';
+    return `${dir}\\${CONFIG_FILENAME}`;
+  }
+
+  function usePreset(path) {
+    document.getElementById('player-path').value = path;
+    renderSetupFiles();
+  }
+
   function renderSetupFiles() {
-    const mpv = document.getElementById('mpv-path').value.trim() || 'C:\\Program Files\\mpv\\mpv.exe';
     const script = document.getElementById('script-path').value.trim() || 'C:\\Users\\Public\\sportio-play.ps1';
+    const player = document.getElementById('player-path').value.trim() || 'C:\\Program Files\\mpv\\mpv.exe';
+    const extraArgs = document.getElementById('player-args').value
+      .split('\n').map(l => l.trim()).filter(Boolean);
+
+    document.getElementById('config-path-label').textContent = configPathFor(script);
+
+    document.getElementById('cfg-box').textContent = [
+      '# First non-comment line: full path to the player.',
+      '# Any lines after it: extra arguments, one per line, passed before the URL.',
+      player,
+      ...extraArgs,
+      ''
+    ].join('\n');
 
     document.getElementById('ps1-box').textContent = [
-      '# Receives a sportio: URI, decodes the stream URL and hands it to mpv.',
-      '# The stream is fetched by mpv directly - nothing is downloaded first.',
+      '# Receives a sportio: URI, decodes the stream URL and hands it to a',
+      '# media player. The player fetches the stream itself - nothing is',
+      '# downloaded first.',
+      '#',
+      `# The player comes from ${CONFIG_FILENAME} in this same folder, so this`,
+      '# script does not need editing to change players.',
       'param([string]$Uri)',
       '',
-      '$payload = $Uri -replace "^' + PROTOCOL + ':(//)?(play/)?", ""',
+      'function Fail($message) {',
+      '  $log = Join-Path $PSScriptRoot "sportio-play.log"',
+      '  "$(Get-Date -Format s)  $message" | Out-File -FilePath $log -Append -Encoding utf8',
+      '  # Surfaced, not just logged: the handler runs hidden, so without',
+      '  # this a misconfiguration looks like the link doing nothing at all.',
+      '  # The 20 second timeout matters - a popup that waits forever would',
+      '  # leave a hidden process stuck with no window to find and close.',
+      '  try { (New-Object -ComObject WScript.Shell).Popup($message, 20, "Sportio Live", 48) } catch { }',
+      '  exit 1',
+      '}',
+      '',
+      `$configFile = Join-Path $PSScriptRoot "${CONFIG_FILENAME}"`,
+      '$player = $null',
+      '$extraArgs = @()',
+      '',
+      'if (Test-Path -LiteralPath $configFile) {',
+      '  $lines = @(Get-Content -LiteralPath $configFile |',
+      '    ForEach-Object { $_.Trim() } |',
+      '    Where-Object { $_ -and -not $_.StartsWith("#") })',
+      '  if ($lines.Count -ge 1) { $player = $lines[0] }',
+      '  if ($lines.Count -ge 2) { $extraArgs = $lines[1..($lines.Count - 1)] }',
+      '}',
+      '',
+      '# Fall back to whatever is actually installed, so a missing or',
+      '# mistyped config still plays something rather than failing silently.',
+      'if (-not $player -or -not (Test-Path -LiteralPath $player)) {',
+      '  $fallbacks = @(',
+      '    "$env:ProgramFiles\\mpv\\mpv.exe",',
+      '    "${env:ProgramFiles(x86)}\\mpv\\mpv.exe",',
+      '    "$env:ProgramFiles\\MPC-QT\\mpc-qt.exe",',
+      '    "$env:ProgramFiles\\VideoLAN\\VLC\\vlc.exe",',
+      '    "$env:ProgramFiles\\DAUM\\PotPlayer\\PotPlayerMini64.exe"',
+      '  )',
+      '  $found = $fallbacks | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1',
+      '  if (-not $found) {',
+      `    Fail("No media player found. Set one in $configFile")`,
+      '  }',
+      '  $player = $found',
+      '}',
+      '',
+      `$payload = $Uri -replace "^${PROTOCOL}:(//)?(play/)?", ""`,
       '$payload = $payload.TrimEnd("/")',
       '$payload = $payload.Replace("-", "+").Replace("_", "/")',
       'switch ($payload.Length % 4) { 2 { $payload += "==" } 3 { $payload += "=" } }',
       '',
-      '$url = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload))',
-      'Start-Process -FilePath "' + mpv + '" -ArgumentList @($url)'
+      'try {',
+      '  $url = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload))',
+      '} catch {',
+      '  Fail("Could not read the stream address from the link.")',
+      '}',
+      '',
+      '# Each argument is quoted before being handed over. Start-Process',
+      '# joins -ArgumentList into a single command line WITHOUT quoting it,',
+      '# so an unquoted URL loses everything from the first "&" onwards, and',
+      '# any URL containing a space would be split into two arguments.',
+      '# Verified against a stream URL containing & + % and a space.',
+      'function Quote($text) { return \'"\' + ($text -replace \'"\', \'""\') + \'"\' }',
+      '$argLine = ((@($extraArgs) + @($url)) | ForEach-Object { Quote $_ }) -join " "',
+      '',
+      'try {',
+      '  Start-Process -FilePath $player -ArgumentList $argLine',
+      '} catch {',
+      '  Fail("Could not start $player`n`n$($_.Exception.Message)")',
+      '}'
     ].join('\n');
 
     const psExe = 'C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe';
