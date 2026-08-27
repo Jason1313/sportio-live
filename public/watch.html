@@ -8,9 +8,23 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <style>
     body { background-color: #16202a; color: #e6e6e6; }
-    .card { transition: transform .12s ease, box-shadow .12s ease; }
+    /* A <button> centres its own content vertically by default. Grid
+       stretches every card in a row to the tallest one, so a card with a
+       one-line name had its poster pushed down by half the difference -
+       measured at 8px, which reads as a row of posters at mismatched
+       heights. Stacking the content from the top pins every poster to the
+       same line. */
+    .card { display: flex; flex-direction: column; align-items: stretch; transition: transform .12s ease, box-shadow .12s ease; }
     .card:hover, .card:focus { transform: translateY(-3px); box-shadow: 0 10px 24px rgba(0,0,0,.45); outline: none; }
     .card:focus .poster { border-color: #5aa8d1; }
+    /* Two lines, always - reserved whether the name needs them or not, so
+       the date below sits on the same line across the whole grid and every
+       card ends at the same height. The full name is on the poster itself
+       and in the stream panel, so clipping a third line loses nothing. */
+    .card-title {
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden; min-height: 2.2rem;
+    }
   </style>
 </head>
 <body class="min-h-screen">
@@ -533,7 +547,7 @@
              style="aspect-ratio: 2 / 3"
              src="${escapeHtml(m.poster || '')}" alt="">
         ${m.league ? `<span class="block text-[10px] uppercase tracking-wider text-[#5aa8d1] mt-2">${escapeHtml(m.league)}</span>` : ''}
-        <span class="block text-xs ${m.league ? 'mt-0.5' : 'mt-2'} leading-snug">${escapeHtml(m.name || '')}</span>
+        <span class="card-title block text-xs ${m.league ? 'mt-0.5' : 'mt-2'} leading-snug">${escapeHtml(m.name || '')}</span>
         ${whenBadge(m)}
       </button>`).join('');
   }
