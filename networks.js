@@ -532,11 +532,18 @@ const PROMOTIONS = [
     key: 'PFL',
     label: 'Professional Fighters League',
     sport: 'UFC',
-    // Claimed by ESPN league rather than by name. PFL has its own league
-    // (3347) - unlike DWCS - and which endpoint an event arrived from is
-    // a fact, where a name regex is a guess. Every event from this league
-    // is PFL, including the ones named nothing like it.
+    // Claimed two ways, because neither alone is enough. The league
+    // (3347) catches PFL's own cards including any named nothing like
+    // it; the name catches the ones ESPN files under its catch-all
+    // instead - "2026 PFL Africa: Morocco" sits in `other`, not `pfl`,
+    // confirmed live.
     league: 'PFL',
+    match: /\bpfl\b/i,
+    // PFL's regional cards arrive under the catch-all league, whose
+    // artwork is a generic ESPN icon. Naming the promotion's own key here
+    // means a PFL Africa card carries the PFL logo like PFL Chicago does,
+    // rather than looking like a different show.
+    artworkKey: 'PFL',
     // PFL is on ESPN+, a streaming service that resolves to no channel,
     // and there is no configured slot for it. Same reasoning as DWCS: the
     // UFC slot's channels would be wrong here.
@@ -546,30 +553,61 @@ const PROMOTIONS = [
     // being looked for.
     autoSearch: { terms: ['PFL'] },
   },
+  {
+    key: 'OTHER',
+    label: 'Other promotions',
+    sport: 'UFC',
+    // ESPN's catch-all league. Whatever is in here is, by construction,
+    // a promotion nobody has written a rule for - LFA, UAE Warriors,
+    // RIZIN, Road to UFC. Claimed by league only: it has no name of its
+    // own to match, because it is not one show.
+    league: 'OTHER',
+    // No configured slot, and deliberately NO standing search. There is
+    // no term that would be right across an open-ended set of
+    // promotions, and a wrong guess here is worse than nothing: it fills
+    // the list with confident-looking channels showing another sport
+    // entirely. The event still gets a card, and the watch portal's own
+    // search is how the user pulls in whatever their provider actually
+    // called it.
+    networkKey: null,
+    autoSearch: null,
+  },
 ];
 
 // The promotion claiming an event, or null when it is the parent
 // league's own (a real UFC card).
 //
-// Two ways to claim an event, checked strongest first:
+// Two ways to claim an event, checked most specific first:
 //
-//   league - the ESPN league the event was actually fetched from. A fact,
-//            not an inference, so it wins.
-//   match  - a regex over the event name. Only for promotions ESPN gives
-//            no league of their own, which today means DWCS: it is filed
-//            under the UFC league, so nothing but the name separates it.
+//   match  - a regex over the event name. A promotion naming itself in
+//            the title is making a specific claim about THIS event.
+//   league - the ESPN league the event was fetched from.
+//
+// Name goes first, which is the opposite of what "a league is a fact and
+// a regex is a guess" would suggest, and it is deliberate. ESPN's
+// catch-all league is not a fact about anything - it means only "no
+// dedicated league exists", and it is where PFL's regional cards land.
+// Checking the league first would hand every one of them to the
+// catch-all and lose the PFL search that plainly applies. Only
+// promotions with genuinely distinctive names carry a `match` at all, so
+// this cannot misfire on a card that says nothing about itself: those
+// fall through to the league, which is where the catch-all correctly
+// picks them up.
 function getPromotionForEvent(sportKey, eventName, leagueKey) {
   const sport = String(sportKey || '').toUpperCase();
   const league = String(leagueKey || '').toUpperCase();
   const name = String(eventName || '');
 
   const candidates = PROMOTIONS.filter(p => p.sport === sport);
-  if (league) {
-    const byLeague = candidates.find(p => p.league === league);
-    if (byLeague) return byLeague;
+
+  if (name) {
+    const byName = candidates.find(p => p.match && p.match.test(name));
+    if (byName) return byName;
   }
-  if (!name) return null;
-  return candidates.find(p => p.match && p.match.test(name)) || null;
+  if (league) {
+    return candidates.find(p => p.league === league) || null;
+  }
+  return null;
 }
 
 // Caps how many auto-found channels are appended. These are inferred, not

@@ -401,7 +401,14 @@ const ESPN_ENDPOINTS = {
   // Not a browsable catalog of its own - see MMA_LEAGUES. Listed here so
   // getRealLeagueLogoUrl('PFL') can find the league's artwork, which it
   // reads from whichever scoreboard endpoint the key names.
-  PFL: 'https://site.api.espn.com/apis/site/v2/sports/mma/pfl/scoreboard'
+  PFL: 'https://site.api.espn.com/apis/site/v2/sports/mma/pfl/scoreboard',
+  // ESPN's own catch-all league (3359, literally named "Other"), where it
+  // files every promotion it has no dedicated league for. Confirmed live:
+  // this is where Super RIZIN 5, Road to UFC and PFL Africa all sit,
+  // even though RIZIN and PFL have leagues of their own. It is one
+  // endpoint covering an open-ended set of promotions, which is exactly
+  // why the section can carry "everything else" without enumerating it.
+  OTHER: 'https://site.api.espn.com/apis/site/v2/sports/mma/other/scoreboard'
 };
 
 // The ESPN MMA leagues the MMA section pulls from, in display order.
@@ -421,7 +428,14 @@ const ESPN_ENDPOINTS = {
 // background's colours).
 const MMA_LEAGUES = [
   { slug: 'ufc', key: 'UFC' },
-  { slug: 'pfl', key: 'PFL' }
+  { slug: 'pfl', key: 'PFL' },
+  // Last on purpose. ESPN's catch-all sweeps up every promotion without a
+  // league of its own - LFA, UAE Warriors, RIZIN, Road to UFC - so this
+  // single entry is what makes the section cover the whole MMA schedule
+  // rather than a list someone has to keep topped up. Measured against the
+  // rest of 2026: of ESPN's 48 MMA leagues only three carry any events at
+  // all, and this is one of them.
+  { slug: 'other', key: 'OTHER' }
 ];
 
 // UFC events, unlike every other sport here, don't map to a single
@@ -432,7 +446,8 @@ const MMA_LEAGUES = [
 // endpoint above doesn't expose that field at all.
 const ESPN_CORE_EVENT_ENDPOINTS = {
   UFC: 'https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc/events',
-  PFL: 'https://sports.core.api.espn.com/v2/sports/mma/leagues/pfl/events'
+  PFL: 'https://sports.core.api.espn.com/v2/sports/mma/leagues/pfl/events',
+  OTHER: 'https://sports.core.api.espn.com/v2/sports/mma/leagues/other/events'
 };
 
 // NCAA sports have far more teams than the pro leagues, and ESPN's scoreboard
@@ -471,7 +486,8 @@ const ESPN_LEAGUES = {
   LALIGA: 'esp.1',
   WORLDCUP: 'fifa.world',
   UFC: 'ufc',
-  PFL: 'pfl'
+  PFL: 'pfl',
+  OTHER: 'other'
 };
 
 // The "Upcoming Schedule" placeholder's background image, one per sport
@@ -1148,7 +1164,8 @@ const SPORT_THEMES = {
   LALIGA: { primary: '#EE8707', secondary: '#000000' },
   WORLDCUP: { primary: '#326295', secondary: '#C8A951' },
   UFC: { primary: '#000000', secondary: '#D20A0A' },
-  PFL: { primary: '#0A0A0A', secondary: '#E4002B' }
+  PFL: { primary: '#0A0A0A', secondary: '#E4002B' },
+  OTHER: { primary: '#1A1A1A', secondary: '#B31217' }
 };
 
 // Primary accent used for the subtle poster background gradient per sport.
@@ -1728,7 +1745,18 @@ async function fetchTodayLeagueEvents(league, hostUrl, userTimeZone = 'America/N
       // League-scoped artwork paths, so a PFL card carries the PFL logo
       // on its poster and its own colours on the landscape background
       // rather than inheriting UFC's.
-      const leagueSlug = league.slug;
+      //
+      // A promotion may override which league's artwork is used. This is
+      // for events ESPN files under its catch-all, whose artwork is a
+      // generic ESPN icon: "PFL Africa" is recognisably PFL and should
+      // look it, even though ESPN does not file it under the PFL league.
+      // Channels and artwork are resolved from the same promotion, so a
+      // card cannot show one promotion and play another's.
+      const artworkPromotion = networks.getPromotionForEvent('UFC', event.name || '', league.key);
+      const artworkSlug = (artworkPromotion && artworkPromotion.artworkKey)
+        ? ESPN_LEAGUES[artworkPromotion.artworkKey] || league.slug
+        : league.slug;
+      const leagueSlug = artworkSlug;
       const poster = `${hostUrl}/poster/mma/${leagueSlug}/${fighterAId}/${fighterBId}.svg${dateParam}`;
       const background = `${hostUrl}/landscape/mma/${leagueSlug}/${fighterAId}/${fighterBId}.svg${dateParam}`;
       const logo = `${hostUrl}/logo/${leagueSlug}.svg`;
@@ -3505,6 +3533,27 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   res.json({ streams: finalStreams });
 });
+
+// Every MMA league must be fully wired before serving anything.
+//
+// Artwork URLs are built from a league's ESPN slug, and the poster,
+// landscape and logo routes uppercase that slug to look up the league's
+// endpoint and colours - so a league whose key is not simply its slug in
+// uppercase renders blank artwork with nothing logged at all. That is
+// exactly what the catch-all did when it was keyed MMA against the slug
+// 'other'. Failing at startup is the point: a silently blank poster is
+// far harder to notice than a container that refuses to boot.
+//
+// Runs here rather than beside MMA_LEAGUES because SPORT_THEMES and the
+// Core endpoint map are both declared further down the file.
+for (const league of MMA_LEAGUES) {
+  if (league.key !== league.slug.toUpperCase()) {
+    throw new Error(`[MMA] League '${league.slug}' must use key '${league.slug.toUpperCase()}', not '${league.key}' - artwork lookups derive the key from the slug.`);
+  }
+  if (!ESPN_ENDPOINTS[league.key] || !ESPN_CORE_EVENT_ENDPOINTS[league.key] || !SPORT_THEMES[league.key]) {
+    throw new Error(`[MMA] League '${league.slug}' is missing an ESPN endpoint, Core event endpoint or theme for key '${league.key}'.`);
+  }
+}
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Sportio Live running at http://0.0.0.0:${PORT}`);
