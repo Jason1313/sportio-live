@@ -397,8 +397,32 @@ const ESPN_ENDPOINTS = {
   MLS: 'https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard',
   LALIGA: 'https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard',
   WORLDCUP: 'https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard',
-  UFC: 'https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard'
+  UFC: 'https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard',
+  // Not a browsable catalog of its own - see MMA_LEAGUES. Listed here so
+  // getRealLeagueLogoUrl('PFL') can find the league's artwork, which it
+  // reads from whichever scoreboard endpoint the key names.
+  PFL: 'https://site.api.espn.com/apis/site/v2/sports/mma/pfl/scoreboard'
 };
+
+// The ESPN MMA leagues the MMA section pulls from, in display order.
+//
+// ESPN files each promotion under its own league slug (confirmed live
+// against the leagues index: ufc is 3321, pfl is 3347), and every one of
+// them serves the same scoreboard and Core API shape. So widening the
+// section to a new promotion is an entry here plus, if it needs its own
+// channels, a networks.PROMOTIONS entry - not a new code path.
+//
+// Dana White's Contender Series is deliberately absent: ESPN has no
+// separate league for it, filing it under ufc. It is separated by name at
+// the promotion layer instead, which is the only signal available.
+//
+// `key` doubles as the artwork key - it must exist in ESPN_ENDPOINTS
+// above (for the league logo) and in SPORT_THEMES (for the landscape
+// background's colours).
+const MMA_LEAGUES = [
+  { slug: 'ufc', key: 'UFC' },
+  { slug: 'pfl', key: 'PFL' }
+];
 
 // UFC events, unlike every other sport here, don't map to a single
 // matchup - one event is a whole card of many individual fights. This
@@ -407,7 +431,8 @@ const ESPN_ENDPOINTS = {
 // card is actually the main event (matchNumber: 1) - the scoreboard
 // endpoint above doesn't expose that field at all.
 const ESPN_CORE_EVENT_ENDPOINTS = {
-  UFC: 'https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc/events'
+  UFC: 'https://sports.core.api.espn.com/v2/sports/mma/leagues/ufc/events',
+  PFL: 'https://sports.core.api.espn.com/v2/sports/mma/leagues/pfl/events'
 };
 
 // NCAA sports have far more teams than the pro leagues, and ESPN's scoreboard
@@ -445,7 +470,8 @@ const ESPN_LEAGUES = {
   MLS: 'usa.1',
   LALIGA: 'esp.1',
   WORLDCUP: 'fifa.world',
-  UFC: 'ufc'
+  UFC: 'ufc',
+  PFL: 'pfl'
 };
 
 // The "Upcoming Schedule" placeholder's background image, one per sport
@@ -625,7 +651,12 @@ const SPORT_DISPLAY_NAMES = {
   MLS: 'MLS',
   LALIGA: 'La Liga',
   WORLDCUP: 'FIFA World Cup',
-  UFC: 'UFC'
+  // The internal key stays UFC on purpose. It is what every saved account
+  // already has in sportCategories, networkLinks and sportOrder, and what
+  // existing catalog ids are built from - renaming it would migrate all
+  // of that to change a label. The section now carries several
+  // promotions (see MMA_LEAGUES), so only the label needed to widen.
+  UFC: 'MMA'
 };
 
 function getSportDisplayName(sportKey) {
@@ -908,16 +939,20 @@ function getUfcPosterTemplateInline() {
   return getInlineSvgOverlay(filePath, 'ufc-poster');
 }
 
-// Registered BEFORE the generic team-based poster route below, since both
-// have the same number of path segments (/poster/X/Y/Z.svg) - Express
-// matches routes in registration order, so the more specific UFC route
-// needs to come first or it would never be reached.
-app.get('/poster/ufc/:fighterAId/:fighterBId.svg', async (req, res) => {
+// One handler, two paths (registered at the bottom of this function).
+//
+// The league-scoped path is what the catalog generates now, so a PFL card
+// gets the PFL logo. The bare /poster/ufc/ path is kept because Stremio
+// caches artwork URLs, and an install that already has the old form must
+// keep rendering rather than showing a broken image - it simply defaults
+// to UFC, which is what it always meant.
+const mmaPosterHandler = async (req, res) => {
   const fighterAName = req.query.home || 'Fighter A';
   const fighterBName = req.query.away || 'Fighter B';
   const gameUtcDate = req.query.date || null;
   const userTz = req.query.tz || 'America/New_York';
   const { fighterAId, fighterBId } = req.params;
+  const leagueKey = String(req.params.league || 'ufc').toUpperCase();
 
   // Fighter A (home) uses their LEFT stance image, anchored by its TOP-
   // RIGHT corner; Fighter B (away) uses their RIGHT stance image,
@@ -939,7 +974,7 @@ app.get('/poster/ufc/:fighterAId/:fighterBId.svg', async (req, res) => {
   // scales PROPORTIONATELY to fit within its marker's bounds (not native
   // resolution/intentionally cropped) - confirmed directly against what
   // was asked for this specific marker.
-  const ufcLogoUrl = await getRealLeagueLogoUrl('UFC');
+  const ufcLogoUrl = await getRealLeagueLogoUrl(leagueKey);
   const ufcLogoData = ufcLogoUrl ? await getBase64Image(ufcLogoUrl) : null;
 
   const template = getUfcPosterTemplateInline();
@@ -974,7 +1009,7 @@ app.get('/poster/ufc/:fighterAId/:fighterBId.svg', async (req, res) => {
   const ufcLogoMarkup = ufcLogoBounds
     ? (ufcLogoData
         ? `<image href="${ufcLogoData}" x="${ufcLogoBounds.x}" y="${ufcLogoBounds.y}" width="${ufcLogoBounds.width}" height="${ufcLogoBounds.height}" preserveAspectRatio="xMidYMid meet" />`
-        : `<text x="${ufcLogoBounds.x + ufcLogoBounds.width / 2}" y="${ufcLogoBounds.y + ufcLogoBounds.height / 2 + 10}" font-family="'Trebuchet MS', Verdana, sans-serif" font-size="32" font-weight="800" fill="#ffffff" text-anchor="middle">UFC</text>`)
+        : `<text x="${ufcLogoBounds.x + ufcLogoBounds.width / 2}" y="${ufcLogoBounds.y + ufcLogoBounds.height / 2 + 10}" font-family="'Trebuchet MS', Verdana, sans-serif" font-size="32" font-weight="800" fill="#ffffff" text-anchor="middle">${escapeXml(leagueKey)}</text>`)
     : '';
   markup = replaceSvgGroup(markup, 'ufc_logo', ufcLogoMarkup);
 
@@ -998,7 +1033,15 @@ app.get('/poster/ufc/:fighterAId/:fighterBId.svg', async (req, res) => {
   res.setHeader('Content-Type', 'image/svg+xml');
   res.setHeader('Cache-Control', 'public, max-age=3600');
   res.send(svg);
-});
+};
+
+// Registered BEFORE the generic team-based poster route below. The bare
+// path has the same segment count (/poster/X/Y/Z.svg) and Express matches
+// in registration order, so the more specific one has to come first or it
+// would never be reached. The league-scoped path has an extra segment and
+// cannot collide, but is kept here beside its twin.
+app.get('/poster/mma/:league/:fighterAId/:fighterBId.svg', mmaPosterHandler);
+app.get('/poster/ufc/:fighterAId/:fighterBId.svg', mmaPosterHandler);
 
 function getPosterTemplateInline() {
   const filePath = path.join(__dirname, 'assets', 'posters', 'poster_template.svg');
@@ -1104,7 +1147,8 @@ const SPORT_THEMES = {
   MLS: { primary: '#0B1F41', secondary: '#EE3524' },
   LALIGA: { primary: '#EE8707', secondary: '#000000' },
   WORLDCUP: { primary: '#326295', secondary: '#C8A951' },
-  UFC: { primary: '#000000', secondary: '#D20A0A' }
+  UFC: { primary: '#000000', secondary: '#D20A0A' },
+  PFL: { primary: '#0A0A0A', secondary: '#E4002B' }
 };
 
 // Primary accent used for the subtle poster background gradient per sport.
@@ -1203,12 +1247,20 @@ const LANDSCAPE_BOUNDARY_PATH = "M 2393 0 L 2313 20 L 2279 40 L 2256 60 L 2238 8
 
 // Registered BEFORE the generic team-based landscape route below, for the
 // same routing-order reason as the UFC poster route above.
-app.get('/landscape/ufc/:fighterAId/:fighterBId.svg', async (req, res) => {
+// One handler, two paths - see mmaPosterHandler for why the bare /ufc/
+// form is kept alongside the league-scoped one.
+const mmaLandscapeHandler = async (req, res) => {
   const fighterAName = req.query.home || 'Fighter A';
   const fighterBName = req.query.away || 'Fighter B';
   const fighterAFlagUrl = req.query.homeFlagUrl || '';
   const fighterBFlagUrl = req.query.awayFlagUrl || '';
   const { fighterAId, fighterBId } = req.params;
+  const leagueKey = String(req.params.league || 'ufc').toUpperCase();
+  // Only reached when a fighter has no country flag on file, which is the
+  // one case these solid fills cover. Taking them from the league's own
+  // theme rather than hardcoding UFC's black/red means a PFL card that
+  // falls back still looks like PFL.
+  const theme = SPORT_THEMES[leagueKey] || SPORT_THEMES.UFC;
 
   const [fighterAPhoto, fighterBPhoto, fighterAFlag, fighterBFlag] = await Promise.all([
     getBase64Image(`https://a.espncdn.com/i/headshots/mma/players/full/${fighterAId}.png`),
@@ -1235,10 +1287,10 @@ app.get('/landscape/ufc/:fighterAId/:fighterBId.svg', async (req, res) => {
   // color if a flag image is unavailable for any reason.
   const fighterAFillMarkup = fighterAFlag
     ? `<image href="${fighterAFlag}" x="0" y="0" width="3840" height="2160" preserveAspectRatio="xMidYMid slice" />`
-    : `<rect width="3840" height="2160" fill="#000000" />`;
+    : `<rect width="3840" height="2160" fill="${theme.primary}" />`;
   const fighterBFillMarkup = fighterBFlag
     ? `<image href="${fighterBFlag}" x="0" y="0" width="3840" height="2160" preserveAspectRatio="xMidYMid slice" />`
-    : `<rect width="3840" height="2160" fill="#D20A0A" />`;
+    : `<rect width="3840" height="2160" fill="${theme.secondary}" />`;
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 3840 2160" width="3840" height="2160">
     <defs>
@@ -1259,7 +1311,10 @@ app.get('/landscape/ufc/:fighterAId/:fighterBId.svg', async (req, res) => {
   res.setHeader('Content-Type', 'image/svg+xml');
   res.setHeader('Cache-Control', 'public, max-age=3600');
   res.send(svg);
-});
+};
+
+app.get('/landscape/mma/:league/:fighterAId/:fighterBId.svg', mmaLandscapeHandler);
+app.get('/landscape/ufc/:fighterAId/:fighterBId.svg', mmaLandscapeHandler);
 
 app.get('/landscape/:sport/:homeId/:awayId.svg', async (req, res) => {
   const { sport, homeId, awayId } = req.params;
@@ -1575,7 +1630,7 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
   }
 }
 
-// UFC events don't map to a single matchup the way every other sport here
+// MMA events don't map to a single matchup the way every other sport here
 // does - one ESPN "event" is a whole fight card of many individual
 // fights. This identifies the main event specifically (confirmed live
 // against real data: the Core API's matchNumber field marks it as
@@ -1586,18 +1641,29 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
 // Deliberately reuses the homeTeam/awayTeam/homeAbbr/awayAbbr field names
 // from fetchTodayGames, even though "home"/"away" isn't semantically
 // accurate for two fighters - this lets the existing stream-matching tier
-// system and poster route work without needing UFC-specific branches.
-async function fetchTodayUFCEvents(hostUrl, userTimeZone = 'America/New_York') {
+// system and poster route work without needing MMA-specific branches.
+//
+// Identifying the main event is not cosmetic here. Confirmed live on the
+// PFL card: the scoreboard's first-listed competition is "TBA vs
+// Opponent TBA", and only the Core API's matchNumber picks out the real
+// headline fight the event is actually named after.
+//
+// One league per call. fetchTodayMmaEvents below fans this out across
+// every promotion in MMA_LEAGUES.
+async function fetchTodayLeagueEvents(league, hostUrl, userTimeZone = 'America/New_York') {
+  const endpoint = ESPN_ENDPOINTS[league.key];
+  const coreEndpoint = ESPN_CORE_EVENT_ENDPOINTS[league.key];
+  if (!endpoint || !coreEndpoint) return [];
   try {
     // Without an explicit dates filter, ESPN's scoreboard endpoint doesn't
     // reliably return only today's events the way it does for daily sports
-    // like MLB/NBA - UFC events are sparse (not every day), and the
+    // like MLB/NBA - MMA events are sparse (not every day), and the
     // unfiltered endpoint was confirmed live to return the NEXT upcoming
     // event regardless of how many days away it is, rather than an empty
     // result on a day with no event. Same date-filtering approach
     // fetchTodayGames already uses for every other sport.
     const targetDateStr = getLocalDateString(userTimeZone);
-    const res = await axios.get(`${ESPN_ENDPOINTS.UFC}?dates=${targetDateStr}`, {
+    const res = await axios.get(`${endpoint}?dates=${targetDateStr}`, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
       timeout: 10000
     });
@@ -1610,7 +1676,7 @@ async function fetchTodayUFCEvents(hostUrl, userTimeZone = 'America/New_York') {
       // endpoint is fetched specifically for its matchNumber field.
       let mainCompetitionId = null;
       try {
-        const coreRes = await axios.get(`${ESPN_CORE_EVENT_ENDPOINTS.UFC}/${event.id}`, {
+        const coreRes = await axios.get(`${coreEndpoint}/${event.id}`, {
           headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
           timeout: 10000
         });
@@ -1618,7 +1684,7 @@ async function fetchTodayUFCEvents(hostUrl, userTimeZone = 'America/New_York') {
         const mainCompetition = competitions.find(c => c.matchNumber === 1);
         mainCompetitionId = mainCompetition ? mainCompetition.id : null;
       } catch (err) {
-        console.error(`[ESPN] Failed to fetch Core API event data for UFC event ${event.id}:`, err.message);
+        console.error(`[ESPN] Failed to fetch Core API event data for ${league.key} event ${event.id}:`, err.message);
       }
 
       // Falls back to the scoreboard's own first-listed competition if the
@@ -1659,12 +1725,20 @@ async function fetchTodayUFCEvents(hostUrl, userTimeZone = 'America/New_York') {
       const eventUtcDate = competition.date || event.date || '';
       const dateParam = eventUtcDate ? `?date=${encodeURIComponent(eventUtcDate)}&${artParams}` : `?${artParams}`;
 
-      const poster = `${hostUrl}/poster/ufc/${fighterAId}/${fighterBId}.svg${dateParam}`;
-      const background = `${hostUrl}/landscape/ufc/${fighterAId}/${fighterBId}.svg${dateParam}`;
-      const logo = `${hostUrl}/logo/ufc.svg`;
+      // League-scoped artwork paths, so a PFL card carries the PFL logo
+      // on its poster and its own colours on the landscape background
+      // rather than inheriting UFC's.
+      const leagueSlug = league.slug;
+      const poster = `${hostUrl}/poster/mma/${leagueSlug}/${fighterAId}/${fighterBId}.svg${dateParam}`;
+      const background = `${hostUrl}/landscape/mma/${leagueSlug}/${fighterAId}/${fighterBId}.svg${dateParam}`;
+      const logo = `${hostUrl}/logo/${leagueSlug}.svg`;
 
       return {
         id: String(event.id),
+        // The promotion this event came from. The stream route needs it
+        // to pick the right channels: ESPN's own league is the strongest
+        // signal available, and far better than guessing from the name.
+        league: league.key,
         name: event.name || `${fighterAName} vs ${fighterBName}`,
         homeTeam: fighterAName,
         awayTeam: fighterBName,
@@ -1686,9 +1760,26 @@ async function fetchTodayUFCEvents(hostUrl, userTimeZone = 'America/New_York') {
 
     return games.filter(Boolean);
   } catch (err) {
-    console.error('[ESPN] Error fetching UFC scoreboard:', err.message);
+    console.error(`[ESPN] Error fetching ${league.key} scoreboard:`, err.message);
     return [];
   }
+}
+
+// Every MMA promotion's events for the user's current local day, pooled
+// into one list.
+//
+// Fanned out in parallel rather than in sequence: these are independent
+// endpoints, and a section covering a dozen promotions should not take a
+// dozen round trips' worth of waiting.
+//
+// allSettled, not all: one promotion's endpoint failing must not empty
+// the whole section. A failure is already logged by the fetcher itself
+// and simply contributes no events.
+async function fetchTodayMmaEvents(hostUrl, userTimeZone = 'America/New_York') {
+  const results = await Promise.allSettled(
+    MMA_LEAGUES.map(league => fetchTodayLeagueEvents(league, hostUrl, userTimeZone))
+  );
+  return results.flatMap(r => (r.status === 'fulfilled' ? r.value : []));
 }
 
 // Single entry point used by the catalog, meta, and stream routes -
@@ -1711,7 +1802,7 @@ async function fetchTodayUFCEvents(hostUrl, userTimeZone = 'America/New_York') {
 // for daily sports like MLB/NBA.
 async function fetchGamesForSport(sport, hostUrl, userTimeZone = 'America/New_York') {
   if (sport === 'UFC') {
-    return fetchTodayUFCEvents(hostUrl, userTimeZone);
+    return fetchTodayMmaEvents(hostUrl, userTimeZone);
   }
   return fetchTodayGames(sport, hostUrl, userTimeZone);
 }
@@ -3126,7 +3217,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   // event it overrides both which link slot applies and which standing
   // search runs, because those are precisely the two things that do NOT
   // carry over from the parent league. See networks.PROMOTIONS.
-  const promotion = networks.getPromotionForEvent(sportKey, game.name);
+  const promotion = networks.getPromotionForEvent(sportKey, game.name, game.league);
   const networkKey = promotion
     ? promotion.networkKey
     : (networks.getEventNetworkForSport(sportKey) || game.network);

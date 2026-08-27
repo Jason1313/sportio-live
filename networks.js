@@ -528,16 +528,48 @@ const PROMOTIONS = [
     // so the terms have to carry the whole search.
     autoSearch: { terms: ['DWCS', 'Dana White', 'Contender Series'] },
   },
+  {
+    key: 'PFL',
+    label: 'Professional Fighters League',
+    sport: 'UFC',
+    // Claimed by ESPN league rather than by name. PFL has its own league
+    // (3347) - unlike DWCS - and which endpoint an event arrived from is
+    // a fact, where a name regex is a guess. Every event from this league
+    // is PFL, including the ones named nothing like it.
+    league: 'PFL',
+    // PFL is on ESPN+, a streaming service that resolves to no channel,
+    // and there is no configured slot for it. Same reasoning as DWCS: the
+    // UFC slot's channels would be wrong here.
+    networkKey: null,
+    // One term, unconfined by group. "PFL" is distinctive enough on its
+    // own that a group filter would only risk excluding the very listing
+    // being looked for.
+    autoSearch: { terms: ['PFL'] },
+  },
 ];
 
-// The promotion claiming an event, or null when it is the league's own
-// (a real UFC card). Matched on the event name because ESPN gives no
-// other signal - see above.
-function getPromotionForEvent(sportKey, eventName) {
+// The promotion claiming an event, or null when it is the parent
+// league's own (a real UFC card).
+//
+// Two ways to claim an event, checked strongest first:
+//
+//   league - the ESPN league the event was actually fetched from. A fact,
+//            not an inference, so it wins.
+//   match  - a regex over the event name. Only for promotions ESPN gives
+//            no league of their own, which today means DWCS: it is filed
+//            under the UFC league, so nothing but the name separates it.
+function getPromotionForEvent(sportKey, eventName, leagueKey) {
   const sport = String(sportKey || '').toUpperCase();
+  const league = String(leagueKey || '').toUpperCase();
   const name = String(eventName || '');
+
+  const candidates = PROMOTIONS.filter(p => p.sport === sport);
+  if (league) {
+    const byLeague = candidates.find(p => p.league === league);
+    if (byLeague) return byLeague;
+  }
   if (!name) return null;
-  return PROMOTIONS.find(p => p.sport === sport && p.match.test(name)) || null;
+  return candidates.find(p => p.match && p.match.test(name)) || null;
 }
 
 // Caps how many auto-found channels are appended. These are inferred, not
