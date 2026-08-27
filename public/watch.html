@@ -534,7 +534,23 @@
              src="${escapeHtml(m.poster || '')}" alt="">
         ${m.league ? `<span class="block text-[10px] uppercase tracking-wider text-[#5aa8d1] mt-2">${escapeHtml(m.league)}</span>` : ''}
         <span class="block text-xs ${m.league ? 'mt-0.5' : 'mt-2'} leading-snug">${escapeHtml(m.name || '')}</span>
+        ${whenBadge(m)}
       </button>`).join('');
+  }
+
+  // When the event is on, under the card's title. A league tab now lists
+  // months of fixtures, so without this a card gives no way to tell
+  // tonight's main event from one in November.
+  //
+  // Tonight's is called out in the accent colour and named rather than
+  // dated - the server sends "8:00 pm EDT" with no date for today, which
+  // on its own would read like any other row.
+  function whenBadge(meta) {
+    const when = meta && meta.whenLabel;
+    if (!when) return '';
+    const today = meta.isToday !== false;
+    const text = today ? `Today &middot; ${escapeHtml(when)}` : escapeHtml(when);
+    return `<span class="block text-[10px] mt-0.5 ${today ? 'text-[#7fc98a] font-semibold' : 'text-[#e6e6e6]/45'}">${text}</span>`;
   }
 
   // Every live game across every configured league, on one page.
@@ -552,7 +568,17 @@
       // The league name doubles as the badge on each card, so a game is
       // attributable at a glance when three leagues are mixed together.
       const league = String(c.name || '').replace(/\s*Live Games$/i, '');
-      return { failed: false, metas: metas.filter(m => !isUpcomingPlaceholder(m)).map(m => ({ ...m, league })) };
+      // Today only. A league catalog may now run months ahead - MMA does
+      // - and Home answers "what is on", so a November card has no place
+      // here. The server decides what counts as today, since only it
+      // knows the account's timezone; a catalog that sends no verdict is
+      // treated as today, which is right for the today-only leagues.
+      return {
+        failed: false,
+        metas: metas
+          .filter(m => !isUpcomingPlaceholder(m) && m.isToday !== false)
+          .map(m => ({ ...m, league }))
+      };
     }));
 
     const games = results.flatMap(r => r.metas);
@@ -561,7 +587,7 @@
     if (games.length === 0) {
       showEmpty(failures === sources.length
         ? 'Could not reach the server for any league.'
-        : 'No games on right now. Each league tab has an Upcoming Schedule for what is next.');
+        : 'Nothing on right now. Each league tab lists what is coming up.');
       document.getElementById('grid').innerHTML = '';
       return;
     }
@@ -602,7 +628,7 @@
     showEmpty('Loading...');
     const metas = await fetchCatalogMetas(id);
     if (metas === null) { showEmpty('Could not load that catalog.'); return; }
-    if (metas.length === 0) { showEmpty('Nothing on right now.'); return; }
+    if (metas.length === 0) { showEmpty('Nothing scheduled.'); return; }
 
     showEmpty('');
     renderGameGrid(metas);

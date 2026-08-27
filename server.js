@@ -426,6 +426,22 @@ const ESPN_ENDPOINTS = {
 // `key` doubles as the artwork key - it must exist in ESPN_ENDPOINTS
 // above (for the league logo) and in SPORT_THEMES (for the landscape
 // background's colours).
+// How far ahead the MMA section looks, in days.
+//
+// Every other sport in this app is strictly today-only, and for a daily
+// league that is right: a list of today's games is the whole question.
+// MMA is not daily. A promotion runs a card every week or two, so a
+// today-only section is empty almost every day of the year, which makes
+// it look broken rather than quiet.
+//
+// 180 days covers the entire schedule ESPN currently publishes - measured
+// live, its furthest announced card is inside four months - so this is
+// "everything there is" rather than an arbitrary slice, while staying
+// bounded if a promotion ever announces a year of dates at once.
+// Confirmed the range parameter is accepted at this length, including
+// across a year boundary, for all three leagues.
+const MMA_SCHEDULE_DAYS = 180;
+
 const MMA_LEAGUES = [
   { slug: 'ufc', key: 'UFC' },
   { slug: 'pfl', key: 'PFL' },
@@ -867,6 +883,66 @@ function formatTeamTime(utcDateStr, timeZone) {
   }
 }
 
+// "Sat, Oct 17" in the user's own timezone. Companion to formatTeamTime,
+// which gives the time half.
+//
+// Needed because the MMA section is no longer today-only: a card sitting
+// in the list might be tonight or eleven weeks out, and the poster is
+// where people look to tell which.
+function formatEventDate(utcDateStr, timeZone) {
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: timeZone || 'America/New_York',
+      weekday: 'short', month: 'short', day: 'numeric'
+    }).format(new Date(utcDateStr));
+  } catch (err) {
+    return null;
+  }
+}
+
+// "Sat, Oct 17 - 8:00 pm EDT", or just the time half when the event is
+// today. Today needs no date: it is the one case where "8:00 pm" is
+// unambiguous, and dropping it keeps the common case short.
+function formatEventWhen(utcDateStr, timeZone) {
+  if (!utcDateStr) return '';
+  const time = formatTeamTime(utcDateStr, timeZone);
+  if (isSameLocalDay(utcDateStr, timeZone)) return time || '';
+  const date = formatEventDate(utcDateStr, timeZone);
+  if (!date) return time || '';
+  return time ? `${date} - ${time}` : date;
+}
+
+// Whether an event falls on the user's current local day. Compared as
+// formatted local date strings rather than by arithmetic on timestamps,
+// which is the only way to get this right across timezones and DST
+// without hand-rolling the offset maths - and it reuses the exact
+// formatter getLocalDateString already trusts for the same job.
+function isSameLocalDay(utcDateStr, timeZone) {
+  if (!utcDateStr) return false;
+  try {
+    const tz = timeZone || 'America/New_York';
+    const formatter = new Intl.DateTimeFormat('en-CA', { timeZone: tz });
+    return formatter.format(new Date(utcDateStr)) === formatter.format(new Date());
+  } catch (err) {
+    return false;
+  }
+}
+
+// Shifts a YYYYMMDD string by a number of days, returning the same
+// format. Used to build ESPN's date-range parameter for the MMA window.
+//
+// Deliberately arithmetic on a UTC noon anchor: starting from midnight
+// would let a DST shift push the result onto the previous day, and noon
+// is far enough from either boundary that no real timezone can.
+function addDaysToDateString(dateStr, days) {
+  const year = Number(dateStr.slice(0, 4));
+  const month = Number(dateStr.slice(4, 6));
+  const day = Number(dateStr.slice(6, 8));
+  const anchor = new Date(Date.UTC(year, month - 1, day, 12));
+  anchor.setUTCDate(anchor.getUTCDate() + days);
+  return anchor.toISOString().slice(0, 10).replace(/-/g, '');
+}
+
 function formatDateYYYYMMDD(dateObj, timeZone) {
   try {
     const formatter = new Intl.DateTimeFormat('en-CA', { timeZone: timeZone || 'America/New_York' });
@@ -1036,9 +1112,55 @@ const mmaPosterHandler = async (req, res) => {
   // geometry precisely, not eyeballed - confirmed exact: x 47.02-552.98,
   // y 817.29-900.
   const plaqueBounds = { x: 47.02, y: 817.29, width: 505.96, height: 82.71 };
+
+  // The plaque carries the DATE as well as the time now that the section
+  // runs months ahead - a card in this list may be tonight or eleven
+  // weeks out, and the poster is where people look to tell which.
+  //
+  // Two lines rather than one long string. Fitting "Sat, Oct 17 - 8:00 pm
+  // EDT" across 506px means shrinking it to stay inside the plaque, and
+  // the time - the thing actually read at a glance - shrinks with it.
+  // Stacked, each line is sized independently and the time stays large.
+  //
+  // Today's card gets one line, not two. formatEventDate is skipped when
+  // the event is today, because "today" is the one case where a bare time
+  // is unambiguous - and a single line renders bigger.
+  const eventIsToday = gameUtcDate ? isSameLocalDay(gameUtcDate, userTz) : false;
+  const dateLine = (gameUtcDate && !eventIsToday) ? (formatEventDate(gameUtcDate, userTz) || '') : '';
   const timeLine = gameUtcDate ? (formatTeamTime(gameUtcDate, userTz) || 'TBD') : 'FIGHT TIME TBD';
-  const timeFontSize = Math.max(24, Math.min(plaqueBounds.height * 0.6, Math.round(estimateTimeFontSize(timeLine, plaqueBounds.width * 0.85))));
-  const timeMarkup = `<text x="${plaqueBounds.x + plaqueBounds.width / 2}" y="${plaqueBounds.y + plaqueBounds.height / 2 + timeFontSize * 0.35}" font-family="'Trebuchet MS', Verdana, sans-serif" font-size="${timeFontSize}" font-weight="700" fill="#ffffff" text-anchor="middle" letter-spacing="0.5">${escapeXml(timeLine)}</text>`;
+
+  // Measured against the rendered SVG rather than assumed: at this font a
+  // text box runs from 0.95x the font size above the baseline to 0.23x
+  // below it, so a line occupies about 1.18x its own size. Two stacked
+  // lines plus breathing room therefore cap out near a third of the
+  // plaque's height each - an earlier 0.42 left the descenders 0.4px
+  // from the plaque edge and the two lines overlapping by 3px.
+  const LINE_ASCENT = 0.95;
+  const LINE_DESCENT = 0.23;
+  const EDGE_MARGIN = 4;
+
+  const lineCap = dateLine ? plaqueBounds.height * 0.36 : plaqueBounds.height * 0.6;
+  const fitFontSize = (text) =>
+    Math.max(16, Math.min(lineCap, Math.round(estimateTimeFontSize(text, plaqueBounds.width * 0.85))));
+
+  // One shared size for the stacked pair. Sizing each line independently
+  // made the geometry below unpredictable for a difference too small to
+  // notice - the two strings are always about the same length.
+  const stackedFontSize = dateLine ? Math.min(fitFontSize(dateLine), fitFontSize(timeLine)) : 0;
+  const timeFontSize = dateLine ? stackedFontSize : fitFontSize(timeLine);
+
+  const plaqueCenterY = plaqueBounds.y + plaqueBounds.height / 2;
+  const textAt = (text, y, size, weight) =>
+    `<text x="${plaqueBounds.x + plaqueBounds.width / 2}" y="${y}" font-family="'Trebuchet MS', Verdana, sans-serif" font-size="${size}" font-weight="${weight}" fill="#ffffff" text-anchor="middle" letter-spacing="0.5">${escapeXml(text)}</text>`;
+
+  // Stacked: the date pinned below the plaque's top edge and the time
+  // above its bottom edge, both by the same margin, so whatever slack the
+  // font size leaves lands in the gap between them rather than against an
+  // edge. Alone: optically centred.
+  const timeMarkup = dateLine
+    ? textAt(dateLine, plaqueBounds.y + EDGE_MARGIN + stackedFontSize * LINE_ASCENT, stackedFontSize, 600)
+      + textAt(timeLine, plaqueBounds.y + plaqueBounds.height - EDGE_MARGIN - stackedFontSize * LINE_DESCENT, stackedFontSize, 700)
+    : textAt(timeLine, plaqueCenterY + timeFontSize * 0.35, timeFontSize, 700);
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 600 900" width="600" height="900">
     <defs>${template.defs}</defs>
@@ -1672,15 +1794,18 @@ async function fetchTodayLeagueEvents(league, hostUrl, userTimeZone = 'America/N
   const coreEndpoint = ESPN_CORE_EVENT_ENDPOINTS[league.key];
   if (!endpoint || !coreEndpoint) return [];
   try {
-    // Without an explicit dates filter, ESPN's scoreboard endpoint doesn't
-    // reliably return only today's events the way it does for daily sports
-    // like MLB/NBA - MMA events are sparse (not every day), and the
-    // unfiltered endpoint was confirmed live to return the NEXT upcoming
-    // event regardless of how many days away it is, rather than an empty
-    // result on a day with no event. Same date-filtering approach
-    // fetchTodayGames already uses for every other sport.
-    const targetDateStr = getLocalDateString(userTimeZone);
-    const res = await axios.get(`${endpoint}?dates=${targetDateStr}`, {
+    // An explicit range is required, not optional. Left unfiltered,
+    // ESPN's scoreboard was confirmed live to return the NEXT upcoming
+    // event regardless of how far away it is - so "no dates parameter"
+    // does not mean "everything", it means "one arbitrary event".
+    //
+    // The window starts today rather than at this moment, so a card that
+    // began a couple of hours ago is still listed. It is very much still
+    // watchable, and dropping it the instant it starts would be the
+    // opposite of useful.
+    const fromDateStr = getLocalDateString(userTimeZone);
+    const toDateStr = addDaysToDateString(fromDateStr, MMA_SCHEDULE_DAYS);
+    const res = await axios.get(`${endpoint}?dates=${fromDateStr}-${toDateStr}`, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
       timeout: 10000
     });
@@ -1740,7 +1865,13 @@ async function fetchTodayLeagueEvents(league, hostUrl, userTimeZone = 'America/N
         awayFlagUrl: fighterBFlagUrl
       }).toString();
       const eventUtcDate = competition.date || event.date || '';
-      const dateParam = eventUtcDate ? `?date=${encodeURIComponent(eventUtcDate)}&${artParams}` : `?${artParams}`;
+      // The user's timezone has to ride along in the artwork URL. The
+      // poster now prints a DATE as well as a time, and a date is far
+      // more sensitive to timezone than a time is: get it wrong and a
+      // Friday-night card reads as Saturday.
+      const dateParam = eventUtcDate
+        ? `?date=${encodeURIComponent(eventUtcDate)}&tz=${encodeURIComponent(userTimeZone)}&${artParams}`
+        : `?${artParams}`;
 
       // League-scoped artwork paths, so a PFL card carries the PFL logo
       // on its poster and its own colours on the landscape background
@@ -1757,6 +1888,8 @@ async function fetchTodayLeagueEvents(league, hostUrl, userTimeZone = 'America/N
         ? ESPN_LEAGUES[artworkPromotion.artworkKey] || league.slug
         : league.slug;
       const leagueSlug = artworkSlug;
+      const whenLabel = formatEventWhen(eventUtcDate, userTimeZone);
+
       const poster = `${hostUrl}/poster/mma/${leagueSlug}/${fighterAId}/${fighterBId}.svg${dateParam}`;
       const background = `${hostUrl}/landscape/mma/${leagueSlug}/${fighterAId}/${fighterBId}.svg${dateParam}`;
       const logo = `${hostUrl}/logo/${leagueSlug}.svg`;
@@ -1780,9 +1913,19 @@ async function fetchTodayLeagueEvents(league, hostUrl, userTimeZone = 'America/N
         poster,
         background,
         logo,
-        description: event.name || `${fighterAName} vs ${fighterBName}`,
+        // Prefixed with when it is on. The section now spans months, so
+        // "which of these is tonight" is the first thing anyone needs
+        // from a card, and the description is the one field every client
+        // renders as text.
+        description: whenLabel
+          ? `${whenLabel}\n\n${event.name || `${fighterAName} vs ${fighterBName}`}`
+          : (event.name || `${fighterAName} vs ${fighterBName}`),
         status: competition.status?.type?.shortDetail || '',
-        date: eventUtcDate
+        date: eventUtcDate,
+        // Presentation fields, computed here because this is where the
+        // user's timezone is in hand.
+        whenLabel,
+        isToday: isSameLocalDay(eventUtcDate, userTimeZone)
       };
     }));
 
@@ -1807,7 +1950,16 @@ async function fetchTodayMmaEvents(hostUrl, userTimeZone = 'America/New_York') {
   const results = await Promise.allSettled(
     MMA_LEAGUES.map(league => fetchTodayLeagueEvents(league, hostUrl, userTimeZone))
   );
-  return results.flatMap(r => (r.status === 'fulfilled' ? r.value : []));
+  const events = results.flatMap(r => (r.status === 'fulfilled' ? r.value : []));
+
+  // Soonest first. Without this the list arrives grouped by promotion -
+  // every UFC card, then every PFL one - which for a months-long window
+  // buries tonight's event somewhere in the middle.
+  return events.sort((a, b) => {
+    const ta = a.date ? Date.parse(a.date) : Infinity;
+    const tb = b.date ? Date.parse(b.date) : Infinity;
+    return ta - tb;
+  });
 }
 
 // Single entry point used by the catalog, meta, and stream routes -
@@ -1816,18 +1968,30 @@ async function fetchTodayMmaEvents(hostUrl, userTimeZone = 'America/New_York') {
 // not a single matchup) rather than having each of the three call sites
 // duplicate this branching logic themselves.
 //
-// CORE REQUIREMENT, NOT OPTIONAL: every branch here must filter results to
-// ONLY the user's current local day. This is a fundamental feature of the
-// whole app, not a nice-to-have - confirmed the hard way once already (the
-// first UFC implementation omitted this and showed tomorrow's event as if
-// it were tonight's, since ESPN's scoreboard endpoint doesn't reliably
-// return "today only" on its own for sparse, non-daily sports - it can
-// default to "the next upcoming event" regardless of how far away). Any
-// new sport added here - boxing, F1, or anything else - needs its own
-// explicit date filter using the user's own timeZone, the same way
-// fetchTodayGames already does via getLocalDateString(userTimeZone). Do
-// not assume an unfiltered scoreboard call is safe just because it works
-// for daily sports like MLB/NBA.
+// CORE REQUIREMENT, NOT OPTIONAL: every branch here must filter results
+// by an EXPLICIT date range built from the user's own timeZone. Never
+// call a scoreboard endpoint unfiltered: ESPN does not return "today" by
+// default for a sparse, non-daily sport - it was confirmed live to return
+// the next upcoming event regardless of how far away it is, so an
+// unfiltered call silently presents a card three weeks out as tonight's.
+//
+// What that range should be differs by sport, and the distinction is
+// about the sport, not about convenience:
+//
+//   Daily leagues (NFL, NBA, MLB, college) - the user's current local day
+//   and nothing else. "What is on today" is the entire question, and a
+//   week of NFL fixtures would bury it.
+//
+//   MMA - a forward window of MMA_SCHEDULE_DAYS. A promotion runs a card
+//   every week or two, so a today-only section is empty almost every day
+//   and reads as broken. The original hazard this comment warned about -
+//   a future card looking like tonight's - is handled directly instead:
+//   every event carries its own date, printed on the poster, in the
+//   description, and on the card in the watch portal, and isToday marks
+//   the ones actually on now.
+//
+// A new sport added here needs a deliberate answer to which of those it
+// is. Do not assume either.
 async function fetchGamesForSport(sport, hostUrl, userTimeZone = 'America/New_York') {
   if (sport === 'UFC') {
     return fetchTodayMmaEvents(hostUrl, userTimeZone);
@@ -3045,7 +3209,16 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
     poster: game.poster,
     background: game.background,
     logo: game.logo,
-    description: game.description
+    description: game.description,
+    // releaseInfo is a field Stremio already renders beside a title, so
+    // the date shows up there without the client needing to know
+    // anything new. The two fields after it are our own: the watch portal
+    // reads them to label each card and to work out what is on TODAY,
+    // which it cannot compute itself because the user's timezone lives
+    // on the server.
+    releaseInfo: game.whenLabel || '',
+    whenLabel: game.whenLabel || '',
+    isToday: game.isToday !== false
   }));
 
   metas.push({
@@ -3057,7 +3230,7 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
     logo: `${hostUrl}/logo/${sport.toLowerCase()}.svg`,
     description: games.length > 0
       ? `See the full upcoming ${getSportDisplayName(sport)} schedule.`
-      : `No ${getSportDisplayName(sport)} games today. Tap to see the upcoming schedule.`
+      : `Nothing scheduled for ${getSportDisplayName(sport)}. Tap to see the upcoming schedule.`
   });
 
   res.setHeader('Content-Type', 'application/json');
