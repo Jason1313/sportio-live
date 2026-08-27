@@ -580,6 +580,18 @@ function hideSvgGroup(markup, groupId) {
   return markup.replace(pattern, `<g id="${groupId}"$1 display="none">`);
 }
 
+// Removes a single self-closing element by id, marker or otherwise.
+//
+// hideSvgGroup and replaceSvgGroup work on <g> wrappers; this is for a
+// bare element with no group of its own. Used for the poster's time
+// plaque, which is real rendered art rather than a marker - with nothing
+// printed on it any more, leaving it puts an empty black box across the
+// bottom of every card.
+function removeSvgElementById(markup, elementId) {
+  const pattern = new RegExp(`<[a-zA-Z]+[^>]*\\bid="${elementId}"[^>]*/>`);
+  return markup.replace(pattern, '');
+}
+
 // Extracts a named marker group's bounding box for placement purposes -
 // e.g. a "home_logo" marker rect defines exactly where and how large to
 // place the real, dynamic logo image instead. Looks for the first
@@ -1094,6 +1106,11 @@ app.get('/poster/:sport/:homeId/:awayId.svg', async (req, res) => {
   markup = hideSvgGroup(markup, 'away_logo');
   markup = hideSvgGroup(markup, 'home_logo');
   markup = hideSvgGroup(markup, 'time');
+  // The plaque that used to sit behind the game time. The time moved out
+  // from under the poster to beneath the card, and an empty plaque is a
+  // black box across the foot of every card - the same removal the MMA
+  // template already needed.
+  markup = removeSvgElementById(markup, 'time_plaque');
 
   const homeLogoMarkup = homeLogoBounds
     ? (homeLogoData
