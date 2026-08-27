@@ -3408,7 +3408,7 @@
   </g>
   <g id="keep_2" data-name="keep 2">
     <rect id="bottom_gradient" data-name="bottom gradient" class="cls-1" y="527.91" width="600" height="372.09"/>
-    <path class="cls-16" d="M63.24,817.29h473.52c8.95,0,16.22,7.27,16.22,16.22v66.49H47.02v-66.49c0-8.95,7.27-16.22,16.22-16.22Z"/>
+    <path id="time_plaque" data-name="time plaque" class="cls-16" d="M63.24,817.29h473.52c8.95,0,16.22,7.27,16.22,16.22v66.49H47.02v-66.49c0-8.95,7.27-16.22,16.22-16.22Z"/>
   </g>
   <g id="ufc_logo" data-name="ufc logo">
     <rect id="render_ufc_logo_here._scaled_proportionately" data-name="render ufc logo here. scaled proportionately" class="cls-2" x="205.6" y="22.57" width="188.81" height="68.16"/>

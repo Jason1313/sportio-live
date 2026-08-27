@@ -628,6 +628,18 @@ function replaceSvgGroup(markup, groupId, replacement) {
   return markup.replace(pattern, replacement);
 }
 
+// Removes a single self-closing element by id, marker or otherwise.
+//
+// hideSvgGroup and replaceSvgGroup both operate on <g> wrappers; this is
+// for a bare element that has no group of its own. Used for the poster's
+// time plaque, which is real rendered art rather than a marker - with
+// nothing printed on it any more, leaving it would put a conspicuous
+// empty bar across the bottom of every card.
+function removeSvgElementById(markup, elementId) {
+  const pattern = new RegExp(`<[a-zA-Z]+[^>]*\\bid="${elementId}"[^>]*/>`);
+  return markup.replace(pattern, '');
+}
+
 // Extracts a named marker group's bounding box for placement purposes -
 // e.g. a "home_logo" marker rect defines exactly where and how large to
 // place the real, dynamic logo image instead. Looks for the first
@@ -798,27 +810,6 @@ function splitNameForWrap(name) {
   }
 
   return [words.slice(0, bestIdx).join(' '), words.slice(bestIdx).join(' ')];
-}
-
-// Approximate per-character width ratios (relative to font-size) for our
-// bold Trebuchet MS/Verdana stack, used to size the poster's time text so
-// it reaches a target width through natural font-size scaling rather than
-// SVG's textLength attribute, which distorts letterforms to force-fit a
-// width. This is an approximation, not exact live text measurement -
-// adjust these ratios if real posters render noticeably off-target.
-const TIME_CHAR_WIDTH_RATIOS = {
-  '0': 0.60, '1': 0.60, '2': 0.60, '3': 0.60, '4': 0.60, '5': 0.60,
-  '6': 0.60, '7': 0.60, '8': 0.60, '9': 0.60,
-  ':': 0.30, ' ': 0.30,
-  'A': 0.68, 'P': 0.62, 'M': 0.85, 'E': 0.60, 'S': 0.60,
-  'T': 0.55, 'C': 0.65, 'D': 0.65, 'N': 0.68
-};
-
-function estimateTimeFontSize(text, targetWidth) {
-  const totalRatio = text.split('').reduce((sum, ch) => {
-    return sum + (TIME_CHAR_WIDTH_RATIOS[ch.toUpperCase()] || 0.65);
-  }, 0);
-  return targetWidth / totalRatio;
 }
 
 // Renders a circle with the team's name as text, used in place of the
@@ -1041,8 +1032,6 @@ function getUfcPosterTemplateInline() {
 const mmaPosterHandler = async (req, res) => {
   const fighterAName = req.query.home || 'Fighter A';
   const fighterBName = req.query.away || 'Fighter B';
-  const gameUtcDate = req.query.date || null;
-  const userTz = req.query.tz || 'America/New_York';
   const { fighterAId, fighterBId } = req.params;
   const leagueKey = String(req.params.league || 'ufc').toUpperCase();
 
@@ -1105,67 +1094,20 @@ const mmaPosterHandler = async (req, res) => {
     : '';
   markup = replaceSvgGroup(markup, 'ufc_logo', ufcLogoMarkup);
 
-  // The plaque itself is already fully rendered, visible static art from
-  // the template (an unnamed rounded-rect path, part of the "keep 2"
-  // group) - not a hidden marker to replace, just real estate to center
-  // text on top of. Bounds computed once by parsing the path's own
-  // geometry precisely, not eyeballed - confirmed exact: x 47.02-552.98,
-  // y 817.29-900.
-  const plaqueBounds = { x: 47.02, y: 817.29, width: 505.96, height: 82.71 };
-
-  // The plaque carries the DATE as well as the time now that the section
-  // runs months ahead - a card in this list may be tonight or eleven
-  // weeks out, and the poster is where people look to tell which.
+  // The date and time used to be printed on a plaque here. They now live
+  // under the poster instead - on the card in the watch portal, in the
+  // description, and in releaseInfo - which is legible at thumbnail size,
+  // reads the same for every sport, and needs no room inside the artwork.
   //
-  // Two lines rather than one long string. Fitting "Sat, Oct 17 - 8:00 pm
-  // EDT" across 506px means shrinking it to stay inside the plaque, and
-  // the time - the thing actually read at a glance - shrinks with it.
-  // Stacked, each line is sized independently and the time stays large.
-  //
-  // Today's card gets one line, not two. formatEventDate is skipped when
-  // the event is today, because "today" is the one case where a bare time
-  // is unambiguous - and a single line renders bigger.
-  const eventIsToday = gameUtcDate ? isSameLocalDay(gameUtcDate, userTz) : false;
-  const dateLine = (gameUtcDate && !eventIsToday) ? (formatEventDate(gameUtcDate, userTz) || '') : '';
-  const timeLine = gameUtcDate ? (formatTeamTime(gameUtcDate, userTz) || 'TBD') : 'FIGHT TIME TBD';
-
-  // Measured against the rendered SVG rather than assumed: at this font a
-  // text box runs from 0.95x the font size above the baseline to 0.23x
-  // below it, so a line occupies about 1.18x its own size. Two stacked
-  // lines plus breathing room therefore cap out near a third of the
-  // plaque's height each - an earlier 0.42 left the descenders 0.4px
-  // from the plaque edge and the two lines overlapping by 3px.
-  const LINE_ASCENT = 0.95;
-  const LINE_DESCENT = 0.23;
-  const EDGE_MARGIN = 4;
-
-  const lineCap = dateLine ? plaqueBounds.height * 0.36 : plaqueBounds.height * 0.6;
-  const fitFontSize = (text) =>
-    Math.max(16, Math.min(lineCap, Math.round(estimateTimeFontSize(text, plaqueBounds.width * 0.85))));
-
-  // One shared size for the stacked pair. Sizing each line independently
-  // made the geometry below unpredictable for a difference too small to
-  // notice - the two strings are always about the same length.
-  const stackedFontSize = dateLine ? Math.min(fitFontSize(dateLine), fitFontSize(timeLine)) : 0;
-  const timeFontSize = dateLine ? stackedFontSize : fitFontSize(timeLine);
-
-  const plaqueCenterY = plaqueBounds.y + plaqueBounds.height / 2;
-  const textAt = (text, y, size, weight) =>
-    `<text x="${plaqueBounds.x + plaqueBounds.width / 2}" y="${y}" font-family="'Trebuchet MS', Verdana, sans-serif" font-size="${size}" font-weight="${weight}" fill="#ffffff" text-anchor="middle" letter-spacing="0.5">${escapeXml(text)}</text>`;
-
-  // Stacked: the date pinned below the plaque's top edge and the time
-  // above its bottom edge, both by the same margin, so whatever slack the
-  // font size leaves lands in the gap between them rather than against an
-  // edge. Alone: optically centred.
-  const timeMarkup = dateLine
-    ? textAt(dateLine, plaqueBounds.y + EDGE_MARGIN + stackedFontSize * LINE_ASCENT, stackedFontSize, 600)
-      + textAt(timeLine, plaqueBounds.y + plaqueBounds.height - EDGE_MARGIN - stackedFontSize * LINE_DESCENT, stackedFontSize, 700)
-    : textAt(timeLine, plaqueCenterY + timeFontSize * 0.35, timeFontSize, 700);
+  // The plaque went with them. It is real rendered art, not a marker, so
+  // an empty one would sit as a conspicuous bar across the bottom of
+  // every card. The bottom gradient beside it stays: that is the general
+  // fade, not part of the timestamp.
+  markup = removeSvgElementById(markup, 'time_plaque');
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 600 900" width="600" height="900">
     <defs>${template.defs}</defs>
     ${markup}
-    ${timeMarkup}
   </svg>`;
 
   res.setHeader('Content-Type', 'image/svg+xml');
@@ -1222,14 +1164,17 @@ app.get('/poster/:sport/:homeId/:awayId.svg', async (req, res) => {
 
   const template = getPosterTemplateInline();
 
-  // away_logo/home_logo/time are placement markers only, never meant to
+  // away_logo/home_logo are placement markers only, never meant to
   // actually render - their rects just define exactly where and how
   // large to place the real, dynamic content instead. Bounds extracted
   // from the original markup before any modifications, since hiding a
   // group doesn't touch its inner coordinates either way.
+  //
+  // 'time' is a marker too, and is still hidden below, but nothing is
+  // drawn in its place any more - the time now lives under the poster
+  // rather than on it, so only the hiding matters.
   const homeLogoBounds = getSvgGroupBounds(template.markup, 'home_logo');
   const awayLogoBounds = getSvgGroupBounds(template.markup, 'away_logo');
-  const timeBounds = getSvgGroupBounds(template.markup, 'time');
 
   let markup = template.markup;
   markup = recolorSvgGroup(markup, 'away_color', awayColor);
@@ -1249,22 +1194,15 @@ app.get('/poster/:sport/:homeId/:awayId.svg', async (req, res) => {
         : buildLogoFallback(awayLogoBounds.x, awayLogoBounds.y, awayLogoBounds.width, awayName, awayColor))
     : '';
 
-  const timeLine = gameUtcDate ? (formatTeamTime(gameUtcDate, userTz) || 'TBD') : 'GAME TIME TBD';
-  // Target width matches the same "most of the box, not edge to edge"
-  // ratio our previous plaque used, scaled to this marker's own width.
-  const timeFontSize = timeBounds
-    ? Math.max(24, Math.min(timeBounds.height * 0.9, Math.round(estimateTimeFontSize(timeLine, timeBounds.width * 0.85))))
-    : 36;
-  const timeMarkup = timeBounds
-    ? `<text x="${timeBounds.x + timeBounds.width / 2}" y="${timeBounds.y + timeBounds.height / 2 + timeFontSize * 0.35}" font-family="'Trebuchet MS', Verdana, sans-serif" font-size="${timeFontSize}" font-weight="700" fill="#ffffff" text-anchor="middle" letter-spacing="0.5">${timeLine}</text>`
-    : '';
+  // No time is printed here any more - it lives under the poster now,
+  // the same way it does for every other sport. The 'time' marker group
+  // stays hidden below, exactly as it was; nothing is drawn over it.
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 600 900" width="600" height="900">
     <defs>${template.defs}</defs>
     ${markup}
     ${homeLogoMarkup}
     ${awayLogoMarkup}
-    ${timeMarkup}
   </svg>`;
 
   res.setHeader('Content-Type', 'image/svg+xml');
@@ -1741,6 +1679,14 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
 
       const description = `${line1}\n${line2}\n\n${line3}`;
 
+      // The same two fields MMA produces, so the watch portal can label
+      // every card the same way regardless of sport - which is the whole
+      // point of them living under the poster rather than on it. These
+      // games are today by definition (fetchTodayGames filters to the
+      // user's local day), but isToday is computed rather than hardcoded
+      // true so it stays honest if that ever changes.
+      const whenLabel = formatEventWhen(gameUtcDate, userTimeZone);
+
       return {
         id: String(event.id),
         name: event.name || `${awayTeam.displayName || 'Away'} vs ${homeTeam.displayName || 'Home'}`,
@@ -1760,7 +1706,9 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
         logo,
         description,
         status: statusDetail,
-        date: event.date
+        date: event.date,
+        whenLabel,
+        isToday: isSameLocalDay(gameUtcDate, userTimeZone)
       };
     });
   } catch (err) {
@@ -1865,12 +1813,14 @@ async function fetchTodayLeagueEvents(league, hostUrl, userTimeZone = 'America/N
         awayFlagUrl: fighterBFlagUrl
       }).toString();
       const eventUtcDate = competition.date || event.date || '';
-      // The user's timezone has to ride along in the artwork URL. The
-      // poster now prints a DATE as well as a time, and a date is far
-      // more sensitive to timezone than a time is: get it wrong and a
-      // Friday-night card reads as Saturday.
+      // No timezone in the artwork URL. It was added when the poster
+      // printed a date, which is far more timezone-sensitive than a time;
+      // with the timestamp gone the artwork is identical for every
+      // viewer, and passing a tz would only fragment the cache. `date`
+      // stays purely as a cache key, so artwork re-renders if an event
+      // gets rescheduled.
       const dateParam = eventUtcDate
-        ? `?date=${encodeURIComponent(eventUtcDate)}&tz=${encodeURIComponent(userTimeZone)}&${artParams}`
+        ? `?date=${encodeURIComponent(eventUtcDate)}&${artParams}`
         : `?${artParams}`;
 
       // League-scoped artwork paths, so a PFL card carries the PFL logo
@@ -3004,10 +2954,10 @@ function buildAutoSearchTitle(channel) {
 // and a broken poster in a catalog row reads as a broken addon.
 // Average glyph width as a fraction of font-size for the bold sans stack
 // used here. An approximation, not real text measurement - good enough to
-// keep a label inside its box, which is all that's needed. Deliberately
-// not TIME_CHAR_WIDTH_RATIOS: that table only covers digits and the nine
-// letters that appear in a formatted time, so most network names would
-// fall straight through it.
+// keep a label inside its box, which is all that's needed. A single ratio
+// rather than a per-character table, because network names use the whole
+// alphabet and any table narrow enough to be accurate would be mostly
+// misses.
 const NETWORK_LABEL_CHAR_RATIO = 0.62;
 
 function buildNetworkArtSvg(label, width, height) {
