@@ -1403,19 +1403,210 @@ app.get('/logo/:sport.svg', async (req, res) => {
   res.send(svg);
 });
 
-async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York') {
+// ---------------------------------------------------------------------
+// Season weeks
+// ---------------------------------------------------------------------
+//
+// Football is not a daily sport. A league plays one round a week, so a
+// today-only catalog is empty six days in seven, and on the seventh it
+// answers a narrower question than anyone is asking - nobody plans around
+// "the games happening today" when the whole slate lands over one weekend.
+//
+// These leagues therefore show one ESPN season week at a time, whole.
+// Which week is decided by the games themselves, not by ESPN's calendar
+// window: the window for a week runs on for a day or two past the final
+// whistle (NFL Week 1's window ends Wednesday; its last game is Monday),
+// and continuing to show a finished round is exactly what this is meant
+// to avoid. The rule is the plain one - the current week is the first
+// whose last game has not already finished before today, so the morning
+// after a round ends the next round takes over.
+//
+// Verified against the real 2026 NFL calendar: on Sep 14, Week 1's
+// Monday-night game, it still shows Week 1; on Sep 15 it moves to Week 2;
+// on Sep 21 it shows Week 2 and on Sep 22 Week 3.
+const SEASON_WEEK_LEAGUES = {
+  NFL: { p5Only: false },
+  NCAAFB: { p5Only: true }
+};
+
+// ACC, Big 12, Big Ten, SEC, Pac-12 - read from ESPN's own FBS conference
+// list rather than assumed, since realignment moves teams constantly
+// (Stanford is ACC now, USC is Big Ten, Texas State joined the rebuilt
+// Pac-12 for 2026). Membership is looked up per team per game, so those
+// moves need no change here.
+const P5_CONFERENCE_IDS = new Set(['1', '4', '5', '8', '9']);
+
+// Both teams must be Power 5. A P5 side hosting an FCS opponent is not
+// what "P5 matchups" means, and those are the games this filter exists to
+// leave out - week 1 of 2026 has 99 FBS games and 15 P5-on-P5 ones.
+function isP5Matchup(event) {
+  const competitors = (event.competitions || [])[0]?.competitors || [];
+  return competitors.length === 2
+    && competitors.every(c => P5_CONFERENCE_IDS.has(String(c.team?.conferenceId ?? '')));
+}
+
+// A date as YYYY-MM-DD in a given timezone. Directly comparable as a
+// string, which is the whole point: "has this day passed" is a question
+// about calendar days in the user's own zone, not about elapsed hours.
+function localDayISO(utcMs, timeZone) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: timeZone || 'America/New_York' })
+    .format(new Date(utcMs));
+}
+
+// The regular-season calendar, plus where ESPN currently thinks we are.
+//
+// Cached for hours because it is a fixture list: the week boundaries for
+// a season are set before it starts and do not move. Without this every
+// catalog request would spend a round trip re-reading the same schedule.
+const seasonCalendarCache = new Map();
+const SEASON_CALENDAR_CACHE_MS = 6 * 60 * 60 * 1000;
+
+async function fetchSeasonCalendar(sportKey) {
+  const cached = seasonCalendarCache.get(sportKey);
+  if (cached && (Date.now() - cached.fetchedAt) < SEASON_CALENDAR_CACHE_MS) return cached.value;
+
+  const endpoint = ESPN_ENDPOINTS[sportKey];
+  if (!endpoint) return null;
+  try {
+    const res = await axios.get(endpoint, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      timeout: 10000
+    });
+    const league = res.data?.leagues?.[0] || {};
+    // Season type 2 is the regular season. Preseason (1) and postseason
+    // (3) have their own week numbering, which is not what "Week 1" means
+    // to anyone reading a schedule.
+    const regular = (league.calendar || []).find(s => String(s.value) === '2');
+    if (!regular) return null;
+
+    const weeks = (regular.entries || [])
+      .map(e => Number(e.value))
+      .filter(Number.isFinite)
+      .sort((a, b) => a - b);
+    if (weeks.length === 0) return null;
+
+    const value = {
+      year: res.data?.season?.year || league.season?.year,
+      weeks,
+      currentType: Number(res.data?.season?.type),
+      currentWeek: Number(res.data?.week?.number)
+    };
+    seasonCalendarCache.set(sportKey, { fetchedAt: Date.now(), value });
+    return value;
+  } catch (err) {
+    console.error(`[ESPN] Failed to fetch the season calendar for ${sportKey}:`, err.message);
+    return cached ? cached.value : null;
+  }
+}
+
+// The raw events of one regular-season week. Kept separate from
+// fetchTodayGames because resolving which week to show only needs the
+// dates, and this result is cached so the chosen week is not fetched
+// twice on the same request.
+const weekEventsCache = new Map();
+const WEEK_EVENTS_CACHE_MS = 10 * 60 * 1000;
+
+async function fetchSeasonWeekEvents(sportKey, year, week) {
+  const key = `${sportKey}:${year}:${week}`;
+  const cached = weekEventsCache.get(key);
+  if (cached && (Date.now() - cached.fetchedAt) < WEEK_EVENTS_CACHE_MS) return cached.events;
+
+  const endpoint = ESPN_ENDPOINTS[sportKey];
+  if (!endpoint) return [];
+  try {
+    // limit stays at 500 - see getNcaaScoreboardParams. Measured: a
+    // college week returns 75 games at limit=500 and 25 at limit=1000,
+    // so raising it silently truncates.
+    const res = await axios.get(
+      `${endpoint}?dates=${year}&seasontype=2&week=${week}${getNcaaScoreboardParams(sportKey)}`,
+      { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }, timeout: 15000 }
+    );
+    const events = res.data?.events || [];
+    weekEventsCache.set(key, { fetchedAt: Date.now(), events });
+    return events;
+  } catch (err) {
+    console.error(`[ESPN] Failed to fetch ${sportKey} week ${week}:`, err.message);
+    return cached ? cached.events : [];
+  }
+}
+
+// Which season week to show, or null when there is no regular-season week
+// left to show.
+//
+// Starts from ESPN's own idea of the current week and walks forward, so
+// this is normally one lookup rather than a scan from Week 1. Outside the
+// regular season it starts at Week 1 during the preseason - the next
+// round really is Week 1 - and gives up during the postseason, which has
+// its own separate numbering.
+async function resolveSeasonWeek(sportKey, userTimeZone) {
+  const calendar = await fetchSeasonCalendar(sportKey);
+  if (!calendar) return null;
+
+  const lastWeek = calendar.weeks[calendar.weeks.length - 1];
+  if (calendar.currentType > 2) return null;
+  let week = calendar.currentType === 2 ? calendar.currentWeek : calendar.weeks[0];
+  if (!Number.isFinite(week)) week = calendar.weeks[0];
+
+  const today = localDayISO(Date.now(), userTimeZone);
+
+  while (week <= lastWeek) {
+    const events = await fetchSeasonWeekEvents(sportKey, calendar.year, week);
+    if (events.length > 0) {
+      const lastDay = events
+        .map(e => localDayISO(Date.parse(e.date), userTimeZone))
+        .sort()
+        .pop();
+      // Still the current week right up to and including the day of its
+      // final game. Only the day after does the next week take over.
+      if (today <= lastDay) return { year: calendar.year, week, events };
+    }
+    week++;
+  }
+  return null;
+}
+
+// One whole season week's games, soonest first.
+async function fetchSeasonWeekGames(sport, hostUrl, userTimeZone) {
+  const sportKey = sport.toUpperCase();
+  const resolved = await resolveSeasonWeek(sportKey, userTimeZone);
+  if (!resolved) {
+    console.log(`[ESPN] ${sportKey}: no regular-season week to show (season over or not started)`);
+    return [];
+  }
+
+  const config = SEASON_WEEK_LEAGUES[sportKey] || {};
+  const games = await fetchTodayGames(sport, hostUrl, userTimeZone, {
+    query: `dates=${resolved.year}&seasontype=2&week=${resolved.week}`,
+    eventFilter: config.p5Only ? isP5Matchup : null
+  });
+
+  console.log(`[ESPN] ${sportKey} week ${resolved.week}: ${resolved.events.length} scheduled -> ${games.length} shown`);
+  return games.sort((a, b) => {
+    const ta = a.date ? Date.parse(a.date) : Infinity;
+    const tb = b.date ? Date.parse(b.date) : Infinity;
+    return ta - tb;
+  });
+}
+
+// `options.query` replaces the default single-day filter, which is how
+// the season-week leagues ask for a whole round instead. `options.filter`
+// drops events before they are mapped, which is where the college P5
+// filter runs - it needs each team's conference id, and that only exists
+// on the raw ESPN event.
+async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York', options = {}) {
   const endpoint = ESPN_ENDPOINTS[sport.toUpperCase()];
   if (!endpoint) return [];
 
   try {
-    const targetDateStr = getLocalDateString(userTimeZone);
+    const query = options.query || `dates=${getLocalDateString(userTimeZone)}`;
     const ncaaParams = getNcaaScoreboardParams(sport);
-    const res = await axios.get(`${endpoint}?dates=${targetDateStr}${ncaaParams}`, {
+    const res = await axios.get(`${endpoint}?${query}${ncaaParams}`, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-      timeout: 7000
+      timeout: 15000
     });
 
-    const events = res.data?.events || [];
+    const allEvents = res.data?.events || [];
+    const events = options.eventFilter ? allEvents.filter(options.eventFilter) : allEvents;
 
     return events.map(event => {
       const competition = event.competitions?.[0] || {};
@@ -1790,25 +1981,33 @@ async function fetchTodayMmaEvents(hostUrl, userTimeZone = 'America/New_York') {
 // unfiltered call silently presents a card three weeks out as tonight's.
 //
 // What that range should be differs by sport, and the distinction is
-// about the sport, not about convenience:
+// about the sport, not about convenience. There are three answers:
 //
-//   Daily leagues (NFL, NBA, MLB, college) - the user's current local day
-//   and nothing else. "What is on today" is the entire question, and a
-//   week of NFL fixtures would bury it.
+//   Daily leagues (NBA, MLB, NHL) - the user's current local day and
+//   nothing else. "What is on today" is the entire question.
+//
+//   Season-week leagues (NFL, college football) - one whole ESPN week,
+//   the current one. A league that plays a single round a week is empty
+//   six days in seven under a day filter, and the round is the unit
+//   people actually think in. See SEASON_WEEK_LEAGUES.
 //
 //   MMA - a forward window of MMA_SCHEDULE_DAYS. A promotion runs a card
-//   every week or two, so a today-only section is empty almost every day
-//   and reads as broken. The original hazard this comment warned about -
-//   a future card looking like tonight's - is handled directly instead:
-//   every event carries its own date, printed on the poster, in the
-//   description, and on the card in the watch portal, and isToday marks
-//   the ones actually on now.
+//   every week or two, so even a week is usually empty.
 //
-// A new sport added here needs a deliberate answer to which of those it
-// is. Do not assume either.
+// The hazard the original of this comment warned about - a future game
+// looking like tonight's - is handled directly rather than by hiding the
+// schedule: every game carries its own date, in the description and on
+// the card in the watch portal, and isToday marks the ones actually on
+// now, which is what Home filters by.
+//
+// A new sport added here needs a deliberate answer to which of the three
+// it is. Do not assume.
 async function fetchGamesForSport(sport, hostUrl, userTimeZone = 'America/New_York') {
   if (sport === 'UFC') {
     return fetchTodayMmaEvents(hostUrl, userTimeZone);
+  }
+  if (SEASON_WEEK_LEAGUES[sport.toUpperCase()]) {
+    return fetchSeasonWeekGames(sport, hostUrl, userTimeZone);
   }
   return fetchTodayGames(sport, hostUrl, userTimeZone);
 }
