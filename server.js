@@ -1480,46 +1480,81 @@ function involvesP4Team(event) {
   return competitors.some(c => P4_CONFERENCE_IDS.has(String(c.team?.conferenceId ?? '')));
 }
 
-// ESPN's FBS conference ids, read from its own conference list. Only the
-// id-to-name mapping lives here: which teams are IN a conference comes
-// per team per game from ESPN, so realignment never touches this.
+// The P4 conferences, by ESPN's own ids. Only the id-to-name mapping
+// lives here: which teams are IN a conference comes per team per game
+// from ESPN, so realignment never touches this.
 //
-// A conference outside this list - an FCS opponent in a bowl, or one ESPN
-// adds later - is grouped under "Other" rather than dropped, so a filter
-// built from these can never hide a game outright.
+// Deliberately only these four. Tagging every conference meant a bowl
+// round offered eleven chips, most of them one game each, which is a
+// worse way to find anything than no filter at all. Everything else is
+// left untagged and reachable under All.
 const CONFERENCE_NAMES = {
   '1': 'ACC',
   '4': 'Big 12',
   '5': 'Big Ten',
-  '8': 'SEC',
-  '9': 'Pac-12',
-  '12': 'Conference USA',
-  '15': 'MAC',
-  '17': 'Mountain West',
-  '18': 'FBS Independents',
-  '37': 'Sun Belt',
-  '151': 'American'
+  '8': 'SEC'
 };
-const OTHER_CONFERENCE = { id: 'other', name: 'Other' };
 
-// The conferences a game belongs to - one per side, deduplicated, so a
-// conference game yields one entry and a cross-conference game two. This
-// is what the watch portal's conference filter reads.
+// The P4 conferences a game belongs to - one per side, deduplicated, so
+// an all-P4 conference game yields one entry and a P4 cross-conference
+// game two. This is what the watch portal's conference filter reads.
 //
 // Both sides are tagged rather than just one, because "show me Big Ten
-// games" plainly means every game a Big Ten team is in, home or away.
+// games" plainly means every game a Big Ten team is in, home or away. A
+// game with no P4 team at all is tagged with nothing and shows only
+// under All, which is the right answer for a filter offering P4 chips.
 function conferencesForEvent(competition) {
   const competitors = competition?.competitors || [];
   const seen = new Map();
   for (const competitor of competitors) {
-    const rawId = competitor.team?.conferenceId;
-    if (rawId === undefined || rawId === null) continue;
-    const id = String(rawId);
+    const id = String(competitor.team?.conferenceId ?? '');
     const name = CONFERENCE_NAMES[id];
-    const entry = name ? { id, name } : OTHER_CONFERENCE;
-    if (!seen.has(entry.id)) seen.set(entry.id, entry);
+    if (name && !seen.has(id)) seen.set(id, { id, name });
   }
   return [...seen.values()];
+}
+
+// How long after kickoff a game is assumed finished, when ESPN has not
+// said so itself. Only a fallback: `state` is authoritative and present
+// on everything ESPN returns. Four hours comfortably covers a football
+// game including overtime.
+const ASSUME_FINISHED_AFTER_MS = 4 * 60 * 60 * 1000;
+
+// Nearest-first ordering, used for every list of games in the app.
+//
+//   0  on now
+//   1  still to come, soonest first
+//   2  finished, most recently first
+//
+// Plain ascending time was wrong once a list covered more than a day: on
+// a Saturday afternoon it led with games that had already finished that
+// morning, so the thing you actually wanted was somewhere down the page.
+// Sorting purely by distance from now is worse still - it interleaves a
+// finished noon game between the 3:30 and the 7:00, which reads as
+// broken. Bucketing keeps what is on now at the top, what is next after
+// it, and what has just ended within reach at the bottom.
+function gamePhase(game, nowMs) {
+  if (game.state === 'in') return 0;
+  if (game.state === 'post') return 2;
+  const start = game.date ? Date.parse(game.date) : NaN;
+  if (Number.isFinite(start) && start < nowMs - ASSUME_FINISHED_AFTER_MS) return 2;
+  return 1;
+}
+
+function compareGamesByRelevance(a, b, nowMs = Date.now()) {
+  const phaseA = gamePhase(a, nowMs);
+  const phaseB = gamePhase(b, nowMs);
+  if (phaseA !== phaseB) return phaseA - phaseB;
+  const startA = a.date ? Date.parse(a.date) : Infinity;
+  const startB = b.date ? Date.parse(b.date) : Infinity;
+  // Finished games run backwards, so the one that just ended is nearest
+  // the top of its group rather than the one from three days ago.
+  return phaseA === 2 ? startB - startA : startA - startB;
+}
+
+function sortGamesByRelevance(games) {
+  const now = Date.now();
+  return games.sort((a, b) => compareGamesByRelevance(a, b, now));
 }
 
 // A date as YYYY-MM-DD in a given timezone. Directly comparable as a
@@ -1712,11 +1747,7 @@ async function fetchSeasonWeekGames(sport, hostUrl, userTimeZone) {
   });
 
   console.log(`[ESPN] ${sportKey} ${resolved.label}: ${resolved.events.length} scheduled -> ${games.length} shown`);
-  return games.sort((a, b) => {
-    const ta = a.date ? Date.parse(a.date) : Infinity;
-    const tb = b.date ? Date.parse(b.date) : Infinity;
-    return ta - tb;
-  });
+  return sortGamesByRelevance(games);
 }
 
 // `options.queries` replaces the default single-day filter, which is how
@@ -1751,7 +1782,9 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
     }
     const events = options.eventFilter ? allEvents.filter(options.eventFilter) : allEvents;
 
-    return events.map(event => {
+    // Callers that fetch a whole round sort the result themselves; this
+    // covers the day-at-a-time leagues, which took ESPN's order as given.
+    return sortGamesByRelevance(events.map(event => {
       const competition = event.competitions?.[0] || {};
       const competitors = competition.competitors || [];
 
@@ -1901,6 +1934,9 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
         logo,
         description,
         status: statusDetail,
+        // ESPN's own verdict on whether a game is upcoming, on now, or
+        // over: 'pre', 'in' or 'post'. Used for ordering.
+        state: event.status?.type?.state || '',
         date: event.date,
         whenLabel,
         isToday: isSameLocalDay(gameUtcDate, userTimeZone),
@@ -1908,7 +1944,7 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
         // portal keys off to decide whether to offer the filter at all.
         conferences: conferencesForEvent(competition)
       };
-    });
+    }));
   } catch (err) {
     console.error(`[ESPN] Error fetching scoreboard for ${sport}:`, err.message);
     return [];
@@ -2072,6 +2108,7 @@ async function fetchTodayLeagueEvents(league, hostUrl, userTimeZone = 'America/N
           ? `${whenLabel}\n\n${event.name || `${fighterAName} vs ${fighterBName}`}`
           : (event.name || `${fighterAName} vs ${fighterBName}`),
         status: competition.status?.type?.shortDetail || '',
+        state: competition.status?.type?.state || event.status?.type?.state || '',
         date: eventUtcDate,
         // Presentation fields, computed here because this is where the
         // user's timezone is in hand.
@@ -2103,14 +2140,10 @@ async function fetchTodayMmaEvents(hostUrl, userTimeZone = 'America/New_York') {
   );
   const events = results.flatMap(r => (r.status === 'fulfilled' ? r.value : []));
 
-  // Soonest first. Without this the list arrives grouped by promotion -
+  // Nearest first. Without this the list arrives grouped by promotion -
   // every UFC card, then every PFL one - which for a months-long window
   // buries tonight's event somewhere in the middle.
-  return events.sort((a, b) => {
-    const ta = a.date ? Date.parse(a.date) : Infinity;
-    const tb = b.date ? Date.parse(b.date) : Infinity;
-    return ta - tb;
-  });
+  return sortGamesByRelevance(events);
 }
 
 // Single entry point used by the catalog, meta, and stream routes -
@@ -3379,7 +3412,11 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
     releaseInfo: game.whenLabel || '',
     whenLabel: game.whenLabel || '',
     isToday: game.isToday !== false,
-    conferences: game.conferences || []
+    conferences: game.conferences || [],
+    // Home pools several leagues and re-sorts them into one list, which
+    // needs the same inputs the server sorts by.
+    startsAt: game.date || '',
+    state: game.state || ''
   }));
 
   res.setHeader('Content-Type', 'application/json');

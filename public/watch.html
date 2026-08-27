@@ -571,6 +571,33 @@
     return `<span class="block text-[10px] mt-0.5 ${today ? 'text-[#7fc98a] font-semibold' : 'text-[#e6e6e6]/45'}">${text}</span>`;
   }
 
+  // Nearest-first, the same ordering the server applies within a league:
+  // on now, then soonest to come, then most recently finished. Home pools
+  // several leagues, and taking them in catalog order meant every NFL
+  // game, then every college game, then every fight - so what was
+  // actually on next sat somewhere in the middle of the page.
+  const ASSUME_FINISHED_AFTER_MS = 4 * 60 * 60 * 1000;
+
+  function metaPhase(meta, nowMs) {
+    if (meta.state === 'in') return 0;
+    if (meta.state === 'post') return 2;
+    const start = Date.parse(meta.startsAt || '');
+    if (Number.isFinite(start) && start < nowMs - ASSUME_FINISHED_AFTER_MS) return 2;
+    return 1;
+  }
+
+  function sortMetasByRelevance(metas) {
+    const now = Date.now();
+    return metas.sort((a, b) => {
+      const phaseA = metaPhase(a, now);
+      const phaseB = metaPhase(b, now);
+      if (phaseA !== phaseB) return phaseA - phaseB;
+      const startA = Date.parse(a.startsAt || '') || Infinity;
+      const startB = Date.parse(b.startsAt || '') || Infinity;
+      return phaseA === 2 ? startB - startA : startA - startB;
+    });
+  }
+
   // Every live game across every configured league, on one page.
   async function loadHome() {
     const sources = gameCatalogs();
@@ -611,7 +638,7 @@
     }
 
     showEmpty(failures > 0 ? `${failures} league${failures === 1 ? '' : 's'} could not be loaded.` : '');
-    renderGameGrid(games);
+    renderGameGrid(sortMetasByRelevance(games));
   }
 
   // The conferences present in a set of metas, each with how many games
