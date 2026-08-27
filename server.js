@@ -1433,9 +1433,22 @@ app.get('/logo/:sport.svg', async (req, res) => {
 // anything paired with a type - and because which of them are worth
 // showing is a judgement per league, not a fact about the data.
 const SEASON_WEEK_LEAGUES = {
-  NFL: { seasonTypes: [1, 2], p4Only: false },
+  // Preseason, regular season, postseason. The NFL's postseason really is
+  // a sequence of rounds - Wild Card, Divisional, Conference
+  // Championship, Pro Bowl, Super Bowl - so it needs nothing special.
+  NFL: { seasonTypes: [1, 2, 3], p4Only: false },
   // College football's calendar has no preseason segment at all.
-  NCAAFB: { seasonTypes: [2], p4Only: true }
+  //
+  // Its postseason is not a sequence. ESPN files it as two entries that
+  // cover the same six weeks: "Bowls" and "CFP". Treated as rounds they
+  // would deadlock - both end on the same day, so the second could never
+  // come round - and there is nothing to sequence anyway, since the CFP
+  // games are a strict subset of the bowls (verified against the
+  // completed 2025 season: 11 CFP games, all 11 already in the 46-game
+  // bowl list, none unique to it). mergedSeasonTypes collapses them into
+  // one round covering both, which also means the CFP is still shown if
+  // ESPN ever stops double-listing it.
+  NCAAFB: { seasonTypes: [2, 3], mergedSeasonTypes: [3], p4Only: true }
 };
 
 // ACC, Big Ten, Big 12, SEC. Ids come from ESPN's own FBS conference
@@ -1503,9 +1516,18 @@ async function fetchSeasonCalendar(sportKey) {
     for (const seasonType of config.seasonTypes) {
       const segment = (league.calendar || []).find(s => Number(s.value) === seasonType);
       if (!segment) continue;
-      for (const entry of segment.entries || []) {
+      const entries = segment.entries || [];
+
+      // A round normally maps to one ESPN week. A merged season type maps
+      // to all of them at once - see NCAAFB above.
+      if ((config.mergedSeasonTypes || []).includes(seasonType)) {
+        const weeks = entries.map(e => Number(e.value)).filter(Number.isFinite);
+        if (weeks.length > 0) rounds.push({ seasonType, weeks, label: segment.label || 'Postseason' });
+        continue;
+      }
+      for (const entry of entries) {
         const week = Number(entry.value);
-        if (Number.isFinite(week)) rounds.push({ seasonType, week, label: entry.label || `Week ${week}` });
+        if (Number.isFinite(week)) rounds.push({ seasonType, weeks: [week], label: entry.label || `Week ${week}` });
       }
     }
     if (rounds.length === 0) return null;
@@ -1531,26 +1553,41 @@ async function fetchSeasonCalendar(sportKey) {
 const weekEventsCache = new Map();
 const WEEK_EVENTS_CACHE_MS = 10 * 60 * 1000;
 
-async function fetchSeasonWeekEvents(sportKey, year, seasonType, week) {
-  const key = `${sportKey}:${year}:${seasonType}:${week}`;
+function seasonWeekQuery(sportKey, year, seasonType, week) {
+  // limit stays at 500 - see getNcaaScoreboardParams. Measured: a college
+  // week returns 75 games at limit=500 and 25 at limit=1000, so raising
+  // it silently truncates.
+  return `dates=${year}&seasontype=${seasonType}&week=${week}${getNcaaScoreboardParams(sportKey)}`;
+}
+
+// Every event in a round, across all the ESPN weeks it spans, deduplicated
+// by event id - a merged round asks for two overlapping lists on purpose,
+// so the same game arriving twice is expected rather than a fault.
+async function fetchSeasonWeekEvents(sportKey, year, seasonType, weeks) {
+  const key = `${sportKey}:${year}:${seasonType}:${weeks.join(',')}`;
   const cached = weekEventsCache.get(key);
   if (cached && (Date.now() - cached.fetchedAt) < WEEK_EVENTS_CACHE_MS) return cached.events;
 
   const endpoint = ESPN_ENDPOINTS[sportKey];
   if (!endpoint) return [];
   try {
-    // limit stays at 500 - see getNcaaScoreboardParams. Measured: a
-    // college week returns 75 games at limit=500 and 25 at limit=1000,
-    // so raising it silently truncates.
-    const res = await axios.get(
-      `${endpoint}?dates=${year}&seasontype=${seasonType}&week=${week}${getNcaaScoreboardParams(sportKey)}`,
+    const responses = await Promise.all(weeks.map(week => axios.get(
+      `${endpoint}?${seasonWeekQuery(sportKey, year, seasonType, week)}`,
       { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }, timeout: 15000 }
-    );
-    const events = res.data?.events || [];
+    )));
+    const seen = new Set();
+    const events = [];
+    for (const res of responses) {
+      for (const event of res.data?.events || []) {
+        if (seen.has(event.id)) continue;
+        seen.add(event.id);
+        events.push(event);
+      }
+    }
     weekEventsCache.set(key, { fetchedAt: Date.now(), events });
     return events;
   } catch (err) {
-    console.error(`[ESPN] Failed to fetch ${sportKey} type ${seasonType} week ${week}:`, err.message);
+    console.error(`[ESPN] Failed to fetch ${sportKey} type ${seasonType} week(s) ${weeks.join(',')}:`, err.message);
     return cached ? cached.events : [];
   }
 }
@@ -1563,14 +1600,25 @@ async function fetchSeasonWeekEvents(sportKey, year, seasonType, week) {
 // the answer depends on which side it falls: before them, start at the
 // first; after them, there is nothing left to show this season.
 function findStartingRound(rounds, currentType, currentWeek) {
-  const exact = rounds.findIndex(r => r.seasonType === currentType && r.week === currentWeek);
+  // Matched against the round's week LIST, not a single week: a merged
+  // round covers several. Getting this wrong does not fail loudly - it
+  // silently falls through to the next branch and starts at the wrong
+  // round, which is how an in-season league briefly began answering with
+  // its postseason.
+  const exact = rounds.findIndex(r =>
+    r.seasonType === currentType && (r.weeks || []).includes(currentWeek));
   if (exact !== -1) return exact;
   if (!Number.isFinite(currentType)) return 0;
   const types = rounds.map(r => r.seasonType);
   if (currentType < Math.min(...types)) return 0;
   if (currentType > Math.max(...types)) return -1;
-  // Inside the range but on a type this league skips: the next round it
-  // does show is the first one of a later type.
+  // The right type but an unrecognised week within it - start at that
+  // type's first round and let the date walk sort it out, rather than
+  // skipping the type entirely.
+  const sameType = rounds.findIndex(r => r.seasonType === currentType);
+  if (sameType !== -1) return sameType;
+  // A type this league skips: the next round it does show is the first
+  // one of a later type.
   const next = rounds.findIndex(r => r.seasonType > currentType);
   return next === -1 ? -1 : next;
 }
@@ -1587,7 +1635,7 @@ async function resolveSeasonWeek(sportKey, userTimeZone) {
 
   for (; index < calendar.rounds.length; index++) {
     const round = calendar.rounds[index];
-    const events = await fetchSeasonWeekEvents(sportKey, calendar.year, round.seasonType, round.week);
+    const events = await fetchSeasonWeekEvents(sportKey, calendar.year, round.seasonType, round.weeks);
     if (events.length === 0) continue;
     const lastDay = events
       .map(e => localDayISO(Date.parse(e.date), userTimeZone))
@@ -1611,7 +1659,7 @@ async function fetchSeasonWeekGames(sport, hostUrl, userTimeZone) {
 
   const config = SEASON_WEEK_LEAGUES[sportKey] || {};
   const games = await fetchTodayGames(sport, hostUrl, userTimeZone, {
-    query: `dates=${resolved.year}&seasontype=${resolved.seasonType}&week=${resolved.week}`,
+    queries: resolved.weeks.map(week => seasonWeekQuery(sportKey, resolved.year, resolved.seasonType, week)),
     eventFilter: config.p4Only ? involvesP4Team : null
   });
 
@@ -1623,24 +1671,36 @@ async function fetchSeasonWeekGames(sport, hostUrl, userTimeZone) {
   });
 }
 
-// `options.query` replaces the default single-day filter, which is how
-// the season-week leagues ask for a whole round instead. `options.filter`
-// drops events before they are mapped, which is where the college P5
-// filter runs - it needs each team's conference id, and that only exists
-// on the raw ESPN event.
+// `options.queries` replaces the default single-day filter, which is how
+// the season-week leagues ask for a whole round instead. It is a list
+// because one round can span several ESPN weeks; results are merged and
+// deduplicated by event id. Each query carries its own league params, so
+// nothing is appended here.
+//
+// `options.eventFilter` drops events before they are mapped, which is
+// where the college P4 filter runs - it needs each team's conference id,
+// and that only exists on the raw ESPN event.
 async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York', options = {}) {
   const endpoint = ESPN_ENDPOINTS[sport.toUpperCase()];
   if (!endpoint) return [];
 
   try {
-    const query = options.query || `dates=${getLocalDateString(userTimeZone)}`;
-    const ncaaParams = getNcaaScoreboardParams(sport);
-    const res = await axios.get(`${endpoint}?${query}${ncaaParams}`, {
+    const queries = options.queries
+      || [`dates=${getLocalDateString(userTimeZone)}${getNcaaScoreboardParams(sport)}`];
+    const responses = await Promise.all(queries.map(query => axios.get(`${endpoint}?${query}`, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
       timeout: 15000
-    });
+    })));
 
-    const allEvents = res.data?.events || [];
+    const seen = new Set();
+    const allEvents = [];
+    for (const res of responses) {
+      for (const event of res.data?.events || []) {
+        if (seen.has(event.id)) continue;
+        seen.add(event.id);
+        allEvents.push(event);
+      }
+    }
     const events = options.eventFilter ? allEvents.filter(options.eventFilter) : allEvents;
 
     return events.map(event => {
