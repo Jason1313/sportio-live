@@ -616,30 +616,6 @@ function hideSvgGroup(markup, groupId) {
   return markup.replace(pattern, `<g id="${groupId}"$1 display="none">`);
 }
 
-// Replaces an entire marker group (including its contents) with real,
-// dynamic markup - unlike hideSvgGroup, which only hides a marker in
-// place, this is for cases where the real content needs to render at
-// that EXACT position in the document's layer order, not just appended
-// at the very end (which would incorrectly place it on top of whatever
-// layers come after the marker in the template, like the UFC poster's
-// logo/plaque layer that must stay on top of the fighter images).
-function replaceSvgGroup(markup, groupId, replacement) {
-  const pattern = new RegExp(`<g id="${groupId}"[^>]*>[\\s\\S]*?</g>`);
-  return markup.replace(pattern, replacement);
-}
-
-// Removes a single self-closing element by id, marker or otherwise.
-//
-// hideSvgGroup and replaceSvgGroup both operate on <g> wrappers; this is
-// for a bare element that has no group of its own. Used for the poster's
-// time plaque, which is real rendered art rather than a marker - with
-// nothing printed on it any more, leaving it would put a conspicuous
-// empty bar across the bottom of every card.
-function removeSvgElementById(markup, elementId) {
-  const pattern = new RegExp(`<[a-zA-Z]+[^>]*\\bid="${elementId}"[^>]*/>`);
-  return markup.replace(pattern, '');
-}
-
 // Extracts a named marker group's bounding box for placement purposes -
 // e.g. a "home_logo" marker rect defines exactly where and how large to
 // place the real, dynamic logo image instead. Looks for the first
@@ -737,46 +713,6 @@ async function getBase64ImageWithFallback(urls) {
     if (data) return data;
   }
   return null;
-}
-
-// PNG format: 8-byte signature, then an IHDR chunk (4-byte length, 4-byte
-// type "IHDR", then width/height as 4-byte big-endian ints immediately
-// after) - simple, well-defined, no library needed just to read this.
-function getPngDimensions(buffer) {
-  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-  if (buffer.length < 24 || !buffer.slice(0, 8).equals(signature)) return null;
-  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
-}
-
-// A separate function from getBase64Image, deliberately not a change to
-// it - that function is used by every other poster/logo route in the app,
-// and this one specifically needs access to the raw buffer (to read real
-// pixel dimensions from) before it gets base64-encoded and discarded.
-// Needed for the UFC poster's fighter images, which render at their own
-// true native resolution rather than being fit into a fixed marker box -
-// see the poster route itself for why that needs real dimensions in hand
-// rather than relying on the SVG renderer to infer them implicitly.
-async function getBase64ImageWithDimensions(url) {
-  try {
-    const response = await axios.get(url, {
-      responseType: 'arraybuffer',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-        'Referer': 'https://www.espn.com/'
-      },
-      timeout: 5000
-    });
-    const contentType = response.headers['content-type'] || 'image/png';
-    const buffer = Buffer.from(response.data, 'binary');
-    const dimensions = getPngDimensions(buffer);
-    if (!dimensions) return null;
-    const base64 = buffer.toString('base64');
-    return { dataUri: `data:${contentType};base64,${base64}`, width: dimensions.width, height: dimensions.height };
-  } catch (err) {
-    console.error(`[ImageLoader] Failed to fetch image with dimensions: ${url}. Error: ${err.message}`);
-    return null;
-  }
 }
 
 function escapeXml(str) {
@@ -1017,97 +953,154 @@ async function fetchUpcomingGames(sport, userTimeZone = 'America/New_York', limi
   }
 }
 
-function getUfcPosterTemplateInline() {
-  const filePath = path.join(__dirname, 'assets', 'posters', 'ufc_poster_template.svg');
-  return getInlineSvgOverlay(filePath, 'ufc-poster');
+
+// Average glyph width as a fraction of font-size, for the bold sans
+// stack the posters use. Same approximation, and the same reasoning, as
+// NETWORK_LABEL_CHAR_RATIO: exact text metrics are not available server
+// side and only need to be close enough to keep a title in its box.
+const POSTER_CHAR_RATIO = 0.62;
+
+// Wraps text to at most `maxLines` and picks the largest font size that
+// still fits `boxWidth`, returning both.
+//
+// The wrap width is searched rather than assumed. A fixed
+// characters-per-line guess is wrong in both directions - it leaves
+// "UFC 332" tiny and breaks "Dana White's Contender Series" in an ugly
+// place - so this tries every wrap from narrow to wide, discards the ones
+// needing too many lines, and keeps whichever arrangement renders largest.
+// The search is a few dozen cheap string operations on a title, run once
+// per poster.
+//
+// Width is estimated from an average glyph ratio, the same approximation
+// buildNetworkArtSvg uses. Exact text metrics are not available server
+// side, and the goal is only to keep a title inside the poster.
+function fitTextBlock(text, { boxWidth, maxLines, maxFontSize }) {
+  const words = String(text || '').trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return { lines: [], fontSize: 0 };
+
+  let best = null;
+  for (let perLine = 4; perLine <= 64; perLine++) {
+    const lines = [];
+    let current = '';
+    for (const word of words) {
+      const candidate = current ? `${current} ${word}` : word;
+      // `!current` keeps a single word longer than the wrap width on its
+      // own line rather than dropping it.
+      if (candidate.length <= perLine || !current) current = candidate;
+      else { lines.push(current); current = word; }
+    }
+    if (current) lines.push(current);
+    if (lines.length > maxLines) continue;
+
+    const longest = lines.reduce((a, b) => (a.length >= b.length ? a : b), '');
+    const fontSize = Math.min(maxFontSize, boxWidth / Math.max(1, longest.length * POSTER_CHAR_RATIO));
+
+    // Largest text wins, and among arrangements that tie, the one using
+    // fewest lines. The tie-break is what stops "UFC 332" being stacked
+    // as "UFC" over "332": both fit at the maximum size, so without a
+    // preference the narrower wrap won on arriving first and every short
+    // title came out broken in half.
+    const better = !best
+      || fontSize > best.fontSize + 0.01
+      || (Math.abs(fontSize - best.fontSize) <= 0.01 && lines.length < best.lines.length);
+    if (better) best = { lines, fontSize };
+  }
+
+  return best || { lines: [String(text)], fontSize: maxFontSize };
 }
 
-// One handler, two paths (registered at the bottom of this function).
+// Splits an event name at its first colon into a headline and a detail.
 //
-// The league-scoped path is what the catalog generates now, so a PFL card
-// gets the PFL logo. The bare /poster/ufc/ path is kept because Stremio
-// caches artwork URLs, and an install that already has the old form must
-// keep rendering rather than showing a broken image - it simply defaults
-// to UFC, which is what it always meant.
+// MMA event names are consistently "designation: matchup" - "UFC 331: Van
+// vs. Pantoja 2", "PFL Chicago: Carmouche vs. Bishop 2", "Dana White's
+// Contender Series: Season 10, Week 4". Setting the two apart reads far
+// better than wrapping the whole string as one block, and costs nothing
+// when there is no colon: the name simply becomes the headline.
+function splitEventName(name) {
+  const text = String(name || '').trim();
+  const at = text.indexOf(':');
+  if (at === -1) return { headline: text, detail: '' };
+  return { headline: text.slice(0, at).trim(), detail: text.slice(at + 1).trim() };
+}
+
+// The MMA event poster: the promotion's logo over the event's name.
+//
+// It used to composite each fighter's stance photo from ESPN. That worked
+// for headline UFC cards and steadily worse for everything else - ESPN
+// simply has no stance image for most fighters outside the UFC's main
+// roster (measured: one of the two on the next PFL card, neither on
+// several others), so the poster fell back to a name plate for one side
+// and looked broken rather than sparse. A promotion mark and the event's
+// own name is information the app always has, for every promotion, and it
+// is what the card is actually recognised by in a grid.
+//
+// One handler, three paths (registered below). The two older forms carry
+// fighter ids that nothing reads any more; they stay because Stremio
+// caches artwork URLs and an existing install must keep rendering. They
+// are still useful as a cache key - a distinct URL per event - which is
+// why the current form keeps a query string rather than collapsing to one
+// URL per promotion.
 const mmaPosterHandler = async (req, res) => {
-  const fighterAName = req.query.home || 'Fighter A';
-  const fighterBName = req.query.away || 'Fighter B';
-  const { fighterAId, fighterBId } = req.params;
   const leagueKey = String(req.params.league || 'ufc').toUpperCase();
+  const theme = SPORT_THEMES[leagueKey] || SPORT_THEMES.UFC;
 
-  // Fighter A (home) uses their LEFT stance image, anchored by its TOP-
-  // RIGHT corner; Fighter B (away) uses their RIGHT stance image,
-  // anchored by its TOP-LEFT corner - confirmed directly against the
-  // reference template's own marker names and positions, not assumed.
-  // Rendered at true native resolution (no scaling at all) - confirmed
-  // explicitly that having part of the image extend past the poster's
-  // edges is intentional, not something to avoid. Real pixel dimensions
-  // are needed up front for this (not left to the SVG renderer to infer
-  // implicitly), given known quirks in how some Stremio-ecosystem clients
-  // handle SVG.
-  const [homeImage, awayImage] = await Promise.all([
-    getBase64ImageWithDimensions(`https://a.espncdn.com/i/headshots/mma/players/stance/left/${fighterAId}.png`),
-    getBase64ImageWithDimensions(`https://a.espncdn.com/i/headshots/mma/players/stance/right/${fighterBId}.png`)
-  ]);
+  // `name` is what the catalog sends. The home/away fallback covers a URL
+  // cached before this route took a name, so an old poster still says
+  // something rather than going blank.
+  const fallbackName = [req.query.home, req.query.away].filter(Boolean).join(' vs ');
+  const eventName = String(req.query.name || fallbackName || 'MMA Event').trim();
+  const { headline, detail } = splitEventName(eventName);
 
-  // Real UFC league logo, same source already confirmed working for the
-  // /logo/ufc.svg route - unlike the fighter images above, this one
-  // scales PROPORTIONATELY to fit within its marker's bounds (not native
-  // resolution/intentionally cropped) - confirmed directly against what
-  // was asked for this specific marker.
-  const ufcLogoUrl = await getRealLeagueLogoUrl(leagueKey);
-  const ufcLogoData = ufcLogoUrl ? await getBase64Image(ufcLogoUrl) : null;
+  const leagueLogoUrl = await getRealLeagueLogoUrl(leagueKey);
+  const leagueLogoData = leagueLogoUrl ? await getBase64Image(leagueLogoUrl) : null;
 
-  const template = getUfcPosterTemplateInline();
+  // The logo sits in the upper half, scaled proportionately inside its
+  // box rather than filling it - league marks are wildly different shapes
+  // (the UFC's is wide, the generic MMA icon is square) and stretching
+  // any of them to a fixed box would be worse than leaving air.
+  const LOGO = { x: 90, y: 150, width: 420, height: 300 };
+  const logoMarkup = leagueLogoData
+    ? `<image href="${leagueLogoData}" x="${LOGO.x}" y="${LOGO.y}" width="${LOGO.width}" height="${LOGO.height}" preserveAspectRatio="xMidYMid meet" />`
+    : buildLogoFallback(LOGO.x, LOGO.y, LOGO.width, leagueKey, theme.secondary);
 
-  // Marker groups' own bounds - confirmed live against the real template:
-  // away's marker is a 10x10 rect at (139.23, 54.93), home's is a 10x10
-  // rect at (396.38, 54.93). Neither marker itself is meant to render -
-  // replaceSvgGroup swaps each one out entirely for the real fighter
-  // image, at that exact point in the document so layer order (fighter
-  // images below the logo/plaque layer that comes after them in the
-  // template) is preserved, not just appended at the end.
-  const homeMarkerBounds = getSvgGroupBounds(template.markup, 'home_fighter\\._left_stance\\._anchor_point');
-  const awayMarkerBounds = getSvgGroupBounds(template.markup, 'away_fighter\\._right_stance\\._anchor_point');
-  const ufcLogoBounds = getSvgGroupBounds(template.markup, 'ufc_logo');
+  // Text occupies the lower half, as one block centred within it, so a
+  // one-line name and a four-line one both sit level rather than one
+  // hugging the logo and the other the poster's foot.
+  const TEXT = { top: 520, bottom: 830, width: 480 };
+  const head = fitTextBlock(headline, { boxWidth: TEXT.width, maxLines: 2, maxFontSize: 78 });
+  const sub = detail
+    ? fitTextBlock(detail, { boxWidth: TEXT.width, maxLines: 2, maxFontSize: 40 })
+    : { lines: [], fontSize: 0 };
 
-  let markup = template.markup;
+  const headLine = head.fontSize * 1.12;
+  const subLine = sub.fontSize * 1.2;
+  const gap = sub.lines.length > 0 ? head.fontSize * 0.45 : 0;
+  const blockHeight = head.lines.length * headLine + gap + sub.lines.length * subLine;
+  let cursor = (TEXT.top + TEXT.bottom) / 2 - blockHeight / 2 + head.fontSize * 0.82;
 
-  const awayImageMarkup = awayImage
-    ? `<image href="${awayImage.dataUri}" x="${awayMarkerBounds.x}" y="${awayMarkerBounds.y}" width="${awayImage.width}" height="${awayImage.height}" />`
-    : (awayMarkerBounds ? buildLogoFallback(awayMarkerBounds.x, awayMarkerBounds.y, 300, fighterBName, '#c0392b') : '');
-  markup = replaceSvgGroup(markup, 'away_fighter\\._right_stance\\._anchor_point', awayImageMarkup);
+  const headMarkup = head.lines.map((line, i) =>
+    `<text x="300" y="${cursor + i * headLine}" font-family="'Trebuchet MS', Verdana, sans-serif" font-size="${head.fontSize.toFixed(1)}" font-weight="800" fill="#f8fafc" text-anchor="middle" letter-spacing="1">${escapeXml(line)}</text>`
+  ).join('');
 
-  // Home's image is anchored by its TOP-RIGHT corner, not top-left like
-  // away and like every other image placement in this app - so its x
-  // position is the marker's x MINUS the image's own width, putting the
-  // image's right edge exactly at the marker rather than its left edge.
-  const homeImageMarkup = homeImage
-    ? `<image href="${homeImage.dataUri}" x="${homeMarkerBounds.x - homeImage.width}" y="${homeMarkerBounds.y}" width="${homeImage.width}" height="${homeImage.height}" />`
-    : (homeMarkerBounds ? buildLogoFallback(homeMarkerBounds.x - 300, homeMarkerBounds.y, 300, fighterAName, '#2a2a2a') : '');
-  markup = replaceSvgGroup(markup, 'home_fighter\\._left_stance\\._anchor_point', homeImageMarkup);
-
-  const ufcLogoMarkup = ufcLogoBounds
-    ? (ufcLogoData
-        ? `<image href="${ufcLogoData}" x="${ufcLogoBounds.x}" y="${ufcLogoBounds.y}" width="${ufcLogoBounds.width}" height="${ufcLogoBounds.height}" preserveAspectRatio="xMidYMid meet" />`
-        : `<text x="${ufcLogoBounds.x + ufcLogoBounds.width / 2}" y="${ufcLogoBounds.y + ufcLogoBounds.height / 2 + 10}" font-family="'Trebuchet MS', Verdana, sans-serif" font-size="32" font-weight="800" fill="#ffffff" text-anchor="middle">${escapeXml(leagueKey)}</text>`)
-    : '';
-  markup = replaceSvgGroup(markup, 'ufc_logo', ufcLogoMarkup);
-
-  // The date and time used to be printed on a plaque here. They now live
-  // under the poster instead - on the card in the watch portal, in the
-  // description, and in releaseInfo - which is legible at thumbnail size,
-  // reads the same for every sport, and needs no room inside the artwork.
-  //
-  // The plaque went with them. It is real rendered art, not a marker, so
-  // an empty one would sit as a conspicuous bar across the bottom of
-  // every card. The bottom gradient beside it stays: that is the general
-  // fade, not part of the timestamp.
-  markup = removeSvgElementById(markup, 'time_plaque');
+  cursor += (head.lines.length - 1) * headLine + gap + subLine;
+  const subMarkup = sub.lines.map((line, i) =>
+    `<text x="300" y="${cursor + i * subLine}" font-family="'Trebuchet MS', Verdana, sans-serif" font-size="${sub.fontSize.toFixed(1)}" font-weight="600" fill="#e6e6e6" fill-opacity="0.82" text-anchor="middle">${escapeXml(line)}</text>`
+  ).join('');
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 600 900" width="600" height="900">
-    <defs>${template.defs}</defs>
-    ${markup}
+    <defs>
+      <radialGradient id="mmaBg" cx="50%" cy="38%" r="78%">
+        <stop offset="0%" stop-color="${theme.primary}" />
+        <stop offset="100%" stop-color="#000000" />
+      </radialGradient>
+    </defs>
+    <rect width="600" height="900" fill="url(#mmaBg)" />
+    <rect x="0" y="0" width="600" height="8" fill="${theme.secondary}" />
+    <rect x="0" y="892" width="600" height="8" fill="${theme.secondary}" />
+    ${logoMarkup}
+    <rect x="240" y="486" width="120" height="3" fill="${theme.secondary}" fill-opacity="0.85" />
+    ${headMarkup}
+    ${subMarkup}
   </svg>`;
 
   res.setHeader('Content-Type', 'image/svg+xml');
@@ -1120,6 +1113,7 @@ const mmaPosterHandler = async (req, res) => {
 // in registration order, so the more specific one has to come first or it
 // would never be reached. The league-scoped path has an extra segment and
 // cannot collide, but is kept here beside its twin.
+app.get('/poster/mma/:league.svg', mmaPosterHandler);
 app.get('/poster/mma/:league/:fighterAId/:fighterBId.svg', mmaPosterHandler);
 app.get('/poster/ufc/:fighterAId/:fighterBId.svg', mmaPosterHandler);
 
@@ -1806,7 +1800,10 @@ async function fetchTodayLeagueEvents(league, hostUrl, userTimeZone = 'America/N
       // so a null network costs nothing here.
       const { nationalBroadcasts, network } = networks.resolveNetworkFromCompetition(competition);
 
+      // `name` is what the poster prints now. home/away/flags stay for the
+      // landscape background, which still composites the two fighters.
       const artParams = new URLSearchParams({
+        name: event.name || `${fighterAName} vs ${fighterBName}`,
         home: fighterAName,
         away: fighterBName,
         homeFlagUrl: fighterAFlagUrl,
@@ -1840,7 +1837,7 @@ async function fetchTodayLeagueEvents(league, hostUrl, userTimeZone = 'America/N
       const leagueSlug = artworkSlug;
       const whenLabel = formatEventWhen(eventUtcDate, userTimeZone);
 
-      const poster = `${hostUrl}/poster/mma/${leagueSlug}/${fighterAId}/${fighterBId}.svg${dateParam}`;
+      const poster = `${hostUrl}/poster/mma/${leagueSlug}.svg${dateParam}`;
       const background = `${hostUrl}/landscape/mma/${leagueSlug}/${fighterAId}/${fighterBId}.svg${dateParam}`;
       const logo = `${hostUrl}/logo/${leagueSlug}.svg`;
 
