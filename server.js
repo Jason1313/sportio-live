@@ -1436,7 +1436,7 @@ const SEASON_WEEK_LEAGUES = {
   // Preseason, regular season, postseason. The NFL's postseason really is
   // a sequence of rounds - Wild Card, Divisional, Conference
   // Championship, Pro Bowl, Super Bowl - so it needs nothing special.
-  NFL: { seasonTypes: [1, 2, 3], p4Only: false },
+  NFL: { seasonTypes: [1, 2, 3] },
   // College football's calendar has no preseason segment at all.
   //
   // Its postseason is not a sequence. ESPN files it as two entries that
@@ -1448,7 +1448,12 @@ const SEASON_WEEK_LEAGUES = {
   // bowl list, none unique to it). mergedSeasonTypes collapses them into
   // one round covering both, which also means the CFP is still shown if
   // ESPN ever stops double-listing it.
-  NCAAFB: { seasonTypes: [2, 3], mergedSeasonTypes: [3], p4Only: true }
+  //
+  // p4OnlyIn lists the season types the P4 filter applies to, which is
+  // the regular season and not the postseason. A bowl is a bowl: the
+  // filter exists to cut a 99-game September Saturday down to the games
+  // worth a row, and a postseason has already done that cutting itself.
+  NCAAFB: { seasonTypes: [2, 3], mergedSeasonTypes: [3], p4OnlyIn: [2] }
 };
 
 // ACC, Big Ten, Big 12, SEC. Ids come from ESPN's own FBS conference
@@ -1473,6 +1478,48 @@ const P4_CONFERENCE_IDS = new Set(['1', '4', '5', '8']);
 function involvesP4Team(event) {
   const competitors = (event.competitions || [])[0]?.competitors || [];
   return competitors.some(c => P4_CONFERENCE_IDS.has(String(c.team?.conferenceId ?? '')));
+}
+
+// ESPN's FBS conference ids, read from its own conference list. Only the
+// id-to-name mapping lives here: which teams are IN a conference comes
+// per team per game from ESPN, so realignment never touches this.
+//
+// A conference outside this list - an FCS opponent in a bowl, or one ESPN
+// adds later - is grouped under "Other" rather than dropped, so a filter
+// built from these can never hide a game outright.
+const CONFERENCE_NAMES = {
+  '1': 'ACC',
+  '4': 'Big 12',
+  '5': 'Big Ten',
+  '8': 'SEC',
+  '9': 'Pac-12',
+  '12': 'Conference USA',
+  '15': 'MAC',
+  '17': 'Mountain West',
+  '18': 'FBS Independents',
+  '37': 'Sun Belt',
+  '151': 'American'
+};
+const OTHER_CONFERENCE = { id: 'other', name: 'Other' };
+
+// The conferences a game belongs to - one per side, deduplicated, so a
+// conference game yields one entry and a cross-conference game two. This
+// is what the watch portal's conference filter reads.
+//
+// Both sides are tagged rather than just one, because "show me Big Ten
+// games" plainly means every game a Big Ten team is in, home or away.
+function conferencesForEvent(competition) {
+  const competitors = competition?.competitors || [];
+  const seen = new Map();
+  for (const competitor of competitors) {
+    const rawId = competitor.team?.conferenceId;
+    if (rawId === undefined || rawId === null) continue;
+    const id = String(rawId);
+    const name = CONFERENCE_NAMES[id];
+    const entry = name ? { id, name } : OTHER_CONFERENCE;
+    if (!seen.has(entry.id)) seen.set(entry.id, entry);
+  }
+  return [...seen.values()];
 }
 
 // A date as YYYY-MM-DD in a given timezone. Directly comparable as a
@@ -1658,9 +1705,10 @@ async function fetchSeasonWeekGames(sport, hostUrl, userTimeZone) {
   }
 
   const config = SEASON_WEEK_LEAGUES[sportKey] || {};
+  const p4Applies = (config.p4OnlyIn || []).includes(resolved.seasonType);
   const games = await fetchTodayGames(sport, hostUrl, userTimeZone, {
     queries: resolved.weeks.map(week => seasonWeekQuery(sportKey, resolved.year, resolved.seasonType, week)),
-    eventFilter: config.p4Only ? involvesP4Team : null
+    eventFilter: p4Applies ? involvesP4Team : null
   });
 
   console.log(`[ESPN] ${sportKey} ${resolved.label}: ${resolved.events.length} scheduled -> ${games.length} shown`);
@@ -1855,7 +1903,10 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
         status: statusDetail,
         date: event.date,
         whenLabel,
-        isToday: isSameLocalDay(gameUtcDate, userTimeZone)
+        isToday: isSameLocalDay(gameUtcDate, userTimeZone),
+        // Empty for leagues without conferences, which is what the watch
+        // portal keys off to decide whether to offer the filter at all.
+        conferences: conferencesForEvent(competition)
       };
     });
   } catch (err) {
@@ -3327,7 +3378,8 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
     // on the server.
     releaseInfo: game.whenLabel || '',
     whenLabel: game.whenLabel || '',
-    isToday: game.isToday !== false
+    isToday: game.isToday !== false,
+    conferences: game.conferences || []
   }));
 
   res.setHeader('Content-Type', 'application/json');

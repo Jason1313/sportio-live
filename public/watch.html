@@ -142,6 +142,10 @@
     <div id="saved-list" class="max-w-2xl space-y-1.5"></div>
   </section>
 
+  <!-- Conference chips. Only rendered for a catalog whose games carry
+       conferences, which today means college football. -->
+  <div id="conference-filter" class="hidden mb-4"></div>
+
   <div id="grid" class="grid gap-4" style="grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));"></div>
   <p id="grid-empty" class="hidden text-sm text-[#e6e6e6]/45 py-16 text-center"></p>
 </main>
@@ -219,6 +223,13 @@
   const credentials = () => ({ uuid, password });
   let catalogs = [];
   let activeCatalog = null;
+
+  // Conference filter: the metas the active catalog returned, and which
+  // conference is selected in each catalog. Keyed by catalog so switching
+  // to another tab and back does not silently reset the filter, which
+  // would look like the app forgetting what you asked for.
+  let catalogMetas = [];
+  let conferenceChoice = {};
 
   function showToast(msg, isError) {
     const el = document.getElementById('toast');
@@ -603,6 +614,70 @@
     renderGameGrid(games);
   }
 
+  // The conferences present in a set of metas, each with how many games
+  // it accounts for. Counted before filtering so the chips do not
+  // renumber themselves as you click between them.
+  function conferencesIn(metas) {
+    const counts = new Map();
+    for (const meta of metas) {
+      for (const conference of meta.conferences || []) {
+        if (!counts.has(conference.id)) counts.set(conference.id, { ...conference, count: 0 });
+        counts.get(conference.id).count++;
+      }
+    }
+    // Biggest first, and "Other" last wherever it lands - it is a
+    // catch-all rather than a conference anyone browses by.
+    return [...counts.values()].sort((a, b) =>
+      (a.id === 'other') - (b.id === 'other') || b.count - a.count || a.name.localeCompare(b.name));
+  }
+
+  function renderConferenceFilter() {
+    const box = document.getElementById('conference-filter');
+    if (!box) return;
+    const conferences = conferencesIn(catalogMetas);
+    // Nothing to choose between with one conference, and nothing to offer
+    // at all for a league that has none.
+    if (conferences.length < 2) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+
+    const selected = conferenceChoice[activeCatalog] || '';
+    const chip = (id, label, count, on) =>
+      `<button onclick="chooseConference('${id}')"
+               class="text-[11px] font-semibold px-2.5 py-1 rounded-full border transition ${on
+                 ? 'border-[#3b8fc4] bg-[#3b8fc4] text-white'
+                 : 'border-white/15 bg-[#1f2b36] text-[#e6e6e6]/65 hover:text-[#e6e6e6] hover:border-white/30'}">
+         ${escapeHtml(label)} <span class="opacity-60">${count}</span></button>`;
+
+    box.classList.remove('hidden');
+    box.innerHTML = `<div class="flex flex-wrap items-center gap-1.5">
+        <span class="text-[10px] uppercase tracking-wider text-[#e6e6e6]/35 mr-1">Conference</span>
+        ${chip('', 'All', catalogMetas.length, !selected)}
+        ${conferences.map(c => chip(c.id, c.name, c.count, selected === c.id)).join('')}
+      </div>`;
+  }
+
+  function chooseConference(id) {
+    // Clicking the selected chip clears it, so All is always one click
+    // away without hunting for it.
+    conferenceChoice[activeCatalog] = (conferenceChoice[activeCatalog] === id) ? '' : id;
+    applyConferenceFilter();
+  }
+
+  function applyConferenceFilter() {
+    const selected = conferenceChoice[activeCatalog] || '';
+    const shown = selected
+      ? catalogMetas.filter(m => (m.conferences || []).some(c => c.id === selected))
+      : catalogMetas;
+
+    renderConferenceFilter();
+    if (shown.length === 0) {
+      document.getElementById('grid').innerHTML = '';
+      showEmpty('No games for that conference in this round.');
+      return;
+    }
+    showEmpty('');
+    renderGameGrid(shown);
+  }
+
   async function selectCatalog(id) {
     activeCatalog = id;
     highlightTab();
@@ -619,6 +694,8 @@
     savedPanel.classList.toggle('hidden', id !== SAVED_CATALOG_ID);
     if (id === SAVED_CATALOG_ID) {
       grid.innerHTML = '';
+      catalogMetas = [];
+      renderConferenceFilter();
       showEmpty('');
       renderSavedList();
       renderSavedResults();
@@ -626,6 +703,8 @@
     }
 
     grid.innerHTML = '';
+    catalogMetas = [];
+    renderConferenceFilter();
 
     if (id === HOME_CATALOG_ID) {
       await loadHome();
@@ -634,11 +713,14 @@
 
     showEmpty('Loading...');
     const metas = await fetchCatalogMetas(id);
+    // Guard against a slow catalog answering after the user has moved on
+    // to another tab, which would otherwise paint the wrong games.
+    if (activeCatalog !== id) return;
     if (metas === null) { showEmpty('Could not load that catalog.'); return; }
     if (metas.length === 0) { showEmpty('Nothing scheduled.'); return; }
 
-    showEmpty('');
-    renderGameGrid(metas);
+    catalogMetas = metas;
+    applyConferenceFilter();
   }
 
   async function openStreams(encodedId) {
