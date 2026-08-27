@@ -3,8 +3,13 @@ services:
     build: .
     container_name: sportio-live
     restart: unless-stopped
+    # Only the HOST side is configurable. The container always listens on
+    # 2323, which is what the Dockerfile's EXPOSE and PORT already say, so
+    # moving the published port never has to stay in sync with anything
+    # inside the image. Set HOST_PORT in .env (or the shell) to publish
+    # somewhere else; unset, it stays 2323 exactly as before.
     ports:
-      - "2323:2323"
+      - "${HOST_PORT:-2323}:2323"
     environment:
       - PORT=2323
       - HOST=0.0.0.0
