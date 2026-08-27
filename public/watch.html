@@ -516,13 +516,6 @@
     el.classList.toggle('hidden', !msg);
   }
 
-  // The "Upcoming Schedule" entry every league catalog carries. It is a
-  // placeholder rather than a game, so Home leaves it out - Home is for
-  // what is on now.
-  function isUpcomingPlaceholder(meta) {
-    return String(meta && meta.id || '').endsWith(':none');
-  }
-
   // Catalogs that hold games, as opposed to TV Networks. Every league
   // catalog id is built as sb_{sport}_{date}, so this picks them all up
   // without naming individual leagues - a league added later joins Home
@@ -590,7 +583,7 @@
       return {
         failed: false,
         metas: metas
-          .filter(m => !isUpcomingPlaceholder(m) && m.isToday !== false)
+          .filter(m => m.isToday !== false)
           .map(m => ({ ...m, league }))
       };
     }));
@@ -601,7 +594,7 @@
     if (games.length === 0) {
       showEmpty(failures === sources.length
         ? 'Could not reach the server for any league.'
-        : 'Nothing on right now. Each league tab lists what is coming up.');
+        : 'Nothing on right now. Open a league tab for its full schedule.');
       document.getElementById('grid').innerHTML = '';
       return;
     }

@@ -506,42 +506,6 @@ const ESPN_LEAGUES = {
   OTHER: 'other'
 };
 
-// The "Upcoming Schedule" placeholder's background image, one per sport
-// (several sports share the same graphic, e.g. NBA and NCAAMB both use
-// basketball.svg). These are served directly as raw SVG bytes rather than
-// base64-embedded into a wrapping SVG, since there's no compositing
-// needed here - just static art.
-const SCHEDULE_BACKGROUND_FILES = {
-  MLB: 'baseball.svg',
-  NBA: 'basketball.svg',
-  NCAAMB: 'basketball.svg',
-  NFL: 'football.svg',
-  NCAAFB: 'football.svg',
-  NHL: 'hockey.svg',
-  WNBA: 'womensbball.svg',
-  NCAAWB: 'womensbball.svg',
-  EPL: 'soccer.svg',
-  MLS: 'soccer.svg',
-  LALIGA: 'soccer.svg',
-  WORLDCUP: 'soccer.svg'
-};
-
-const scheduleBackgroundCache = {};
-function getScheduleBackgroundBuffer(sportKey) {
-  const filename = SCHEDULE_BACKGROUND_FILES[sportKey];
-  if (!filename) return null;
-  if (scheduleBackgroundCache[filename]) return scheduleBackgroundCache[filename];
-  try {
-    const filePath = path.join(__dirname, 'assets', 'background', 'schedule', filename);
-    const buffer = fs.readFileSync(filePath);
-    scheduleBackgroundCache[filename] = buffer;
-    return buffer;
-  } catch (err) {
-    console.error(`[Schedule Background] Failed to load ${filename}:`, err.message);
-    return null;
-  }
-}
-
 // The landscape background's decorative overlay is spliced directly into
 // the outer SVG document as native markup, rather than embedded as a
 // nested SVG-in-SVG via a base64 <image> data URI. Nesting a full vector
@@ -907,52 +871,6 @@ function formatGameDateLabel(utcDateStr, timeZone) {
   }
 }
 
-// Looks ahead across a date range (ESPN's scoreboard endpoint only accepts a
-// single day or a range, not "next N games" directly) and returns up to
-// `limit` upcoming games in chronological order.
-async function fetchUpcomingGames(sport, userTimeZone = 'America/New_York', limit = 20) {
-  const endpoint = ESPN_ENDPOINTS[sport.toUpperCase()];
-  if (!endpoint) return [];
-
-  try {
-    const now = new Date();
-    const isNcaa = NCAA_SPORTS.has(sport.toUpperCase());
-    // NCAA sports have hundreds of teams playing multiple games a week, so a
-    // short window still comfortably finds `limit` games - and keeps the
-    // query (scoped by the sport's own division group id) fast and light.
-    const lookaheadDays = isNcaa ? 21 : 90;
-    const rangeStart = new Date(now.getTime() + 1 * 24 * 60 * 60 * 1000); // start tomorrow, excluding today's games
-    const rangeEnd = new Date(now.getTime() + lookaheadDays * 24 * 60 * 60 * 1000);
-    const startStr = formatDateYYYYMMDD(rangeStart, userTimeZone);
-    const endStr = formatDateYYYYMMDD(rangeEnd, userTimeZone);
-    const ncaaParams = getNcaaScoreboardParams(sport);
-
-    const res = await axios.get(`${endpoint}?dates=${startStr}-${endStr}${ncaaParams}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-      timeout: 8000
-    });
-
-    const events = res.data?.events || [];
-    const sorted = [...events].sort((a, b) => new Date(a.date) - new Date(b.date));
-
-    return sorted.slice(0, limit).map(event => {
-      const competition = event.competitions?.[0] || {};
-      const competitors = competition.competitors || [];
-      const home = competitors.find(c => c.homeAway === 'home') || {};
-      const away = competitors.find(c => c.homeAway === 'away') || {};
-      const homeTeam = home.team || {};
-      const awayTeam = away.team || {};
-
-      const homeNick = homeTeam.name || homeTeam.shortDisplayName || homeTeam.displayName || 'Home';
-      const awayNick = awayTeam.name || awayTeam.shortDisplayName || awayTeam.displayName || 'Away';
-      return `${formatGameDateLabel(event.date, userTimeZone)} \u2014 ${awayNick} at ${homeNick}`;
-    });
-  } catch (err) {
-    console.error(`[ESPN] Error fetching upcoming schedule for ${sport}:`, err.message);
-    return [];
-  }
-}
-
 
 // Average glyph width as a fraction of font-size, for the bold sans
 // stack the posters use. Same approximation, and the same reasoning, as
@@ -1294,21 +1212,6 @@ app.get('/landscape/:sport.svg', (req, res) => {
   res.send(svg);
 });
 
-// Background art specifically for the "Upcoming Schedule" placeholder
-// entry - a static, sport-specific photo served directly (see
-// getScheduleBackgroundBuffer for why this isn't SVG-wrapped/base64).
-app.get('/background/schedule/:sport.svg', (req, res) => {
-  const sportKey = req.params.sport.toUpperCase();
-  const buffer = getScheduleBackgroundBuffer(sportKey);
-  if (!buffer) {
-    res.status(404).send('Not found');
-    return;
-  }
-  res.setHeader('Content-Type', 'image/svg+xml');
-  res.setHeader('Cache-Control', 'public, max-age=86400');
-  res.send(buffer);
-});
-
 // The curved diagonal boundary between the home and away color regions,
 // extracted directly from color_ref.png (a 3840x2160 placement guide, not
 // shipped with the app) via pixel-by-pixel boundary sampling rather than
@@ -1434,42 +1337,6 @@ app.get('/landscape/:sport/:homeId/:awayId.svg', async (req, res) => {
     ${overlayInline.markup}
     ${awayLogoMarkup}
     ${homeLogoMarkup}
-  </svg>`;
-
-  res.setHeader('Content-Type', 'image/svg+xml');
-  res.setHeader('Cache-Control', 'public, max-age=3600');
-  res.send(svg);
-});
-
-app.get('/poster/none/:sport.svg', async (req, res) => {
-  const sportKey = req.params.sport.toUpperCase();
-  const theme = SPORT_THEMES[sportKey] || SPORT_THEMES.MLB;
-
-  const leagueLogoUrl = await getRealLeagueLogoUrl(sportKey);
-  const leagueLogoData = leagueLogoUrl ? await getBase64Image(leagueLogoUrl) : null;
-  const leagueLogoMarkup = leagueLogoData
-    ? `<image href="${leagueLogoData}" x="60" y="60" width="480" height="480" preserveAspectRatio="xMidYMid meet" />`
-    : buildLogoFallback(60, 60, 480, sportKey, theme.secondary);
-
-  // One uniform background across every sport - a new league added in the
-  // future automatically gets this same background and its own real logo
-  // (via getRealLeagueLogoUrl above), with nothing sport-specific left to
-  // configure here at all.
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 600 900" width="600" height="900">
-    <defs>
-      <radialGradient id="scheduleBg" cx="50%" cy="50%" r="70%">
-        <stop offset="0%" stop-color="#231f20" />
-        <stop offset="100%" stop-color="#000000" />
-      </radialGradient>
-    </defs>
-    <rect width="600" height="900" fill="url(#scheduleBg)" />
-
-    <!-- League Logo (Centerpiece) -->
-    ${leagueLogoMarkup}
-
-    <!-- UPCOMING / SCHEDULE, each filling 80% of poster width -->
-    <text x="300" y="700" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="72" font-weight="800" fill="#f8fafc" text-anchor="middle" textLength="480" lengthAdjust="spacingAndGlyphs" letter-spacing="2">UPCOMING</text>
-    <text x="300" y="790" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="72" font-weight="800" fill="#f8fafc" text-anchor="middle" textLength="480" lengthAdjust="spacingAndGlyphs" letter-spacing="2">SCHEDULE</text>
   </svg>`;
 
   res.setHeader('Content-Type', 'image/svg+xml');
@@ -3168,18 +3035,6 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
     isToday: game.isToday !== false
   }));
 
-  metas.push({
-    id: `sb:${sport.toLowerCase()}:none`,
-    type: 'sports',
-    name: 'Upcoming Schedule',
-    poster: `${hostUrl}/poster/none/${sport.toLowerCase()}.svg`,
-    background: `${hostUrl}/background/schedule/${sport.toLowerCase()}.svg`,
-    logo: `${hostUrl}/logo/${sport.toLowerCase()}.svg`,
-    description: games.length > 0
-      ? `See the full upcoming ${getSportDisplayName(sport)} schedule.`
-      : `Nothing scheduled for ${getSportDisplayName(sport)}. Tap to see the upcoming schedule.`
-  });
-
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
@@ -3217,26 +3072,6 @@ app.get('/user/:uuid/meta/sports/:id.json', async (req, res) => {
   }
 
   if (prefix === 'sb') {
-    if (idVal === 'none') {
-      const userTz = user.timeZone || 'America/New_York';
-      const upcoming = await fetchUpcomingGames(sport, userTz, 20);
-      const description = upcoming.length > 0
-        ? `Upcoming ${getSportDisplayName(sport)} Games:\n\n${upcoming.join('\n')}`
-        : 'No Games Scheduled';
-
-      return res.json({
-        meta: {
-          id: req.params.id,
-          type: 'sports',
-          name: 'Upcoming Schedule',
-          poster: `${hostUrl}/poster/none/${sport.toLowerCase()}.svg`,
-          background: `${hostUrl}/background/schedule/${sport.toLowerCase()}.svg`,
-          logo: `${hostUrl}/logo/${sport.toLowerCase()}.svg`,
-          description
-        }
-      });
-    }
-
     const userTz = user.timeZone || 'America/New_York';
     const games = await fetchGamesForSport(sport.toUpperCase(), hostUrl, userTz);
     const game = games.find(g => g.id === idVal);
@@ -3282,6 +3117,9 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   // sbstream-prefixed branch (unreachable - nothing in the app ever
   // constructed that shape of id) has been removed.
   const [idPrefix, sport, idVal] = req.params.id.split(':');
+  // A client still holding a cached catalog can ask for the retired
+  // Upcoming Schedule card. Nothing to play, and answering here avoids an
+  // ESPN lookup for an id that will never match.
   if (idVal === 'none') return res.json({ streams: [] });
 
   // net:{NETWORK} - the user asked for a network directly rather than for
