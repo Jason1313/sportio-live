@@ -481,6 +481,65 @@ const AUTO_SEARCH = {
   UFC: { terms: ['UFC'], groups: ['Paramount+ PPV'] },
 };
 
+// ---------------------------------------------------------------------
+// Promotions within a league
+// ---------------------------------------------------------------------
+//
+// ESPN files Dana White's Contender Series under the UFC league: the same
+// league id (3321, "Ultimate Fighting Championship"), the same scoreboard
+// endpoint, the same Paramount+ broadcaster. Confirmed live against real
+// events - there is no field anywhere on the event that separates the
+// two. Only the event's own name does, and it does so unambiguously
+// ("Dana White's Contender Series: Season 10, Week 4", shortName "Dana
+// White's Contender Series").
+//
+// They are not the same show and they do not share channels. A UFC card
+// is a PPV the user has hand-picked and quality-checked channels for;
+// DWCS is a Tuesday-night prospect show that never appears on any of
+// them. Serving the UFC link list for a DWCS event - which is exactly
+// what happened before this existed, because the event bucket is bound to
+// the whole sport - sends the user to a channel showing something else.
+//
+// A promotion therefore overrides two things, and only these two, for the
+// events it claims:
+//
+//   networkKey - which configured link slot applies, or null for none
+//   autoSearch - the standing search to run instead of the league's own
+//
+// Everything else (artwork, the fighter-name tiers, date filtering) is
+// genuinely shared with the parent league and deliberately left alone.
+const PROMOTIONS = [
+  {
+    key: 'DWCS',
+    label: "Dana White's Contender Series",
+    sport: 'UFC',
+    // Three spellings because two different systems name this show.
+    // Providers label it "DWCS"; ESPN writes it out in full. Matching any
+    // of the three means the classifier survives ESPN reformatting the
+    // name, which is the only signal it has.
+    match: /dana white|contender series|\bdwcs\b/i,
+    // Deliberately null rather than 'UFC'. This is the entire point of
+    // the promotion existing: the UFC slot's channels are wrong here, and
+    // showing them ranked first is worse than showing nothing, because
+    // they look authoritative and play something else.
+    networkKey: null,
+    // Unconfined by group, unlike UFC's. There is no PPV group for a show
+    // that is not a PPV, and providers file DWCS wherever they please -
+    // so the terms have to carry the whole search.
+    autoSearch: { terms: ['DWCS', 'Dana White', 'Contender Series'] },
+  },
+];
+
+// The promotion claiming an event, or null when it is the league's own
+// (a real UFC card). Matched on the event name because ESPN gives no
+// other signal - see above.
+function getPromotionForEvent(sportKey, eventName) {
+  const sport = String(sportKey || '').toUpperCase();
+  const name = String(eventName || '');
+  if (!name) return null;
+  return PROMOTIONS.find(p => p.sport === sport && p.match.test(name)) || null;
+}
+
 // Caps how many auto-found channels are appended. These are inferred, not
 // chosen, and a provider that lists one card under twenty near-identical
 // names should not push the configured links' backstop off the end of the
@@ -1243,6 +1302,8 @@ module.exports = {
   AUTO_SEARCH,
   MAX_AUTO_SEARCH_RESULTS,
   getAutoSearch,
+  PROMOTIONS,
+  getPromotionForEvent,
   autoSearchChannels,
   groupMatchesAny,
   findMatchingGroup,

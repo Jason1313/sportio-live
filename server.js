@@ -3119,7 +3119,17 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   // everything else it's whatever network ESPN says carries the game.
   // Either can be null, which buildStreamList handles.
   const sportKey = sport.toUpperCase();
-  const networkKey = networks.getEventNetworkForSport(sportKey) || game.network;
+
+  // ESPN files some shows under a bigger league's scoreboard - Dana
+  // White's Contender Series arrives as a UFC event, under the UFC league
+  // id, with no field distinguishing it. When a promotion claims this
+  // event it overrides both which link slot applies and which standing
+  // search runs, because those are precisely the two things that do NOT
+  // carry over from the parent league. See networks.PROMOTIONS.
+  const promotion = networks.getPromotionForEvent(sportKey, game.name);
+  const networkKey = promotion
+    ? promotion.networkKey
+    : (networks.getEventNetworkForSport(sportKey) || game.network);
 
   let linkStreams = [];
   let linkProblems = [];
@@ -3163,7 +3173,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   //
   // Resolved here, alongside the links, so buildStreamList receives all
   // three sources at once and decides the order in one place.
-  const autoSearch = networks.getAutoSearch(sportKey);
+  const autoSearch = promotion ? promotion.autoSearch : networks.getAutoSearch(sportKey);
   let autoStreams = [];
   if (autoSearch) {
     const autoChannels = await fetchAutoSearchChannels(user, autoSearch, m3uSource);
@@ -3399,7 +3409,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     });
   }
 
-  console.log(`[Stream] ${sportKey} ${idVal} network=${networkKey || 'none'} mode=${mode} links=${linkStreams.length} auto=${autoStreams.length} tiers=${tierStreams.length} -> ${finalStreams.length}`);
+  console.log(`[Stream] ${sportKey}${promotion ? `/${promotion.key}` : ''} ${idVal} network=${networkKey || 'none'} mode=${mode} links=${linkStreams.length} auto=${autoStreams.length} tiers=${tierStreams.length} -> ${finalStreams.length}`);
 
   res.setHeader('Content-Type', 'application/json');
   res.json({ streams: finalStreams });

@@ -142,6 +142,17 @@
       </div>
       <button onclick="closeStreams()" class="text-[#e6e6e6]/45 hover:text-[#e6e6e6] transition shrink-0"><i class="fa-solid fa-xmark"></i></button>
     </div>
+    <!-- Ad-hoc search. The addon returns what it can work out on its own;
+         this is for everything it cannot - a promotion nobody has written
+         a standing search for, or a card the provider filed under a name
+         no rule would predict. Typed terms go straight at the playlist. -->
+    <div class="px-4 py-2.5 border-b border-white/10">
+      <input id="streams-search" type="text" oninput="onStreamSearchInput()"
+             placeholder="Search your channels for anything else - e.g. DWCS, Fight Pass"
+             class="w-full bg-[#0f171e] border border-white/10 rounded px-3 py-1.5 text-xs
+                    placeholder:text-[#e6e6e6]/25 focus:outline-none focus:border-[#3b8fc4]">
+      <div id="streams-search-groups"></div>
+    </div>
     <div id="streams-list" class="max-h-[60vh] overflow-y-auto p-2"></div>
     <div id="streams-probe-row" class="px-2 pb-2"></div>
   </div>
@@ -180,6 +191,16 @@
   // selection - the same reason the saved-channel picker keeps its own.
   let streamRows = [];
   let streamSelection = new Set();
+
+  // Ad-hoc search inside the event panel: what the user typed, what came
+  // back, and which playlist groups they have hidden. Kept separate from
+  // streamRows so provenance survives - the addon's own answer and a
+  // hand-typed search are different claims and are labelled as such.
+  let streamSearchRows = [];
+  let streamSearchGroups = [];
+  let streamSearchExcluded = new Set();
+  let streamSearchTimer = null;
+  let streamSearchNote = '';
 
   const credentials = () => ({ uuid, password });
   let catalogs = [];
@@ -596,8 +617,15 @@
     document.getElementById('streams-sub').textContent = '';
     list.innerHTML = '';
     document.getElementById('streams-probe-row').innerHTML = '';
+    document.getElementById('streams-search').value = '';
+    document.getElementById('streams-search-groups').innerHTML = '';
     streamRows = [];
     streamSelection = new Set();
+    streamSearchRows = [];
+    streamSearchGroups = [];
+    streamSearchExcluded = new Set();
+    streamSearchNote = '';
+    clearTimeout(streamSearchTimer);
     panel.classList.remove('hidden');
 
     let meta = {}, streams = [];
@@ -620,6 +648,45 @@
     renderStreams();
   }
 
+  // One row of the event panel. Shared by the addon's own streams and by
+  // ad-hoc search results, so both are playable, selectable and probeable
+  // in exactly the same way - the only difference between them is the
+  // heading they sit under.
+  function streamRowHtml(s) {
+    // A stream with no url is an informational entry from the addon (for
+    // example "on FOX, no channels configured"), not something playable.
+    if (!s.url) {
+      return `<div class="px-3 py-2.5 text-[11px] text-[#c9992e] leading-snug">
+                ${escapeHtml(s.name || '')} ${escapeHtml(s.title || '')}
+              </div>`;
+    }
+    return `<div class="flex items-center gap-2 px-1 rounded-lg hover:bg-white/5 transition">
+              <input type="checkbox" ${streamSelection.has(s.url) ? 'checked' : ''}
+                     onchange="toggleStreamSelection('${escapeHtml(s.url)}')"
+                     title="Select for quality check"
+                     class="shrink-0 ml-2 accent-[#3b8fc4] cursor-pointer">
+              <a href="${escapeHtml(playLink(s.url))}" onclick="notePlaying()"
+                 class="flex-1 min-w-0 flex items-center gap-3 px-2 py-2.5">
+                <i class="fa-solid fa-play text-[10px] text-[#5aa8d1] shrink-0"></i>
+                <span class="flex-1 min-w-0">
+                  <span class="flex items-center gap-2">
+                    <span class="text-xs font-semibold truncate">${escapeHtml(s.name || 'Stream')}</span>
+                    ${probeBadge(s.url)}
+                  </span>
+                  <span class="block text-[10px] text-[#e6e6e6]/45 truncate">${escapeHtml(s.title || '')}</span>
+                </span>
+                <i class="fa-solid fa-arrow-up-right-from-square text-[10px] text-[#e6e6e6]/25 shrink-0"></i>
+              </a>
+            </div>`;
+  }
+
+  // Everything playable in the panel right now, from both sources. The
+  // quality check works across the whole panel rather than per-section,
+  // because "which of these actually plays" is one question.
+  function playableStreamRows() {
+    return [...streamRows, ...streamSearchRows].filter(s => s.url);
+  }
+
   // Renders the event panel's stream list. Split out of openStreams so a
   // finished quality check can redraw one row's badge without re-fetching
   // the event - the same split the saved-channel picker already uses.
@@ -628,43 +695,34 @@
     const probeRow = document.getElementById('streams-probe-row');
     if (!list || !probeRow) return;
 
+    renderStreamSearchGroups();
+
+    const sections = [];
+
     if (streamRows.length === 0) {
-      list.innerHTML = '<p class="text-xs text-[#e6e6e6]/45 p-4 text-center">No streams matched this one.</p>';
-      probeRow.innerHTML = '';
-      return;
+      sections.push('<p class="text-xs text-[#e6e6e6]/45 p-4 text-center">No streams matched this one.</p>');
+    } else {
+      sections.push(streamRows.map(streamRowHtml).join(''));
     }
 
-    list.innerHTML = streamRows.map(s => {
-      // A stream with no url is an informational entry from the addon (for
-      // example "on FOX, no channels configured"), not something playable.
-      if (!s.url) {
-        return `<div class="px-3 py-2.5 text-[11px] text-[#c9992e] leading-snug">
-                  ${escapeHtml(s.name || '')} ${escapeHtml(s.title || '')}
-                </div>`;
-      }
-      return `<div class="flex items-center gap-2 px-1 rounded-lg hover:bg-white/5 transition">
-                <input type="checkbox" ${streamSelection.has(s.url) ? 'checked' : ''}
-                       onchange="toggleStreamSelection('${escapeHtml(s.url)}')"
-                       title="Select for quality check"
-                       class="shrink-0 ml-2 accent-[#3b8fc4] cursor-pointer">
-                <a href="${escapeHtml(playLink(s.url))}" onclick="notePlaying()"
-                   class="flex-1 min-w-0 flex items-center gap-3 px-2 py-2.5">
-                  <i class="fa-solid fa-play text-[10px] text-[#5aa8d1] shrink-0"></i>
-                  <span class="flex-1 min-w-0">
-                    <span class="flex items-center gap-2">
-                      <span class="text-xs font-semibold truncate">${escapeHtml(s.name || 'Stream')}</span>
-                      ${probeBadge(s.url)}
-                    </span>
-                    <span class="block text-[10px] text-[#e6e6e6]/45 truncate">${escapeHtml(s.title || '')}</span>
-                  </span>
-                  <i class="fa-solid fa-arrow-up-right-from-square text-[10px] text-[#e6e6e6]/25 shrink-0"></i>
-                </a>
-              </div>`;
-    }).join('');
+    // Search results sit under their own heading rather than being mixed
+    // in. The addon's list is a considered answer; these are whatever the
+    // typed words matched, and running them together would misrepresent
+    // both.
+    if (streamSearchNote) {
+      sections.push(`<p class="text-[11px] text-[#c9992e] px-3 py-2">${escapeHtml(streamSearchNote)}</p>`);
+    } else if (streamSearchRows.length > 0) {
+      sections.push(`<p class="text-[10px] uppercase tracking-wider text-[#5aa8d1] px-3 pt-3 pb-1">
+                       Search results (${streamSearchRows.length})
+                     </p>`);
+      sections.push(streamSearchRows.map(streamRowHtml).join(''));
+    }
+
+    list.innerHTML = sections.join('');
 
     // Same rule as the saved-channel picker: ticked streams if any are
     // ticked, otherwise everything playable, and never more than the cap.
-    const playable = streamRows.filter(s => s.url);
+    const playable = playableStreamRows();
     const target = streamSelection.size > 0
       ? playable.filter(s => streamSelection.has(s.url))
       : playable;
@@ -686,6 +744,87 @@
     renderStreams();
   }
 
+  // ------------------------------------------------------------------
+  // Ad-hoc search inside the event panel
+  // ------------------------------------------------------------------
+  //
+  // The addon answers what it can reason about: a configured channel, a
+  // standing search for a promotion someone has written a rule for, a
+  // fighter-name match. This covers everything left over - a card the
+  // provider filed under a name no rule would predict, a promotion with
+  // no rule yet at all. The same endpoint the saved-channel picker uses,
+  // so quoted phrases and group filtering work here identically.
+
+  function onStreamSearchInput() {
+    clearTimeout(streamSearchTimer);
+    streamSearchTimer = setTimeout(runStreamSearch, 250);
+  }
+
+  async function runStreamSearch() {
+    const query = (document.getElementById('streams-search').value || '').trim();
+    if (query.length < 2) {
+      streamSearchRows = [];
+      streamSearchGroups = [];
+      streamSearchNote = '';
+      renderStreams();
+      return;
+    }
+
+    const res = await postJson('/api/networks/search', {
+      query,
+      excludeGroups: [...streamSearchExcluded]
+    });
+
+    if (!res.ok) {
+      // Says why rather than rendering an empty list that looks like "no
+      // such channel" - the usual cause is an Xtream account, which this
+      // endpoint does not serve, and that is worth stating plainly.
+      streamSearchRows = [];
+      streamSearchGroups = [];
+      streamSearchNote = (res.data && res.data.error) || 'Could not search your channels.';
+      renderStreams();
+      return;
+    }
+
+    const channels = (res.data && res.data.channels) || [];
+    streamSearchGroups = (res.data && res.data.groups) || [];
+    streamSearchNote = channels.length === 0 ? `Nothing in your playlist matched "${query}".` : '';
+    // Mapped into the same { name, title, url } shape the addon returns,
+    // so one row renderer serves both.
+    streamSearchRows = channels.map(c => ({
+      name: c.name || '',
+      url: c.url,
+      title: `🔍 Search  📁 ${(c.groups || []).join(' | ')}`
+    }));
+    renderStreams();
+  }
+
+  function renderStreamSearchGroups() {
+    const box = document.getElementById('streams-search-groups');
+    if (!box) return;
+    // Below two groups there is nothing to disambiguate, so the chips
+    // would just be clutter - same threshold the saved-channel picker uses.
+    if (streamSearchGroups.length < 2) { box.innerHTML = ''; return; }
+    box.innerHTML = `<div class="flex flex-wrap gap-1 mt-1.5">
+        <span class="text-[10px] text-[#e6e6e6]/35 self-center mr-1">Groups:</span>
+        ${streamSearchGroups.slice(0, 12).map(g => {
+          const off = streamSearchExcluded.has(g.name);
+          return `<button onclick="toggleStreamSearchGroup(${JSON.stringify(g.name).replace(/"/g, '&quot;')})"
+                          class="text-[10px] px-1.5 py-0.5 rounded border transition ${off
+                            ? 'border-[#c0392b]/40 bg-[#c0392b]/15 text-[#e56a6a] line-through'
+                            : 'border-white/15 bg-[#1f2b36] text-[#e6e6e6]/60 hover:text-[#e6e6e6]'}">
+                    ${escapeHtml(g.name)} <span class="opacity-60">${g.count}</span>
+                  </button>`;
+        }).join('')}
+      </div>`;
+  }
+
+  function toggleStreamSearchGroup(name) {
+    if (streamSearchExcluded.has(name)) streamSearchExcluded.delete(name);
+    else streamSearchExcluded.add(name);
+    runStreamSearch();
+  }
+
   // Measures the listed streams the same way the saved-channel picker
   // does, and for the same reason: an event's list mixes hand-picked
   // channels with ones a search just turned up, and the only way to find
@@ -695,7 +834,7 @@
   // real connection to the provider, and the server throttles them anyway.
   async function probeStreams() {
     if (probeInProgress) { showToast('A quality check is already running.', true); return; }
-    const playable = streamRows.filter(s => s.url);
+    const playable = playableStreamRows();
     const target = streamSelection.size > 0
       ? playable.filter(s => streamSelection.has(s.url))
       : playable;
