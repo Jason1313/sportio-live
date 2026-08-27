@@ -1871,6 +1871,85 @@ async function fetchXtreamLiveStreams(user, categoryIds = []) {
   return allStreams;
 }
 
+// Every live channel the Xtream account can see, in one request.
+//
+// fetchXtreamLiveStreams above deliberately refuses an empty category
+// list, so that a missing configuration can never turn into an accidental
+// full-service fetch. This is the case where a full-service fetch is the
+// point: an automatic search with no group filter is asking about the
+// whole service by definition. Omitting category_id is how Xtream serves
+// that - one response, not one request per category.
+async function fetchAllXtreamLiveStreams(user) {
+  const { url, username, password } = user.xtream;
+  const baseUrl = url.replace(/\/+$/, '');
+  const apiUrl = `${baseUrl}/player_api.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}&action=get_live_streams`;
+  try {
+    const res = await axios.get(apiUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      timeout: 15000
+    });
+    return Array.isArray(res.data) ? res.data : [];
+  } catch (err) {
+    console.error('[Xtream] Failed to fetch the full live stream list:', err.message);
+    return [];
+  }
+}
+
+function buildXtreamStreamUrl(user, streamId) {
+  const baseUrl = user.xtream.url.replace(/\/+$/, '');
+  return `${baseUrl}/live/${encodeURIComponent(user.xtream.username)}/${encodeURIComponent(user.xtream.password)}/${streamId}.m3u8`;
+}
+
+// Runs a sport's standing search (networks.AUTO_SEARCH) against whichever
+// source the account uses, returning { name, url, group } matches.
+//
+// The two connection types reach the same channel list very differently.
+// An M3U account already has the entire playlist parsed and cached, so
+// this is a filter over memory and costs nothing. An Xtream account has
+// no such list, so the search's own group filter is reused to decide
+// which categories to ask for - which for UFC means one small request
+// covering the Paramount+ PPV group, rather than pulling the whole
+// service down to find a handful of channels in it.
+async function fetchAutoSearchChannels(user, config, m3uSource) {
+  if (!config) return [];
+
+  if (user.connectionType === 'm3u') {
+    return networks.autoSearchChannels(m3uSource?.channels || [], config);
+  }
+
+  if (!user.xtream || !user.xtream.url) return [];
+
+  const categories = await fetchXtreamCategories(user);
+  const hasGroupFilter = Array.isArray(config.groups) && config.groups.length > 0;
+
+  let streams;
+  if (hasGroupFilter) {
+    const wantedIds = categories
+      .filter(c => networks.groupMatchesAny([c.category_name], config.groups))
+      .map(c => String(c.category_id));
+    // No category matched the filter at all. Deliberately returns nothing
+    // rather than falling back to a full-service search: the filter exists
+    // precisely to keep unrelated channels out, so ignoring it when it
+    // matches nothing would produce exactly the results it was written to
+    // prevent.
+    if (wantedIds.length === 0) return [];
+    streams = await fetchXtreamLiveStreams(user, wantedIds);
+  } else {
+    streams = await fetchAllXtreamLiveStreams(user);
+  }
+
+  // Normalised into the M3U parser's own channel shape, so the matching
+  // itself has one implementation shared by both connection types.
+  const getCategoryName = buildCategoryNameLookup(categories);
+  const channels = streams.map(s => ({
+    name: s.name,
+    streamUrl: buildXtreamStreamUrl(user, s.stream_id),
+    categories: [getCategoryName(s)]
+  }));
+
+  return networks.autoSearchChannels(channels, config);
+}
+
 app.post('/api/xtream/categories', async (req, res) => {
   const { url, username, password } = req.body;
   if (!url || !username || !password) return res.status(400).json({ error: 'Missing credentials' });
@@ -2620,6 +2699,22 @@ function buildLinkTitle(networkKey, link) {
   return link.group ? `${networkPart}  📁 ${link.group}` : networkPart;
 }
 
+// The same shape as buildLinkTitle, with a different lead icon because
+// the provenance genuinely differs and the user has to be able to tell:
+// a 📡 entry is a channel they picked and quality-checked themselves, a
+// 🔎 entry is one a standing search turned up this minute and nobody has
+// ever looked at. Both are playable; only one has been vouched for.
+//
+// Quality comes from the probe cache alone - an auto-found channel has no
+// stored reading to fall back on, because it was never saved anywhere to
+// store one against. It fills in once the channel is checked in the watch
+// portal.
+function buildAutoSearchTitle(channel) {
+  const quality = probe.getCachedProbeLabel(channel.url) || '';
+  const searchPart = `🔎 Auto${quality ? ` · ${quality}` : ''}`;
+  return channel.group ? `${searchPart}  📁 ${channel.group}` : searchPart;
+}
+
 // Poster/background for a network block. Deliberately generated rather
 // than taken from the playlist's tvg-logo: those point at arbitrary
 // third-party image hosts that may be dead, rate-limited or simply wrong,
@@ -3058,6 +3153,27 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     }));
   }
 
+  // --- Automatic search ---
+  //
+  // A standing, per-sport search over the provider's own channel list -
+  // see networks.AUTO_SEARCH. Independent of the network slots above and
+  // of the tier system below: it exists for events the provider only ever
+  // lists as a throwaway per-card channel, which a curated link list
+  // cannot keep up with and the fighter-name tiers cannot find.
+  //
+  // Resolved here, alongside the links, so buildStreamList receives all
+  // three sources at once and decides the order in one place.
+  const autoSearch = networks.getAutoSearch(sportKey);
+  let autoStreams = [];
+  if (autoSearch) {
+    const autoChannels = await fetchAutoSearchChannels(user, autoSearch, m3uSource);
+    autoStreams = autoChannels.map(channel => ({
+      name: channel.name,
+      title: buildAutoSearchTitle(channel),
+      url: channel.url
+    }));
+  }
+
   // Tier results are only computed when they can actually be used. The
   // decision lives in networks.needsTiers so it cannot drift from
   // buildStreamList - a short link list now wants the tiers as a backstop,
@@ -3260,7 +3376,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   });
 
   const { streams, mode, note } = networks.buildStreamList({
-    sportKey, networkKey, linkStreams, tierStreams
+    sportKey, networkKey, linkStreams, autoStreams, tierStreams
   });
 
   // The only channel available for telling the user something is wrong -
@@ -3283,7 +3399,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     });
   }
 
-  console.log(`[Stream] ${sportKey} ${idVal} network=${networkKey || 'none'} mode=${mode} links=${linkStreams.length} tiers=${tierStreams.length} -> ${finalStreams.length}`);
+  console.log(`[Stream] ${sportKey} ${idVal} network=${networkKey || 'none'} mode=${mode} links=${linkStreams.length} auto=${autoStreams.length} tiers=${tierStreams.length} -> ${finalStreams.length}`);
 
   res.setHeader('Content-Type', 'application/json');
   res.json({ streams: finalStreams });

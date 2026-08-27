@@ -451,6 +451,159 @@ function getNetworkLabel(networkKey) {
 }
 
 // ---------------------------------------------------------------------
+// Automatic playlist search
+// ---------------------------------------------------------------------
+//
+// A third source of channels, sitting between the user's hand-picked
+// links and the tier system.
+//
+// Some events never have a fixed channel to configure. Providers file
+// them as one throwaway listing per card, named after the promotion and
+// the card number, and both the name and the stream URL change every
+// event. A curated link list cannot track that, and the tier system
+// cannot find it either - tiers match on the two fighters' names, which a
+// listing called "UFC 320 PPV" never spells out.
+//
+// So a sport can declare a standing search instead: terms to look for in
+// a channel's name, optionally confined to particular playlist groups. It
+// runs fresh on every stream request, so tonight's card is found the
+// moment the provider lists it, with nothing to configure.
+//
+// Results rank BELOW the configured links and ABOVE the tier results. A
+// hand-picked, quality-checked channel is a deliberate choice and always
+// wins; but a name match confined to the right group is a much stronger
+// signal than a tier-4 nickname hit, which is inference over EPG text.
+const AUTO_SEARCH = {
+  // UFC cards land in the provider's Paramount+ PPV group, one listing
+  // per card. Confining the search to that group is what keeps it useful:
+  // an unconfined search for "UFC" across the whole service also returns
+  // the 24/7 Fight Pass replay loops, which are never the live card.
+  UFC: { terms: ['UFC'], groups: ['Paramount+ PPV'] },
+};
+
+// Caps how many auto-found channels are appended. These are inferred, not
+// chosen, and a provider that lists one card under twenty near-identical
+// names should not push the configured links' backstop off the end of the
+// list. Deliberately the same ceiling as MAX_LINKS_PER_NETWORK - the two
+// serve the same "one section of the player's list" budget.
+const MAX_AUTO_SEARCH_RESULTS = 10;
+
+function getAutoSearch(sportKey) {
+  return AUTO_SEARCH[String(sportKey || '').toUpperCase()] || null;
+}
+
+// Lowercased, with every run of punctuation flattened to a single space.
+// Group and channel names arrive decorated in ways that carry no meaning
+// here - "US | PARAMOUNT+ PPV", "UFC 320: Ankalaev vs. Pereira" - so both
+// sides get flattened before they are compared.
+//
+// Unlike normalizeNetworkName, '+' is dropped rather than kept. There it
+// is load-bearing (ESPN+ is not ESPN, and confusing the two sends the
+// user to the wrong channel); here it is noise, because the same provider
+// writes the one group as "PARAMOUNT+ PPV" and "PARAMOUNT + PPV" and both
+// have to match a config written as "Paramount+ PPV". Keeping '+' made
+// the second of those silently miss.
+function normalizeForSearch(text) {
+  return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function escapeRegex(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Whether a channel sits in one of the groups a search config asked for.
+// Every word of the configured name must appear somewhere in the group's
+// own name, in any order.
+//
+// Deliberately not an exact comparison. Providers prefix their groups by
+// country and decorate them with separators, so a config written as
+// "Paramount+ PPV" has to match a group actually named "US | PARAMOUNT+
+// PPV" - which an exact match would miss, silently returning nothing at
+// all rather than visibly failing.
+//
+// An empty/absent group list means "anywhere in the service", which is
+// what the promotions with no dedicated group of their own need.
+// Returns the channel's OWN group name that satisfied the filter, so the
+// caller can label the result with the group it was actually found in
+// rather than whichever group the provider happened to list first. A
+// channel filed under both "PPV EVENTS" and "US | Paramount Plus PPV"
+// was found via the second, and saying so is the whole point of showing
+// a group at all.
+//
+// Three distinct returns, deliberately: the matched group name, '' when
+// the config has no filter (every group qualifies, none is "the" match),
+// and null for no match.
+function findMatchingGroup(groups, wantedGroups) {
+  if (!Array.isArray(wantedGroups) || wantedGroups.length === 0) return '';
+  for (const wanted of wantedGroups) {
+    const words = normalizeForSearch(wanted).split(' ').filter(Boolean);
+    if (words.length === 0) continue;
+    const hit = (groups || []).find(group => {
+      const normalized = normalizeForSearch(group);
+      return words.every(word => normalized.includes(word));
+    });
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function groupMatchesAny(groups, wantedGroups) {
+  return findMatchingGroup(groups, wantedGroups) !== null;
+}
+
+// Whether a channel's name carries any one of the search terms. A
+// multi-word term needs all its words present, in any order.
+//
+// Each word must START at a word boundary rather than merely appear as a
+// substring, which is what keeps "UFC" off a channel whose name happens to
+// contain those three letters mid-word. It is deliberately NOT anchored at
+// the end too: providers write both "UFC 320" and "UFC320", and a trailing
+// boundary would reject the second.
+//
+// Matched against the name only, never the group. The group filter is
+// already how a search gets narrowed, and letting group text satisfy the
+// term as well would make { terms: ['UFC'], groups: ['Paramount+ PPV'] }
+// return that entire group regardless of what each channel actually is.
+function nameMatchesAnyTerm(name, terms) {
+  const normalized = normalizeForSearch(name);
+  if (!normalized) return false;
+  return (terms || []).some(term => {
+    const words = normalizeForSearch(term).split(' ').filter(Boolean);
+    if (words.length === 0) return false;
+    return words.every(word => new RegExp(`\\b${escapeRegex(word)}`).test(normalized));
+  });
+}
+
+// Runs one search config over a channel list, returning the matches as
+// { name, url, group }.
+//
+// `channels` is the M3U parser's own { name, streamUrl, categories }
+// shape. The Xtream path normalises its stream list into that same shape
+// before calling, so there is one implementation here rather than one per
+// connection type.
+function autoSearchChannels(channels, config, options = {}) {
+  if (!config) return [];
+  const { limit = MAX_AUTO_SEARCH_RESULTS } = options;
+  const terms = Array.isArray(config.terms) ? config.terms : [];
+  if (terms.length === 0) return [];
+
+  const out = [];
+  for (const channel of channels || []) {
+    if (!channel || !channel.streamUrl) continue;
+    const matchedGroup = findMatchingGroup(channel.categories, config.groups);
+    if (matchedGroup === null) continue;
+    if (!nameMatchesAnyTerm(channel.name, terms)) continue;
+    out.push({
+      name: channel.name || '',
+      url: channel.streamUrl,
+      group: matchedGroup || (channel.categories || [])[0] || '',
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------
 // Stream policy
 // ---------------------------------------------------------------------
 
@@ -522,19 +675,29 @@ function needsTiers({ sportKey, networkKey, linkCount }) {
 //                    has no channels for it. Caller should surface this;
 //                    tiers are included so the result is never empty.
 //   'tiers-only'   - no network resolved, or sport has no link policy.
-function buildStreamList({ sportKey, networkKey, linkStreams, tierStreams }) {
+//
+// `autoStreams` (see AUTO_SEARCH) always sits immediately after the
+// configured links and before the tier results, in EVERY branch including
+// 'links-only'. Unlike the tiers, an auto search is a per-sport
+// declaration rather than generic inference, so a 'replace' sport that
+// discards its tier results still keeps it - and dropping it would mean a
+// promotion's only real source of channels vanishing the moment the user
+// configured a fourth link.
+function buildStreamList({ sportKey, networkKey, linkStreams, autoStreams, tierStreams }) {
   const policy = getLinkPolicy(sportKey);
   const links = linkStreams || [];
+  const auto = autoStreams || [];
   const tiers = tierStreams || [];
 
   if (policy === 'tiers-only') {
-    return { streams: dedupeByUrl(tiers), mode: 'tiers-only', note: '' };
+    return { streams: dedupeByUrl([...auto, ...tiers]), mode: 'tiers-only', note: '' };
   }
 
   if (policy === 'combine') {
-    // Links first, tiers after - links are a deliberate choice, tier hits
-    // are inference, so the deliberate choice ranks higher.
-    return { streams: dedupeByUrl([...links, ...tiers]), mode: 'links-first', note: '' };
+    // Links first, then the auto search, then tiers - links are a
+    // deliberate choice, an auto hit is a targeted search, a tier hit is
+    // inference over EPG text. Ranked by how much each one actually knows.
+    return { streams: dedupeByUrl([...links, ...auto, ...tiers]), mode: 'links-first', note: '' };
   }
 
   // 'replace' from here down.
@@ -542,7 +705,7 @@ function buildStreamList({ sportKey, networkKey, linkStreams, tierStreams }) {
     // Streaming-only broadcast, or a network with no slot defined. The
     // tiers are the right tool - providers list streaming events as
     // per-event channels carrying the matchup in the name.
-    return { streams: dedupeByUrl(tiers), mode: 'tiers-only', note: '' };
+    return { streams: dedupeByUrl([...auto, ...tiers]), mode: 'tiers-only', note: '' };
   }
 
   if (links.length === 0) {
@@ -550,7 +713,7 @@ function buildStreamList({ sportKey, networkKey, linkStreams, tierStreams }) {
     // caller surfaces the network name so the user knows exactly which
     // slot to fill, and tiers still run so something is playable now.
     return {
-      streams: dedupeByUrl(tiers),
+      streams: dedupeByUrl([...auto, ...tiers]),
       mode: 'no-links',
       note: `No ${getNetworkLabel(networkKey)} channels configured`
     };
@@ -560,10 +723,10 @@ function buildStreamList({ sportKey, networkKey, linkStreams, tierStreams }) {
   // COMBINE_AT_OR_BELOW. Links still rank first either way; the only
   // question is whether anything follows them.
   if (links.length <= COMBINE_AT_OR_BELOW) {
-    return { streams: dedupeByUrl([...links, ...tiers]), mode: 'links-plus-tiers', note: '' };
+    return { streams: dedupeByUrl([...links, ...auto, ...tiers]), mode: 'links-plus-tiers', note: '' };
   }
 
-  return { streams: dedupeByUrl(links), mode: 'links-only', note: '' };
+  return { streams: dedupeByUrl([...links, ...auto]), mode: 'links-only', note: '' };
 }
 
 // ---------------------------------------------------------------------
@@ -1077,6 +1240,14 @@ module.exports = {
   getLinkPolicy,
   dedupeByUrl,
   buildStreamList,
+  AUTO_SEARCH,
+  MAX_AUTO_SEARCH_RESULTS,
+  getAutoSearch,
+  autoSearchChannels,
+  groupMatchesAny,
+  findMatchingGroup,
+  nameMatchesAnyTerm,
+  normalizeForSearch,
   stripChannelDecorations,
   foldSuperscripts,
   detectQuality,

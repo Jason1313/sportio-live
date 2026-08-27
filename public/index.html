@@ -272,7 +272,7 @@
         <p class="text-xs text-[#e6e6e6]/55 mb-3 leading-relaxed">
           When ESPN says an NFL or college football game is on one of these networks, Sportio shows your channels for that network <span class="text-[#e6e6e6]/80 font-semibold">instead of</span> searching. Networks left empty fall back to category search, so nothing is ever missing entirely.
           <br class="mb-1">
-          <span class="text-[#c9992e]">UFC works differently</span> - its channels are shown <span class="text-[#e6e6e6]/80 font-semibold">in addition to</span> search results, listed first. Up to 5 per section, tried in the order you set.
+          <span class="text-[#c9992e]">UFC works differently</span> - its channels are shown <span class="text-[#e6e6e6]/80 font-semibold">in addition to</span> search results, listed first. Up to 5 per section, tried in the order you set. Below them, Sportio adds any channel it finds by searching your Paramount+ PPV group for "UFC" - that is where providers put each card, under a name that changes every event, so there is nothing to configure for it here.
         </p>
         <div id="network-links-container" class="space-y-3">
           <!-- Dynamically injected network accordions -->
@@ -2159,7 +2159,7 @@
       // (UFC) ADDS its channels on top of category search, while a real
       // network REPLACES it.
       const emptyText = network.kind === 'event'
-        ? 'No channels set - only category search results will show.'
+        ? 'No channels set - only the automatic search and category search results will show.'
         : 'No channels set - games on this network will use category search.';
 
       const rows = links.length > 0
