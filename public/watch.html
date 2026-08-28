@@ -25,16 +25,144 @@
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       overflow: hidden; min-height: 2.2rem;
     }
+
+    /* Set here rather than inline on the element so the mobile query
+       below can actually win - an inline style beats any stylesheet
+       rule, however specific. The value is the one that was inline. */
+    #grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+
+    /* The copy-address button on a stream row. A phone-only control -
+       see the mobile block - but declared out here so the default for
+       every other width is "not shown". */
+    .row-copy { display: none; }
+
+    /* ==================================================================
+       Mobile
+
+       One file, not a second mobile-only page. Everything a phone needs
+       that a desktop does not is either inside the query below or, for
+       the player link, chosen at runtime - so a desktop browser renders
+       from exactly the rules it always did.
+
+       The alternative was a watch-mobile.html, and the reason against it
+       is the same one written at the top of the script: the ~1100 lines
+       of catalog, search, probe and saved-channel logic below have one
+       implementation, so the two layouts cannot drift apart. A copy
+       would drift on the first change made to either.
+
+       Every class rule below is written `body .thing` rather than
+       `.thing`. Tailwind ships from a CDN that injects its stylesheet
+       after this one, so a plain class selector ties with the utility it
+       is meant to override and loses on source order - `.sheet` against
+       `max-w-2xl` silently did nothing. The extra element bumps it to
+       0-1-1 and it wins. Id selectors need no such help.
+       ================================================================== */
+    @media (max-width: 767px) {
+      /* Header. The desktop bar puts wordmark, tabs and the gear on one
+         flex line; at 390px that line wrapped into four stacked rows and
+         ate the screen before a single poster was visible. Here the
+         wordmark and gear share one short row and the tabs take a row of
+         their own that scrolls sideways. */
+      body .hdr-row { flex-wrap: wrap; gap: 0.5rem; padding: 0.5rem 0.75rem; }
+      body .wordmark { font-size: 0.9375rem; letter-spacing: -0.01em; }
+      body .setup-btn { margin-left: auto; }
+      body .setup-btn-text { display: none; }
+      body .setup-btn i { margin-right: 0; font-size: 1.0625rem; }
+
+      #catalog-tabs {
+        order: 3;
+        flex: 0 0 100%;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        scrollbar-width: none;
+        /* Full-bleed: the strip runs off the edge of the screen rather
+           than stopping inside a margin, which is the thing that reads
+           as "there is more this way". */
+        margin: 0 -0.75rem;
+        padding: 0 0.75rem 0.125rem;
+        scroll-snap-type: x proximity;
+        overscroll-behavior-x: contain;
+      }
+      #catalog-tabs::-webkit-scrollbar { display: none; }
+      #catalog-tabs button { flex: 0 0 auto; scroll-snap-align: start; }
+
+      #browse { padding: 1rem 0.75rem 2rem; }
+      #gate { margin-top: 2.5rem; padding: 0 1rem; }
+      #setup { margin-top: 1.25rem; padding: 0 0.875rem 3rem; }
+
+      /* Three posters across. A 2:3 poster at half of a 390px screen is
+         taller than the viewport is wide, so two-up showed barely one
+         row per screenful. */
+      #grid { grid-template-columns: repeat(auto-fill, minmax(102px, 1fr)); gap: 0.625rem; }
+      /* Lift-on-hover is a pointer idiom. On a touch screen it only ever
+         fires as a flicker after the tap has already been registered. */
+      body .card:hover, body .card:focus { transform: none; box-shadow: none; }
+
+      /* ---- Stream picker: a bottom sheet -------------------------------
+         As a centred box with a fixed max-height on the list, a long
+         result set ran off the bottom of the phone - and because the
+         overlay itself does not scroll, the quality-check button below
+         the list could not be reached at all. A column fixes it by
+         construction: fixed head, the list taking whatever is left, and
+         the button pinned above the home indicator. */
+      #streams:not(.hidden) { display: flex; align-items: flex-end; }
+      body .sheet {
+        width: 100%;
+        max-width: none;
+        margin: 0;
+        max-height: 92vh;
+        max-height: 92dvh;   /* excludes the address bar where supported */
+        min-height: 0;
+        border-radius: 1rem 1rem 0 0;
+        display: flex;
+        flex-direction: column;
+      }
+      body .sheet-head, body .sheet-search, #streams-probe-row { flex: 0 0 auto; }
+      body .sheet-head { position: relative; padding-top: 1.125rem; }
+      /* Grab handle. Nothing drags, but it is what says "sheet" rather
+         than "dialog that has lost its top half off the screen". */
+      body .sheet-head::before {
+        content: ""; position: absolute; top: 0.4375rem; left: 50%;
+        width: 2.25rem; height: 0.25rem; margin-left: -1.125rem;
+        border-radius: 999px; background: rgba(230, 230, 230, 0.22);
+      }
+      #streams-list {
+        flex: 1 1 auto;
+        min-height: 0;
+        max-height: none;
+        /* Stops the scroll chaining into the page behind once the list
+           hits an end - the other half of the fix, alongside the body
+           lock in lockScroll(). */
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+      }
+      #streams-probe-row { padding-bottom: max(0.5rem, env(safe-area-inset-bottom)); }
+      body .sheet-close { padding: 0.25rem 0.5rem; font-size: 1.125rem; }
+
+      /* Thumb-sized targets. These rows are the page's primary control,
+         and at desktop density two of them fit inside one fingertip. */
+      body .stream-row a { padding-top: 0.8125rem; padding-bottom: 0.8125rem; }
+      body .stream-row input[type="checkbox"] { width: 1.125rem; height: 1.125rem; }
+      body .row-copy { display: inline-flex; }
+
+      /* Saved-channel results scroll with the page rather than inside a
+         256px window - a scroll area nested in a scrolling page is hard
+         to hit deliberately with a thumb. */
+      #saved-results { max-height: none; overflow: visible; }
+
+      #toast { left: 0.75rem; right: 0.75rem; bottom: max(0.75rem, env(safe-area-inset-bottom)); }
+    }
   </style>
 </head>
 <body class="min-h-screen">
 
 <header class="sticky top-0 z-30 bg-[#16202a]/95 backdrop-blur border-b border-white/10">
-  <div class="max-w-[1600px] mx-auto px-5 py-3 flex items-center gap-4">
-    <span class="font-black tracking-tight text-lg">SPORTIO <span class="text-[#5aa8d1]">LIVE</span></span>
+  <div class="hdr-row max-w-[1600px] mx-auto px-5 py-3 flex items-center gap-4">
+    <span class="wordmark font-black tracking-tight text-lg">SPORTIO <span class="text-[#5aa8d1]">LIVE</span></span>
     <nav id="catalog-tabs" class="flex-1 flex flex-wrap gap-1.5"></nav>
-    <button onclick="toggleSetup()" class="text-xs font-bold text-[#e6e6e6]/60 hover:text-[#e6e6e6] transition shrink-0">
-      <i class="fa-solid fa-gear mr-1.5"></i>Player setup
+    <button onclick="toggleSetup()" title="Player setup" aria-label="Player setup"
+            class="setup-btn text-xs font-bold text-[#e6e6e6]/60 hover:text-[#e6e6e6] transition shrink-0">
+      <i class="fa-solid fa-gear mr-1.5"></i><span class="setup-btn-text">Player setup</span>
     </button>
   </div>
 </header>
@@ -57,10 +185,22 @@
 <!-- Player setup -->
 <section id="setup" class="hidden max-w-3xl mx-auto mt-8 px-5 pb-16">
   <h1 class="text-xl font-bold mb-1">One-time player setup</h1>
+  <p class="text-xs text-[#e6e6e6]/55 mb-4 leading-relaxed">
+    Clicking a stream hands its address to a media player on this device. Nothing is downloaded &mdash; the browser
+    never fetches the stream itself, it only passes the address along. How the hand-off happens depends on the
+    device, so pick yours.
+  </p>
+
+  <!-- Windows and Android need entirely different mechanisms, not
+       different instructions for one mechanism, so they get a tab each
+       rather than a page of caveats. Android is preselected on an
+       Android device - see showSetupPlatform(). -->
+  <div id="setup-platform-tabs" class="flex gap-1.5 mb-5"></div>
+
+  <div id="setup-windows">
   <p class="text-xs text-[#e6e6e6]/55 mb-5 leading-relaxed">
     Clicking a stream hands its URL to a <code class="text-[#5aa8d1]">sportio:</code> link, which Windows passes
-    straight to mpv. Nothing is downloaded &mdash; the browser never fetches the stream, it only passes the address along.
-    This is the same mechanism Stremio already uses on this machine.
+    straight to mpv. This is the same mechanism Stremio already uses on this machine.
   </p>
 
   <div class="bg-[#1f2b36] border border-white/10 rounded-lg p-4 mb-4">
@@ -115,6 +255,61 @@
     The earlier version of the script had the player path written into it, so editing the field above did nothing to an
     installed copy. Re-save step 1 and add step 2, and the player will follow this page from then on. Step 3 is unchanged.
   </p>
+  </div>
+
+  <!-- Android. No helper script and nothing to register: an intent link
+       names the app it wants inside the link itself, which is a facility
+       Windows has no equivalent of and Android needs no substitute for. -->
+  <div id="setup-android" class="hidden">
+    <p class="text-xs text-[#e6e6e6]/55 mb-5 leading-relaxed">
+      On Android there is no script to install and nothing to register. A stream link names the player it wants
+      inside the link itself, so the only thing that has to exist on the phone is the player.
+    </p>
+
+    <ol class="text-xs text-[#e6e6e6]/70 space-y-5 leading-relaxed">
+      <li>
+        <span class="font-bold text-[#e6e6e6]">1. Install VLC for Android</span>
+        <span class="text-[#e6e6e6]/45">&mdash; from Google Play or F-Droid. If it is already there, nothing to do.</span>
+        <div class="mt-2">
+          <a href="https://play.google.com/store/apps/details?id=org.videolan.vlc" target="_blank" rel="noopener"
+             class="inline-flex items-center gap-2 bg-[#3f5460] hover:bg-[#56707d] border border-white/10 text-[11px] font-bold py-1.5 px-3 rounded-lg transition">
+            <i class="fa-brands fa-google-play"></i>VLC on Google Play
+          </a>
+        </div>
+      </li>
+
+      <li>
+        <span class="font-bold text-[#e6e6e6]">2. Choose what streams open in</span>
+        <span class="text-[#e6e6e6]/45">&mdash; stored in this browser, so each device can differ.</span>
+        <div id="play-target-picker" class="mt-2 space-y-1.5"></div>
+      </li>
+
+      <li>
+        <span class="font-bold text-[#e6e6e6]">3. Tap any stream</span>
+        <span class="text-[#e6e6e6]/45">&mdash; the first time, Android asks whether to open it in VLC. Accept, and
+        it stops asking. VLC shows the channel name while it buffers; if it sits on a black screen for more than a
+        few seconds, that stream is probably down &mdash; use <span class="font-semibold text-[#e6e6e6]/70">Check
+        quality</span> in the picker to find one that is not.</span>
+      </li>
+    </ol>
+
+    <div class="bg-[#1f2b36] border border-white/10 rounded-lg p-4 mt-6">
+      <p class="text-[11px] text-[#e6e6e6]/60 leading-relaxed">
+        <span class="font-bold text-[#e6e6e6]/80">Which browsers this works in.</span>
+        Chrome, Edge, Brave, Opera and Samsung Internet all support the intent links this uses.
+        <span class="text-[#c9992e]">Firefox for Android does not</span> &mdash; there, use the
+        <i class="fa-regular fa-copy mx-0.5"></i> button on any stream row to copy its address, then paste it into
+        VLC under <span class="font-semibold">More &rsaquo; New stream</span>. The copy button is on every row on a
+        phone regardless, for anything else that will not open.
+      </p>
+      <p class="text-[11px] text-[#e6e6e6]/60 leading-relaxed mt-3">
+        <span class="font-bold text-[#e6e6e6]/80">One thing worth knowing.</span>
+        A stream address contains your IPTV username and password, the same as it does everywhere else in this app.
+        The copy button puts it on the clipboard in full, so treat a pasted link the way you would the credentials
+        themselves.
+      </p>
+    </div>
+  </div>
 
   <button onclick="toggleSetup()" class="mt-6 bg-[#3f5460] hover:bg-[#56707d] text-xs font-bold py-2 px-4 rounded-lg transition">
     Back to browsing
@@ -146,25 +341,25 @@
        conferences, which today means college football. -->
   <div id="conference-filter" class="hidden mb-4"></div>
 
-  <div id="grid" class="grid gap-4" style="grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));"></div>
+  <div id="grid" class="grid gap-4"></div>
   <p id="grid-empty" class="hidden text-sm text-[#e6e6e6]/45 py-16 text-center"></p>
 </main>
 
 <!-- Stream picker -->
 <div id="streams" class="hidden fixed inset-0 z-40 bg-black/70 backdrop-blur-sm" onclick="if(event.target===this)closeStreams()">
-  <div class="max-w-2xl mx-auto mt-20 bg-[#1f2b36] border border-white/10 rounded-xl overflow-hidden shadow-2xl">
-    <div class="flex items-start gap-3 px-5 py-4 border-b border-white/10">
+  <div class="sheet max-w-2xl mx-auto mt-20 bg-[#1f2b36] border border-white/10 rounded-xl overflow-hidden shadow-2xl">
+    <div class="sheet-head flex items-start gap-3 px-5 py-4 border-b border-white/10">
       <div class="flex-1 min-w-0">
         <h2 id="streams-title" class="font-bold text-sm truncate"></h2>
         <p id="streams-sub" class="text-[11px] text-[#e6e6e6]/45 mt-0.5 whitespace-pre-line"></p>
       </div>
-      <button onclick="closeStreams()" class="text-[#e6e6e6]/45 hover:text-[#e6e6e6] transition shrink-0"><i class="fa-solid fa-xmark"></i></button>
+      <button onclick="closeStreams()" aria-label="Close" class="sheet-close text-[#e6e6e6]/45 hover:text-[#e6e6e6] transition shrink-0"><i class="fa-solid fa-xmark"></i></button>
     </div>
     <!-- Ad-hoc search. The addon returns what it can work out on its own;
          this is for everything it cannot - a promotion nobody has written
          a standing search for, or a card the provider filed under a name
          no rule would predict. Typed terms go straight at the playlist. -->
-    <div class="px-4 py-2.5 border-b border-white/10">
+    <div class="sheet-search px-4 py-2.5 border-b border-white/10">
       <input id="streams-search" type="text" oninput="onStreamSearchInput()"
              placeholder="Search your channels for anything else - e.g. DWCS, Fight Pass"
              class="w-full bg-[#0f171e] border border-white/10 rounded px-3 py-1.5 text-xs
@@ -264,8 +459,111 @@
     return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
 
-  function playLink(streamUrl) {
+  // Where a click actually sends the stream. Two mechanisms, because the
+  // platforms have nothing in common: Windows gets the `sportio:` URI
+  // above, handled by a script the user registers once. Android has no
+  // equivalent - there is no per-user protocol registry to write to - but
+  // it has intent URIs, which name the target app inside the link itself
+  // and so need nothing installed but the player.
+  const PLAY_TARGET_KEY = 'sportio.playTarget';
+  const VLC_PACKAGE = 'org.videolan.vlc';
+  const VLC_STORE_URL = `https://play.google.com/store/apps/details?id=${VLC_PACKAGE}`;
+
+  const PLAY_TARGETS = {
+    desktop: {
+      label: 'Desktop helper',
+      hint: 'The sportio: link and script set up under Windows.',
+      note: 'Handed to your media player. If nothing opens, check Player setup.'
+    },
+    vlc: {
+      label: 'VLC for Android',
+      hint: 'Opens VLC directly. Nothing to install but VLC itself.',
+      note: 'Opening in VLC. If nothing happens, VLC may not be installed.'
+    },
+    choose: {
+      label: 'Ask Android',
+      hint: 'Android offers whichever players you have. Useful for MX Player, Just Player and the rest.',
+      note: 'Handed to Android. Pick a player when it asks.'
+    }
+  };
+
+  const isAndroid = () => /android/i.test(navigator.userAgent);
+
+  let playTarget = localStorage.getItem(PLAY_TARGET_KEY) || (isAndroid() ? 'vlc' : 'desktop');
+  if (!PLAY_TARGETS[playTarget]) playTarget = 'desktop';
+
+  // An Android intent: URI. VLC's manifest matches a VIEW intent that
+  // carries BOTH an http/https data URI and a video/* mime type. The
+  // scheme alone is not enough: its scheme-only filters cover rtsp, mms
+  // and friends, and its http filters want a recognisable file extension
+  // in the path - which an IPTV URL ending in /12345 does not have. So
+  // both are set, and every provider URL is covered rather than only the
+  // ones that happen to end in .ts or .m3u8.
+  //
+  // Deliberately no component=: VideoPlayerActivity declares no VIEW
+  // filter at all, so naming it directly fails to resolve. StartActivity
+  // is what takes these, and package= is enough to reach it.
+  function androidIntentLink(streamUrl, name, pkg) {
+    const split = /^([a-z][a-z0-9+.\-]*):\/\/(.+)$/i.exec(String(streamUrl || ''));
+    if (!split) return streamUrl;
+    const scheme = split[1].toLowerCase();
+    // ';' ends an intent parameter and '#' would open a second fragment,
+    // so either one appearing in the address would truncate the link -
+    // and an IPTV URL carries the account's password in its path, so it
+    // can contain anything at all. Percent-encoded they reach the player
+    // intact, which is the same problem base64 solves for the Windows
+    // side.
+    const rest = split[2].replace(/#/g, '%23').replace(/;/g, '%3B');
+
+    const params = [`scheme=${scheme}`, 'type=video/*'];
+    if (pkg) {
+      params.push(`package=${pkg}`);
+      // Without a fallback a click on a device that has no VLC does
+      // nothing at all, which is indistinguishable from a broken stream.
+      params.push(`S.browser_fallback_url=${encodeURIComponent(VLC_STORE_URL)}`);
+    }
+    // VLC shows this while the stream buffers, instead of the raw URL -
+    // which would otherwise put the account password on screen.
+    if (name) params.push(`S.title=${encodeURIComponent(name)}`);
+    return `intent://${rest}#Intent;${params.join(';')};end`;
+  }
+
+  function playLink(streamUrl, name) {
+    if (playTarget === 'vlc') return androidIntentLink(streamUrl, name, VLC_PACKAGE);
+    if (playTarget === 'choose') return androidIntentLink(streamUrl, name, '');
     return `${PROTOCOL}:${toBase64Url(streamUrl)}`;
+  }
+
+  function setPlayTarget(target) {
+    if (!PLAY_TARGETS[target]) return;
+    playTarget = target;
+    localStorage.setItem(PLAY_TARGET_KEY, target);
+    renderPlayTargets();
+    // Every href already on the page carries the old scheme, so they are
+    // all stale - redraw the three lists that hold them.
+    renderStreams();
+    renderSavedList();
+    renderSavedResults();
+  }
+
+  // The escape hatch. Intent links need a browser that implements them,
+  // and Firefox for Android does not - so on a phone every row also
+  // offers its address for pasting into the player by hand.
+  function copyStreamUrl(url) {
+    navigator.clipboard.writeText(url).then(
+      () => showToast('Address copied. Paste it into your player.'),
+      () => showToast('Could not copy.', true));
+  }
+
+  // Rendered on every playable row, hidden by CSS above every width the
+  // desktop page uses - so the desktop rows are exactly what they were.
+  function copyRowButton(url) {
+    return `<button onclick="copyStreamUrl('${escapeHtml(url)}')" title="Copy stream address"
+                    aria-label="Copy stream address"
+                    class="row-copy shrink-0 items-center justify-center w-9 h-9 rounded-lg
+                           text-[#e6e6e6]/40 active:bg-white/10 transition">
+              <i class="fa-regular fa-copy text-xs"></i>
+            </button>`;
   }
 
   // --- Setup files ---------------------------------------------------
@@ -414,10 +712,58 @@
     navigator.clipboard.writeText(text).then(() => showToast(msg), () => showToast('Could not copy.', true));
   }
 
+  // Which half of the setup page is showing. Preselected from the device
+  // rather than always landing on Windows: a phone opening this page to
+  // three PowerShell listings has to work out that none of it applies
+  // before it can find the part that does.
+  let setupPlatform = isAndroid() ? 'android' : 'windows';
+
+  const SETUP_PLATFORMS = [
+    { id: 'windows', label: 'Windows', icon: 'fa-brands fa-windows' },
+    { id: 'android', label: 'Android', icon: 'fa-brands fa-android' }
+  ];
+
+  function showSetupPlatform(id) {
+    setupPlatform = id;
+    document.getElementById('setup-windows').classList.toggle('hidden', id !== 'windows');
+    document.getElementById('setup-android').classList.toggle('hidden', id !== 'android');
+    document.getElementById('setup-platform-tabs').innerHTML = SETUP_PLATFORMS.map(p => `
+      <button onclick="showSetupPlatform('${p.id}')"
+              class="flex items-center gap-2 text-xs font-bold px-3.5 py-2 rounded-lg border transition ${p.id === id
+                ? 'border-[#3b8fc4] bg-[#3b8fc4] text-white'
+                : 'border-white/15 bg-[#1f2b36] text-[#e6e6e6]/60 hover:text-[#e6e6e6] hover:border-white/30'}">
+        <i class="${p.icon}"></i>${p.label}
+      </button>`).join('');
+    renderPlayTargets();
+  }
+
+  // The three hand-off mechanisms, as a picker. Not auto-detected and
+  // left at that: an Android tablet asking for the desktop site, or a
+  // phone whose owner wants the chooser rather than VLC every time, are
+  // both real - and a link that silently targets the wrong thing gives
+  // no clue why nothing opened.
+  function renderPlayTargets() {
+    const box = document.getElementById('play-target-picker');
+    if (!box) return;
+    box.innerHTML = Object.entries(PLAY_TARGETS).map(([id, target]) => {
+      const on = id === playTarget;
+      return `<button onclick="setPlayTarget('${id}')"
+                      class="w-full text-left flex items-start gap-3 px-3 py-2.5 rounded-lg border transition ${on
+                        ? 'border-[#3b8fc4] bg-[#3b8fc4]/10'
+                        : 'border-white/10 bg-[#1f2b36] hover:border-white/25'}">
+                <i class="fa-solid ${on ? 'fa-circle-dot text-[#5aa8d1]' : 'fa-circle text-[#e6e6e6]/20'} text-xs mt-0.5 shrink-0"></i>
+                <span class="min-w-0">
+                  <span class="block text-xs font-bold ${on ? 'text-[#e6e6e6]' : 'text-[#e6e6e6]/75'}">${escapeHtml(target.label)}</span>
+                  <span class="block text-[11px] text-[#e6e6e6]/45 leading-snug">${escapeHtml(target.hint)}</span>
+                </span>
+              </button>`;
+    }).join('');
+  }
+
   function toggleSetup() {
     const isSetup = !document.getElementById('setup').classList.contains('hidden');
     if (isSetup) { show('browse'); }
-    else { renderSetupFiles(); show('setup'); }
+    else { renderSetupFiles(); showSetupPlatform(setupPlatform); show('setup'); }
   }
 
   // --- Account -------------------------------------------------------
@@ -813,6 +1159,7 @@
     streamSearchNote = '';
     clearTimeout(streamSearchTimer);
     panel.classList.remove('hidden');
+    lockScroll();
 
     let meta = {}, streams = [];
     try {
@@ -846,12 +1193,12 @@
                 ${escapeHtml(s.name || '')} ${escapeHtml(s.title || '')}
               </div>`;
     }
-    return `<div class="flex items-center gap-2 px-1 rounded-lg hover:bg-white/5 transition">
+    return `<div class="stream-row flex items-center gap-2 px-1 rounded-lg hover:bg-white/5 transition">
               <input type="checkbox" ${streamSelection.has(s.url) ? 'checked' : ''}
                      onchange="toggleStreamSelection('${escapeHtml(s.url)}')"
                      title="Select for quality check"
                      class="shrink-0 ml-2 accent-[#3b8fc4] cursor-pointer">
-              <a href="${escapeHtml(playLink(s.url))}" onclick="notePlaying()"
+              <a href="${escapeHtml(playLink(s.url, s.name))}" onclick="notePlaying()"
                  class="flex-1 min-w-0 flex items-center gap-3 px-2 py-2.5">
                 <i class="fa-solid fa-play text-[10px] text-[#5aa8d1] shrink-0"></i>
                 <span class="flex-1 min-w-0">
@@ -863,6 +1210,7 @@
                 </span>
                 <i class="fa-solid fa-arrow-up-right-from-square text-[10px] text-[#e6e6e6]/25 shrink-0"></i>
               </a>
+              ${copyRowButton(s.url)}
             </div>`;
   }
 
@@ -1273,8 +1621,8 @@
       return;
     }
     box.innerHTML = savedChannels.map(c => `
-      <div class="flex items-center gap-3 bg-[#1f2b36] border border-white/10 rounded-lg px-3 py-2">
-        <a href="${escapeHtml(playLink(c.url))}" onclick="notePlaying()" class="flex-1 min-w-0 flex items-center gap-3">
+      <div class="stream-row flex items-center gap-3 bg-[#1f2b36] border border-white/10 rounded-lg px-3 py-2">
+        <a href="${escapeHtml(playLink(c.url, c.name))}" onclick="notePlaying()" class="flex-1 min-w-0 flex items-center gap-3">
           <i class="fa-solid fa-play text-[10px] text-[#5aa8d1] shrink-0"></i>
           <span class="flex-1 min-w-0">
             <span class="flex items-center gap-2">
@@ -1287,6 +1635,7 @@
             </span>
           </span>
         </a>
+        ${copyRowButton(c.url)}
         <button onclick="removeSavedChannel('${escapeHtml(c.url)}')" title="Remove"
                 class="text-xs px-1.5 py-1 rounded text-[#e56a6a]/70 hover:text-[#e56a6a] hover:bg-white/5 transition shrink-0">
           <i class="fa-solid fa-xmark"></i>
@@ -1295,13 +1644,56 @@
   }
 
   function notePlaying() {
-    // The browser cannot tell us whether mpv actually started, so this says
-    // what was attempted rather than claiming success.
-    showToast('Handed to mpv. If nothing opens, check Player setup.');
+    // The browser cannot tell us whether the player actually started, so
+    // this says what was attempted rather than claiming success. The
+    // wording follows the target, because "check Player setup" is wrong
+    // advice on Android - there is no script there to have got wrong.
+    showToast((PLAY_TARGETS[playTarget] || PLAY_TARGETS.desktop).note);
+  }
+
+  // ------------------------------------------------------------------
+  // Background scroll lock
+  // ------------------------------------------------------------------
+  //
+  // A fixed overlay does not stop the page underneath from scrolling, so
+  // dragging inside the picker took the grid behind it along - and on a
+  // phone, where the picker fills the screen, the effect is that closing
+  // it lands you somewhere you never navigated to.
+  //
+  // position:fixed rather than overflow:hidden on <body>: iOS Safari
+  // ignores the latter. It does mean saving and restoring the scroll
+  // position by hand, since fixing the body scrolls it to the top.
+  //
+  // Phone widths only. The same drift happens on a desktop, but a fix
+  // there would be a behaviour change to a page that was not asked to
+  // change - one line to widen if it turns out to be wanted.
+  const MOBILE_QUERY = '(max-width: 767px)';
+  let lockedScrollY = 0;
+
+  function lockScroll() {
+    if (!window.matchMedia(MOBILE_QUERY).matches) return;
+    if (document.body.dataset.scrollLocked) return;
+    lockedScrollY = window.scrollY;
+    document.body.dataset.scrollLocked = '1';
+    document.body.style.position = 'fixed';
+    document.body.style.top = `-${lockedScrollY}px`;
+    document.body.style.left = '0';
+    document.body.style.right = '0';
+  }
+
+  function unlockScroll() {
+    if (!document.body.dataset.scrollLocked) return;
+    delete document.body.dataset.scrollLocked;
+    document.body.style.position = '';
+    document.body.style.top = '';
+    document.body.style.left = '';
+    document.body.style.right = '';
+    window.scrollTo(0, lockedScrollY);
   }
 
   function closeStreams() {
     document.getElementById('streams').classList.add('hidden');
+    unlockScroll();
   }
 
   function escapeHtml(str) {
