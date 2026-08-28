@@ -618,10 +618,16 @@
       // here. The server decides what counts as today, since only it
       // knows the account's timezone; a catalog that sends no verdict is
       // treated as today, which is right for the today-only leagues.
+      //
+      // Pinned cards are dropped for a different reason. They are not
+      // events at all - NFL RedZone leads the NFL row every week whether
+      // or not anything is on - so they would sit at the top of Home
+      // permanently, in a page whose entire claim is that everything on it
+      // is happening now. They stay in their own league's tab.
       return {
         failed: false,
         metas: metas
-          .filter(m => m.isToday !== false)
+          .filter(m => !m.pinned && m.isToday !== false)
           .map(m => ({ ...m, league }))
       };
     }));
@@ -667,6 +673,9 @@
     if (conferences.length < 2) { box.classList.add('hidden'); box.innerHTML = ''; return; }
 
     const selected = conferenceChoice[activeCatalog] || '';
+    // Games only. A pinned card belongs to no conference and is shown
+    // under every chip, so counting it would overstate All by one.
+    const total = catalogMetas.filter(m => !m.pinned).length;
     const chip = (id, label, count, on) =>
       `<button onclick="chooseConference('${id}')"
                class="text-[11px] font-semibold px-2.5 py-1 rounded-full border transition ${on
@@ -677,7 +686,7 @@
     box.classList.remove('hidden');
     box.innerHTML = `<div class="flex flex-wrap items-center gap-1.5">
         <span class="text-[10px] uppercase tracking-wider text-[#e6e6e6]/35 mr-1">Conference</span>
-        ${chip('', 'All', catalogMetas.length, !selected)}
+        ${chip('', 'All', total, !selected)}
         ${conferences.map(c => chip(c.id, c.name, c.count, selected === c.id)).join('')}
       </div>`;
   }
@@ -691,18 +700,26 @@
 
   function applyConferenceFilter() {
     const selected = conferenceChoice[activeCatalog] || '';
-    const shown = selected
-      ? catalogMetas.filter(m => (m.conferences || []).some(c => c.id === selected))
-      : catalogMetas;
+
+    // Pinned cards are held apart from the filtering entirely. They are
+    // not games and belong to no conference, so they neither narrow down
+    // nor get narrowed away - they lead the row whatever is selected, and
+    // they stay there in a week with no games at all, which is the whole
+    // point of pinning one.
+    const pinned = catalogMetas.filter(m => m.pinned);
+    const games = catalogMetas.filter(m => !m.pinned);
+    const shownGames = selected
+      ? games.filter(m => (m.conferences || []).some(c => c.id === selected))
+      : games;
 
     renderConferenceFilter();
-    if (shown.length === 0) {
-      document.getElementById('grid').innerHTML = '';
-      showEmpty('No games for that conference in this round.');
-      return;
-    }
-    showEmpty('');
-    renderGameGrid(shown);
+    // Emptiness is a statement about the games, so it is measured on them
+    // - but the message accompanies the pinned cards rather than
+    // replacing them.
+    showEmpty(shownGames.length > 0
+      ? ''
+      : (selected ? 'No games for that conference in this round.' : 'Nothing scheduled.'));
+    renderGameGrid([...pinned, ...shownGames]);
   }
 
   async function selectCatalog(id) {

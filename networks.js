@@ -51,6 +51,22 @@ const NETWORKS = [
   { key: 'SECN',    label: 'SEC Network',        kind: 'cable', aliases: ['SEC Network', 'SECN'] },
   { key: 'ACCN',    label: 'ACC Network',        kind: 'cable', aliases: ['ACC Network', 'ACCN'] },
   { key: 'NFLN',    label: 'NFL Network',        kind: 'cable', aliases: ['NFL Network', 'NFL Net'] },
+
+  // NFL RedZone. A cable network like the rest, with one extra property:
+  // `pinnedTo` (see getPinnedNetworksForSport) puts it at the head of a
+  // league's own catalog whether or not a game is on.
+  //
+  // It needs that because whip-around coverage has no ESPN event behind
+  // it - RedZone is never any single game's broadcaster, so nothing in
+  // the scoreboard feed will ever resolve to it and no card would exist
+  // to click on a Sunday afternoon, which is precisely when it is the
+  // most useful thing in the row.
+  //
+  // The aliases cover both spellings because providers use both; the
+  // normalized form (see normalizeNetworkName) collapses the spacing, so
+  // "NFL REDZONE" and "NFL Red Zone" are already the same key.
+  { key: 'REDZONE', label: 'NFL RedZone', kind: 'cable', pinnedTo: 'NFL',
+    aliases: ['NFL RedZone', 'NFL Red Zone', 'RedZone', 'Red Zone', 'NFL RZ'] },
   { key: 'TNT',     label: 'TNT',         kind: 'cable', aliases: ['TNT'] },
   { key: 'TRUTV',   label: 'truTV',       kind: 'cable', aliases: ['truTV', 'TruTV'] },
 
@@ -119,6 +135,28 @@ function getEventNetworkForSport(sportKey) {
 }
 
 const NETWORK_BY_KEY = new Map(NETWORKS.map(n => [n.key, n]));
+
+// The networks pinned to a sport's own catalog, in registry order.
+//
+// A pinned network gets a permanent card at the head of that league's
+// row, ahead of the games and independent of them. Unlike every other
+// entry in a league catalog it is not an event: there is no date, no
+// score and nothing that makes it come or go with the schedule, which is
+// the whole point - RedZone is worth one click on any Sunday, and
+// hanging it off a game would mean it disappeared in the weeks it is
+// most wanted.
+//
+// Deliberately keyed off the sport rather than a list of ids here, so a
+// second pinned network later (a league's own 24/7 channel, say) is one
+// property on its registry entry and nothing else.
+function getPinnedNetworksForSport(sportKey) {
+  const sport = String(sportKey || '').toUpperCase();
+  return NETWORKS.filter(n => n.pinnedTo === sport);
+}
+
+function isPinnedNetwork(networkKey) {
+  return !!NETWORK_BY_KEY.get(networkKey)?.pinnedTo;
+}
 
 function isStreamingOnlyName(name) {
   return STREAMING_ONLY.has(normalizeNetworkName(name));
@@ -1366,6 +1404,8 @@ module.exports = {
   needsTiers,
   isDeadChannel,
   getEventNetworkForSport,
+  getPinnedNetworksForSport,
+  isPinnedNetwork,
   getLinkPolicy,
   dedupeByUrl,
   buildStreamList,

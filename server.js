@@ -2640,9 +2640,9 @@ app.get('/api/networks', (req, res) => {
 });
 
 // Suggested channels for every network at once. One pass over the
-// playlist serves all 16 networks, which is far cheaper than 16 separate
-// round trips and means the dashboard can populate the whole section in
-// a single request.
+// playlist serves the whole registry, which is far cheaper than one round
+// trip per network and means the dashboard can populate the entire
+// section in a single request.
 app.post('/api/networks/suggest', async (req, res) => {
   const auth = await authenticateForChannels(req, res);
   if (!auth) return;
@@ -3436,11 +3436,37 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
     state: game.state || ''
   }));
 
+  // Pinned network cards lead the row, ahead of every game and whatever
+  // the week holds - that is what "pinned" means (see
+  // getPinnedNetworksForSport). Today this is NFL RedZone.
+  //
+  // `pinned` is on the meta rather than inferred from the id because the
+  // watch portal has to act on it: Home pools every league's catalog into
+  // one "what is on right now" page, and a card that is deliberately not
+  // an event has no place there. It stays in its own league's tab, which
+  // is where someone is already looking for it.
+  const pinnedMetas = networks.getPinnedNetworksForSport(sport).map(network => ({
+    id: `net:${network.key}`,
+    type: 'sports',
+    name: network.label,
+    ...networkArtUrls(hostUrl, network.key),
+    pinned: true,
+    // Present so the card carries the same fields as a game and no
+    // consumer has to special-case a missing one. There is no kickoff to
+    // report, so they are deliberately empty rather than invented.
+    releaseInfo: '',
+    whenLabel: '',
+    isToday: true,
+    conferences: [],
+    startsAt: '',
+    state: ''
+  }));
+
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
-  res.json({ metas });
+  res.json({ metas: [...pinnedMetas, ...metas] });
 });
 
 app.get('/user/:uuid/meta/sports/:id.json', async (req, res) => {
@@ -3454,8 +3480,17 @@ app.get('/user/:uuid/meta/sports/:id.json', async (req, res) => {
   // must be handled before the branches below try to read idVal.
   if (prefix === 'net') {
     const network = networks.NETWORKS.find(n => n.key === sport);
+    if (!network) return res.json({ meta: {} });
+
+    // Empty means stale, EXCEPT for a pinned card. The TV Networks
+    // catalog only ever lists networks that have links, so an id for one
+    // that has none is a client holding an old catalog and there is
+    // nothing to show it. A pinned card is in its league's row whether or
+    // not channels have been added yet, so refusing here would open it
+    // onto a panel with no name on it - which reads as broken rather than
+    // as unconfigured, and the stream route already says which it is.
     const links = (user.networkLinks || {})[sport] || [];
-    if (!network || links.length === 0) return res.json({ meta: {} });
+    if (links.length === 0 && !networks.isPinnedNetwork(sport)) return res.json({ meta: {} });
 
     return res.json({
       meta: {
@@ -3530,11 +3565,25 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     const networkKey = sport;
     if (!networks.NETWORKS.some(n => n.key === networkKey)) return res.json({ streams: [] });
 
+    // A cold playlist cache used to return an empty list here. That was
+    // fine while every network card came from the TV Networks catalog,
+    // which only lists configured networks and is browsed after setup -
+    // but a pinned card sits in its league's row permanently and can be
+    // opened moments after a restart, where a blank panel reads as a
+    // broken card rather than as a cache that has not warmed up yet.
     let netSource = null;
     if (user.connectionType === 'm3u') {
-      if (!user.m3u || !user.m3u.playlistUrl) return res.json({ streams: [] });
-      netSource = m3u.getCachedM3USource(user.m3u.playlistUrl);
-      if (!netSource) return res.json({ streams: [] });
+      const playlistUrl = user.m3u && user.m3u.playlistUrl;
+      netSource = playlistUrl ? m3u.getCachedM3USource(playlistUrl) : null;
+      if (!netSource) {
+        return res.json({ streams: [{
+          name: '\u26A0\uFE0F Playlist not loaded',
+          title: playlistUrl
+            ? 'Your playlist is still being fetched - try again in a moment.'
+            : 'No playlist configured - add one in the Sportio dashboard.',
+          url: ''
+        }] });
+      }
     }
 
     const { resolved, problems } = networks.resolveNetworkLinks(
@@ -3550,7 +3599,29 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
       url: link.url
     }));
 
-    console.log(`[Stream] NETWORK ${networkKey} links=${netStreams.length} missing=${problems.length}`);
+    // Same non-playable informational entry the game route uses. A
+    // pinned card is always in the row, so it can be opened before any
+    // channel has been added to it, and an empty list on its own reads as
+    // a failure rather than as something still to set up.
+    //
+    // The two empty cases are genuinely different and get different
+    // wording: nothing was ever configured, or what was configured has
+    // gone missing from the playlist. Only the second is a problem.
+    if (netStreams.length === 0) {
+      netStreams.push(problems.length > 0
+        ? {
+            name: '\u26A0\uFE0F Broken links',
+            title: `All ${problems.length} saved ${networks.getNetworkLabel(networkKey)} channel(s) are missing from your playlist - check the dashboard.`,
+            url: ''
+          }
+        : {
+            name: '\u26A0\uFE0F Not configured',
+            title: `No ${networks.getNetworkLabel(networkKey)} channels saved yet - add one in the Sportio dashboard.`,
+            url: ''
+          });
+    }
+
+    console.log(`[Stream] NETWORK ${networkKey} links=${resolved.length} missing=${problems.length}`);
     res.setHeader('Content-Type', 'application/json');
     return res.json({ streams: netStreams });
   }
