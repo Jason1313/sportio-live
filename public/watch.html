@@ -475,7 +475,15 @@
       const res = await fetch(`/user/${encodeURIComponent(uuid)}/manifest.json`);
       if (!res.ok) throw new Error('not found');
       const manifest = await res.json();
-      catalogs = manifest.catalogs || [];
+      // The manifest names a league row "NFL Live Games", which is right
+      // in Stremio - the row sits among other addons' rows and has to say
+      // what it is. Here every tab is a league already, so the suffix is
+      // three words of nothing repeated across the whole bar. Stripped
+      // once, at the edge, so the rest of this page just uses c.name.
+      catalogs = (manifest.catalogs || []).map(c => ({
+        ...c,
+        name: String(c.name || '').replace(/\s*Live Games$/i, '')
+      }));
     } catch (err) {
       forgetAccount('That UUID was not recognised by the server.');
       return;
@@ -631,7 +639,7 @@
       if (metas === null) return { failed: true, metas: [] };
       // The league name doubles as the badge on each card, so a game is
       // attributable at a glance when three leagues are mixed together.
-      const league = String(c.name || '').replace(/\s*Live Games$/i, '');
+      const league = c.name || '';
       // Today only. A league catalog may now run months ahead - MMA does
       // - and Home answers "what is on", so a November card has no place
       // here. The server decides what counts as today, since only it
