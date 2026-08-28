@@ -1269,9 +1269,18 @@ function suggestChannelsForNetwork(networkKey, channels, options = {}) {
   const network = NETWORK_BY_KEY.get(networkKey);
   if (!network) return [];
 
+  // The operator's own ordering, recovered from the position of each id
+  // in the defaults list. A Set iterates in insertion order and the
+  // defaults arrive as a JSON array built from the admin's links in the
+  // order they were arranged, so that order survives the whole trip
+  // intact - it just was not being read.
+  const preferredRank = new Map();
+  for (const id of preferredStreamIds) preferredRank.set(id, preferredRank.size);
+
   const scored = [];
   for (const channel of channels || []) {
-    const preferred = preferredStreamIds.has(streamIdFromUrl(channel.streamUrl));
+    const streamId = streamIdFromUrl(channel.streamUrl);
+    const preferred = preferredStreamIds.has(streamId);
     const score = scoreChannelForNetwork(channel, network, preferredStreamIds);
     if (score === null) continue;
     // The floor asks whether a match is worth proposing. That question is
@@ -1281,7 +1290,7 @@ function suggestChannelsForNetwork(networkKey, channels, options = {}) {
     // lands under 100 even with the bonus, and would have been dropped
     // for the same invisible reason the alias gate dropped the others.
     if (!preferred && score < MIN_SUGGESTION_SCORE) continue;
-    scored.push({ channel, score, preferred });
+    scored.push({ channel, score, preferred, streamId });
   }
 
   scored.sort((a, b) => b.score - a.score || a.channel.name.localeCompare(b.channel.name));
@@ -1302,7 +1311,14 @@ function suggestChannelsForNetwork(networkKey, channels, options = {}) {
   // MAX_LINKS_PER_NETWORK is the real ceiling and still applies - it is
   // what storage will accept, so proposing more than that would offer
   // links that could never be saved.
-  const preferredEntries = scored.filter(s => s.preferred);
+  // Guesses stay in score order - ranking is all this function knows
+  // about them. Defaults are put back into the operator's order instead,
+  // because for them the ranking has already been done by hand and slot 1
+  // is a decision, not a coincidence: a network's first link is the first
+  // stream offered, so re-sorting them by score quietly promoted a
+  // different market to primary than the one that was chosen.
+  const preferredEntries = scored.filter(s => s.preferred)
+    .sort((a, b) => preferredRank.get(a.streamId) - preferredRank.get(b.streamId));
   const guessEntries = scored.filter(s => !s.preferred);
   const chosen = [
     ...preferredEntries,
