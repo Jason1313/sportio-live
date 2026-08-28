@@ -1176,18 +1176,40 @@ function streamIdFromUrl(url) {
 const PREFERRED_STREAM_BONUS = 200;
 
 function scoreChannelForNetwork(channel, network, preferredStreamIds) {
+  // Established before the gates below, because it overrides them.
+  //
+  // An instance default is not a hint about what this channel might be -
+  // it is an operator having pointed at this exact stream and said it IS
+  // this network. Everything after this line is inference from a name,
+  // and inference does not get to overrule a stated fact.
+  //
+  // This was the whole reason ten saved defaults produced five. The
+  // affiliates that survived were named "FOX [Birmingham]", which cleans
+  // up to exactly "fox"; the ones that vanished were named
+  // "US: FOX 10 (KSAZ) PHOENIX HD", which cleans up to "fox10phoenix" -
+  // stripChannelDecorations removes the brackets and the "HD" but keeps
+  // the market and the channel number, as it must, or "FOX 10" and
+  // "FOX Sports 1" would collapse into the same thing. Their tvg-ids are
+  // affiliate call signs (ksaz.us, waga.us) rather than network names, so
+  // the id path missed too, and the alias gate discarded them before the
+  // preference bonus below ever applied. Local affiliates are exactly
+  // what an operator has to pin by hand, so they were also exactly the
+  // ones being thrown away.
+  const preferred = !!preferredStreamIds && preferredStreamIds.has(streamIdFromUrl(channel.streamUrl));
+
   const aliases = new Set(network.aliases.map(normalizeNetworkName));
   const coreName = normalizeNetworkName(stripChannelDecorations(channel.name));
   const idCore = normalizeTvgId(channel.id);
 
   const nameHit = aliases.has(coreName);
   const idHit = aliases.has(idCore);
-  if (!nameHit && !idHit) return null;
+  if (!nameHit && !idHit && !preferred) return null;
 
-  // Dead channels are never suggested, however well they otherwise match.
-  if (isDeadChannel(channel.categories)) return null;
-
-  const preferred = !!preferredStreamIds && preferredStreamIds.has(streamIdFromUrl(channel.streamUrl));
+  // Dead channels are never suggested, however well they otherwise match
+  // - unless pinned. DEAD_GROUP_HINTS already says these stay reachable
+  // so they "can be added by hand"; a default IS that, done once for
+  // every account instead of one at a time.
+  if (!preferred && isDeadChannel(channel.categories)) return null;
 
   let score = 0;
   if (nameHit) score += 100;
@@ -1249,10 +1271,17 @@ function suggestChannelsForNetwork(networkKey, channels, options = {}) {
 
   const scored = [];
   for (const channel of channels || []) {
+    const preferred = preferredStreamIds.has(streamIdFromUrl(channel.streamUrl));
     const score = scoreChannelForNetwork(channel, network, preferredStreamIds);
     if (score === null) continue;
-    if (score < MIN_SUGGESTION_SCORE) continue;
-    scored.push({ channel, score, preferred: preferredStreamIds.has(streamIdFromUrl(channel.streamUrl)) });
+    // The floor asks whether a match is worth proposing. That question is
+    // already answered for a pinned channel - the operator proposed it.
+    // Leaving it to the +200 bonus to carry a pin over the floor was not
+    // enough: a Spanish-language Canadian affiliate in a penalised group
+    // lands under 100 even with the bonus, and would have been dropped
+    // for the same invisible reason the alias gate dropped the others.
+    if (!preferred && score < MIN_SUGGESTION_SCORE) continue;
+    scored.push({ channel, score, preferred });
   }
 
   scored.sort((a, b) => b.score - a.score || a.channel.name.localeCompare(b.channel.name));
