@@ -238,12 +238,16 @@ function resolveNetworkFromCompetition(competition) {
 
 const MAX_LINKS_PER_NETWORK = 10;
 
-// Auto-fill deliberately stops well short of the cap. The extra slots
-// exist so specific feeds can be added by hand - a particular affiliate,
-// a 1080p60 variant found by probing - not so the picker can fill ten
-// guesses. Filling all ten automatically would also silently defeat
-// COMBINE_AT_OR_BELOW below, since no network would ever sit at three or
-// fewer links.
+// A cap on GUESSES, specifically. Auto-fill deliberately stops well
+// short of MAX_LINKS_PER_NETWORK: the extra slots exist so specific feeds
+// can be added by hand - a particular affiliate, a 1080p60 variant found
+// by probing - not so the picker can fill ten guesses. Filling all ten
+// automatically would also silently defeat COMBINE_AT_OR_BELOW below,
+// since no network would ever sit at three or fewer links.
+//
+// An instance default is not a guess and this ceiling does not apply to
+// it - the operator picked those by hand, which is the very thing the
+// spare slots were being reserved for. See suggestChannelsForNetwork.
 const MAX_SUGGESTIONS = 5;
 
 // At or below this many links, a 'replace' sport ALSO shows tier results
@@ -1235,7 +1239,7 @@ const MIN_SUGGESTION_SCORE = 100;
 // and nothing in the playlist can reveal that. So this proposes, and the
 // user disposes.
 function suggestChannelsForNetwork(networkKey, channels, options = {}) {
-  const limit = options.limit || MAX_SUGGESTIONS;
+  const guessLimit = options.limit || MAX_SUGGESTIONS;
   const preferredStreamIds = options.preferredStreamIds instanceof Set
     ? options.preferredStreamIds
     : new Set(options.preferredStreamIds || []);
@@ -1253,7 +1257,30 @@ function suggestChannelsForNetwork(networkKey, channels, options = {}) {
 
   scored.sort((a, b) => b.score - a.score || a.channel.name.localeCompare(b.channel.name));
 
-  return scored.slice(0, limit).map(({ channel, score, preferred }) => ({
+  // Partitioned rather than sliced off the front, because MAX_SUGGESTIONS
+  // caps guesses and an instance default is not one. Slicing the combined
+  // list truncated a ten-channel default set to five, and since the
+  // dashboard can only fill from what this returns, "Use All Suggestions"
+  // on a new account silently applied half of what the operator saved -
+  // with no indication that the rest existed.
+  //
+  // Not fixed by simply widening the slice and trusting the +200 bonus to
+  // float every default to the top: that holds only while the bonus
+  // outruns every base score, which is a relationship between two
+  // constants that have each been tuned before. Keeping the two sets
+  // apart states the rule instead of depending on the arithmetic.
+  //
+  // MAX_LINKS_PER_NETWORK is the real ceiling and still applies - it is
+  // what storage will accept, so proposing more than that would offer
+  // links that could never be saved.
+  const preferredEntries = scored.filter(s => s.preferred);
+  const guessEntries = scored.filter(s => !s.preferred);
+  const chosen = [
+    ...preferredEntries,
+    ...guessEntries.slice(0, Math.max(0, guessLimit - preferredEntries.length)),
+  ].slice(0, MAX_LINKS_PER_NETWORK);
+
+  return chosen.map(({ channel, score, preferred }) => ({
     ...makeLinkEntry({
       url: channel.streamUrl,
       tvgId: channel.id,
