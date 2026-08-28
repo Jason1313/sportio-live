@@ -553,6 +553,7 @@
         ${m.league ? `<span class="block text-[10px] uppercase tracking-wider text-[#5aa8d1] mt-2">${escapeHtml(m.league)}</span>` : ''}
         <span class="card-title block text-xs ${m.league ? 'mt-0.5' : 'mt-2'} leading-snug">${escapeHtml(m.name || '')}</span>
         ${whenBadge(m)}
+        ${scoreBadge(m)}
       </button>`).join('');
   }
 
@@ -569,6 +570,24 @@
     const today = meta.isToday !== false;
     const text = today ? `Today &middot; ${escapeHtml(when)}` : escapeHtml(when);
     return `<span class="block text-[10px] mt-0.5 ${today ? 'text-[#7fc98a] font-semibold' : 'text-[#e6e6e6]/45'}">${text}</span>`;
+  }
+
+  // The final score, under the date. Only ever present once a game is
+  // over - the server sends '' for anything still to come or in progress,
+  // because a score served from a ten-minute cache would be presented as
+  // live while being nothing of the sort.
+  //
+  // Deliberately a third line rather than folded into the date badge: a
+  // finished game is the one case where the score is what someone is
+  // looking at the card for, and it should not have to share a line with
+  // the kickoff time it has made irrelevant.
+  function scoreBadge(meta) {
+    const score = meta && meta.finalScore;
+    if (!score) return '';
+    return `<span class="block text-[10px] mt-0.5 text-[#e6e6e6]/70 font-semibold">
+              <span class="text-[#e6e6e6]/35 uppercase tracking-wider font-bold">Final</span>
+              ${escapeHtml(score)}
+            </span>`;
   }
 
   // Nearest-first, the same ordering the server applies within a league:

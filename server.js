@@ -1531,6 +1531,39 @@ function conferencesForEvent(competition) {
   return [...seen.values()];
 }
 
+// A team's position in the poll, or null when it has none.
+//
+// ESPN reports unranked as curatedRank.current === 99 - a sentinel, not a
+// 99th place. Every NFL competitor carries it (confirmed live across a
+// full slate), so a truthiness check here would put "#99" beside every
+// professional team in the app. The upper bound is 25 because that is how
+// far the AP and CFP polls go; anything else is not a ranking.
+//
+// Written generically rather than as a college-football special case
+// precisely because of that sentinel: a league without polls reports 99
+// for everyone and so opts itself out, which means no sport is named here
+// and there is nothing to keep in sync when a league is added.
+function curatedRankOf(competitor) {
+  const rank = competitor?.curatedRank?.current;
+  return Number.isFinite(rank) && rank >= 1 && rank <= 25 ? rank : null;
+}
+
+function withRank(teamName, rank) {
+  return rank ? `#${rank} ${teamName}` : teamName;
+}
+
+// A competitor's score as a number, or null when there isn't one yet.
+//
+// ESPN sends scores as strings ("34"), and an empty string before a game
+// has started. Null rather than 0 is the whole point: a real 0-0 final
+// happens, and a cast would make it indistinguishable from a game nobody
+// has played.
+function parseTeamScore(value) {
+  if (value === null || value === undefined || String(value).trim() === '') return null;
+  const score = Number(value);
+  return Number.isFinite(score) ? score : null;
+}
+
 // How long after kickoff a game is assumed finished, when ESPN has not
 // said so itself. Only a fallback: `state` is authoritative and present
 // on everything ESPN returns. Four hours comfortably covers a football
@@ -1872,6 +1905,38 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
       const awayWinLoss = away.records?.[0]?.summary || '0-0';
       const statusDetail = event.status?.type?.detail || 'Scheduled';
 
+      // The matchup name, with poll positions where they exist.
+      //
+      // Rebuilt from the competitors ONLY when a rank actually applies, so
+      // every unranked game keeps ESPN's own string untouched. That is
+      // safe to do: across 113 sampled NFL and college games - regular
+      // season and bowls, neutral sites included, which ESPN still writes
+      // with "at" rather than "vs" - event.name was exactly
+      // "{away displayName} at {home displayName}" every time. The rebuilt
+      // form is that same sentence with the ranks added.
+      const homeRank = curatedRankOf(home);
+      const awayRank = curatedRankOf(away);
+      const displayName = (homeRank || awayRank)
+        ? `${withRank(awayFull, awayRank)} at ${withRank(homeFull, homeRank)}`
+        : (event.name || `${awayFull} vs ${homeFull}`);
+
+      // The final score, away team first so it reads in the same order as
+      // the name above it.
+      //
+      // FINAL ONLY, deliberately. The score of a game in progress is right
+      // there in the same payload, but it would be served from a cache up
+      // to WEEK_EVENTS_CACHE_MS old - and a ten-minute-stale score
+      // presented as the live one is worse than showing no score at all.
+      //
+      // ESPN's own `completed` flag decides, not the 'post' state: state
+      // turns over slightly ahead of the final whistle on some feeds,
+      // while `completed` is the league's verdict that the game is done.
+      const homeScore = parseTeamScore(home.score);
+      const awayScore = parseTeamScore(away.score);
+      const finalScore = (event.status?.type?.completed === true && homeScore !== null && awayScore !== null)
+        ? `${awayAbbr || awayNick} ${awayScore}, ${homeAbbr || homeNick} ${homeScore}`
+        : '';
+
       const venueName = competition.venue?.fullName || 'the arena';
 
       let formattedTime = 'TBD';
@@ -1922,7 +1987,17 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
         line3 += ` ${leaderLines.join('; ')}.`;
       }
 
-      const description = `${line1}\n${line2}\n\n${line3}`;
+      // The final score gets its own line between the matchup and the
+      // prose, where someone looking for it does not have to read a
+      // sentence to find it. Dropped entirely before a game is over, which
+      // leaves the description exactly as it was.
+      const description = [
+        line1,
+        line2,
+        ...(finalScore ? [`FINAL    ${finalScore}`] : []),
+        '',
+        line3
+      ].join('\n');
 
       // The same two fields MMA produces, so the watch portal can label
       // every card the same way regardless of sport - which is the whole
@@ -1934,7 +2009,7 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
 
       return {
         id: String(event.id),
-        name: event.name || `${awayTeam.displayName || 'Away'} vs ${homeTeam.displayName || 'Home'}`,
+        name: displayName,
         homeTeam: homeTeam.displayName || '',
         awayTeam: awayTeam.displayName || '',
         // Just the nickname (e.g. "Suns"), not the full "Phoenix Suns" -
@@ -1951,6 +2026,11 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
         logo,
         description,
         status: statusDetail,
+        // Pre-formatted rather than sent as two numbers, because the
+        // abbreviation-to-nickname fallback belongs with the data that
+        // needs it - not repeated in every client that renders a card.
+        // '' means "not over yet", which is what the watch portal keys off.
+        finalScore,
         // ESPN's own verdict on whether a game is upcoming, on now, or
         // over: 'pre', 'in' or 'post'. Used for ordering.
         state: event.status?.type?.state || '',
@@ -3428,6 +3508,7 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
     // on the server.
     releaseInfo: game.whenLabel || '',
     whenLabel: game.whenLabel || '',
+    finalScore: game.finalScore || '',
     isToday: game.isToday !== false,
     conferences: game.conferences || [],
     // Home pools several leagues and re-sorts them into one list, which
