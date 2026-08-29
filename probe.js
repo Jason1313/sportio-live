@@ -26,16 +26,35 @@ const FFPROBE_BIN = process.env.FFPROBE_PATH || 'ffprobe';
 // the connection for PROBE_SAMPLE_SECONDS on purpose, and the old ceiling
 // left almost no room for connect time on top of that - a healthy but
 // slow-to-start stream would have been reported as dead.
-const PROBE_TIMEOUT_MS = 25000;
+const PROBE_TIMEOUT_MS = 45000;
 
-// How much of the stream to actually read. Bitrate cannot be taken from
-// metadata on a live feed - see measureVideoBitrate - so it has to be
-// counted off the wire, and this is the window it is counted over. Long
-// enough to average across a GOP or two (a keyframe is far larger than
-// the frames after it, so a one-second sample reads high or low depending
-// purely on where it landed), short enough to keep a 20-channel check
-// inside a few minutes.
-const PROBE_SAMPLE_SECONDS = 8;
+// How much of the stream to actually read.
+//
+// Bitrate cannot be taken from metadata on a live feed - see
+// measureVideoBitrate - so it is counted off the wire, and this is the
+// window it is counted over.
+//
+// Twenty seconds, up from eight. Eight was not wrong so much as too
+// short to be repeatable: measured six times on one channel it returned
+// 3.3, 4.5, 6.5, 7.1, 4.3 and 4.9 Mbps. That is not the stream changing,
+// it is a variable-bitrate encoder being asked what it weighs over a
+// window narrow enough for one crowd shot or one static studio segment
+// to dominate the answer. Sport swings hard between the two. A longer
+// window averages across enough of both for the number to settle, and
+// the sample is reported alongside it so a reading taken over less can
+// be recognised as one.
+const PROBE_SAMPLE_SECONDS = 20;
+
+// Discarded from the front of every sample. The opening of a live
+// connection is the least typical part of it: the first keyframe lands
+// there, and a keyframe is several times the size of the frames after
+// it, so a window that starts on one reads high.
+const BITRATE_WARMUP_SECONDS = 2;
+
+// Below this, the numbers still get reported but are flagged as taken
+// over too little to trust - a stream that yielded three seconds before
+// stalling has been measured, just not well.
+const MIN_CONFIDENT_SAMPLE_SECONDS = 6;
 
 // Minimum gap between two probes that actually contact the provider.
 // Enforced here rather than trusting the caller, because the cost of
@@ -210,9 +229,16 @@ const DEFAULT_REFERENCE_BPP = 0.070;
 // ladders show it plainly: they give 1080p roughly 1.8x the bitrate of
 // 720p, not the 2.25x the pixel count alone would demand. These factors
 // are that ratio, with the table calibrated at 720p.
+// Tuned so the crossover lands at roughly EQUAL ABSOLUTE BITRATE: give
+// a 1080p60 and a 720p60 feed the same Mbps and the 1080p wins, which is
+// the ordinary case; the 720p only takes it when it has meaningfully
+// more to spend. An earlier set demanded 1.85x for 1080p and produced
+// the opposite - a 5.4 Mbps 720p scoring 90 against the same bitrate at
+// 1080p scoring 69, which is not a defensible reading of those two
+// streams. These sit nearer 1.5x.
 const RESOLUTION_BPP_FACTORS = [
-  [2160, 0.60], [1440, 0.72], [1080, 0.82], [900, 0.90],
-  [720, 1.00], [576, 1.10], [480, 1.18], [0, 1.30],
+  [2160, 0.46], [1440, 0.56], [1080, 0.66], [900, 0.80],
+  [720, 1.00], [576, 1.15], [480, 1.25], [0, 1.40],
 ];
 
 function referenceBppFor(codec, height) {
@@ -281,11 +307,11 @@ function adequacy(ratio) {
 // against real readings from a live provider rather than round numbers:
 // Okay and below is where a feed starts visibly costing you something.
 const QUALITY_TIERS = [
-  [92, 'excellent'],
-  [82, 'great'],
-  [70, 'good'],
-  [55, 'okay'],
-  [38, 'poor'],
+  [100, 'excellent'],
+  [87, 'great'],
+  [74, 'good'],
+  [62, 'okay'],
+  [40, 'poor'],
   [0, 'bad'],
 ];
 
@@ -405,38 +431,77 @@ function scoreQualityLabel(label) {
 // picture, and folding it in would flatter a stream with 5.1 audio into
 // looking like it had a better image.
 function measureVideoBitrate(packets, videoIndex, fps) {
-  const videoPackets = packets.filter(p =>
-    Number(p.stream_index) === Number(videoIndex) && Number(p.size) > 0);
+  const videoPackets = packets
+    .filter(p => Number(p.stream_index) === Number(videoIndex) && Number(p.size) > 0)
+    .map(p => ({ size: Number(p.size), time: Number(p.dts_time) }));
   // Too few to average anything meaningful over - a handful of packets is
   // as likely to be one keyframe as a representative sample.
   if (videoPackets.length < 10) return null;
 
+  const timed = videoPackets.filter(p => Number.isFinite(p.time));
+
+  // No usable timestamps at all. One video packet is one frame closely
+  // enough to fall back on, but the result is not corroborated by
+  // anything, so it says so.
+  if (timed.length < 10) {
+    if (!fps) return null;
+    const seconds = videoPackets.length / fps;
+    const bytes = videoPackets.reduce((n, p) => n + p.size, 0);
+    return {
+      bitrate: Math.round((bytes * 8) / seconds),
+      sampleSeconds: Math.round(seconds * 10) / 10,
+      variation: null,
+      confident: false,
+    };
+  }
+
+  const opened = timed.reduce((min, p) => Math.min(min, p.time), Infinity);
+  const afterWarmup = timed.filter(p => p.time >= opened + BITRATE_WARMUP_SECONDS);
+  // Only skip the warm-up if there is enough left to be worth measuring;
+  // on a short sample the opening is all there is.
+  const sample = afterWarmup.length >= 10 ? afterWarmup : timed;
+
   let bytes = 0;
-  let earliest = Infinity;
-  let latest = -Infinity;
-  for (const packet of videoPackets) {
-    bytes += Number(packet.size);
-    const time = Number(packet.dts_time);
-    if (Number.isFinite(time)) {
-      if (time < earliest) earliest = time;
-      if (time > latest) latest = time;
-    }
+  let first = Infinity;
+  let last = -Infinity;
+  for (const packet of sample) {
+    bytes += packet.size;
+    if (packet.time < first) first = packet.time;
+    if (packet.time > last) last = packet.time;
   }
 
-  // Preferred: the span the packets actually cover. Reduced by one frame
-  // because the last packet's own duration is not inside the span between
-  // first and last timestamp, which at a short sample would overstate the
-  // rate by a percent or two.
-  let seconds = null;
-  if (Number.isFinite(earliest) && Number.isFinite(latest) && latest > earliest) {
-    seconds = (latest - earliest) + (fps ? 1 / fps : 0);
-  }
-  // Fallback for a stream that reports no usable timestamps: one video
-  // packet is one frame closely enough for this.
-  if (!seconds && fps) seconds = videoPackets.length / fps;
-  if (!seconds || seconds <= 0.5) return null;
+  // The span between first and last timestamp excludes the last frame's
+  // own duration, which at a short sample would overstate the rate.
+  const span = (last - first) + (fps ? 1 / fps : 0);
+  if (!(span > 0.5)) return null;
 
-  return Math.round((bytes * 8) / seconds);
+  // Per-second buckets, so the answer can say how steady the stream is
+  // rather than only what it averaged. A feed swinging three to one
+  // across a sample has not been mismeasured - it genuinely varies, and
+  // that is worth seeing rather than hiding inside a mean.
+  const buckets = new Map();
+  for (const packet of sample) {
+    const second = Math.floor(packet.time - first);
+    buckets.set(second, (buckets.get(second) || 0) + packet.size);
+  }
+  const seconds = [...buckets.keys()].sort((a, b) => a - b);
+  // The final bucket is a partial second and always reads low.
+  if (seconds.length > 2) seconds.pop();
+  const rates = seconds.map(k => buckets.get(k) * 8);
+
+  let variation = null;
+  if (rates.length >= 3) {
+    const low = rates.reduce((m, r) => Math.min(m, r), Infinity);
+    const high = rates.reduce((m, r) => Math.max(m, r), 0);
+    if (low > 0) variation = Math.round((high / low) * 10) / 10;
+  }
+
+  return {
+    bitrate: Math.round((bytes * 8) / span),
+    sampleSeconds: Math.round(span * 10) / 10,
+    variation,
+    confident: span >= MIN_CONFIDENT_SAMPLE_SECONDS,
+  };
 }
 
 function getCached(url) {
@@ -596,7 +661,8 @@ async function probeStream(url, options = {}) {
     } else {
       const fps = parseFrameRate(video.avg_frame_rate) || parseFrameRate(video.r_frame_rate);
       const interlaced = isInterlaced(video.field_order);
-      const bitrate = measureVideoBitrate(parsed.packets || [], video.index, fps);
+      const measured = measureVideoBitrate(parsed.packets || [], video.index, fps);
+      const bitrate = measured ? measured.bitrate : null;
       const bpp = bitsPerPixel({ bitrate, width: video.width, height: video.height, fps });
 
       result = {
@@ -621,6 +687,12 @@ async function probeStream(url, options = {}) {
         audioLayout: audio ? audio.channel_layout || null : null,
         bitrate,
         bpp,
+        // How the bitrate was arrived at, so a number taken over three
+        // seconds of a stalling stream is not read as the same kind of
+        // fact as one taken over twenty.
+        sampleSeconds: measured ? measured.sampleSeconds : null,
+        bitrateVariation: measured ? measured.variation : null,
+        bitrateConfident: measured ? measured.confident : false,
       };
 
       // Scored before the label is written, because the label leads with

@@ -2515,7 +2515,19 @@
       if (data.audioChannels) {
         bits.push(`audio ${data.audioLayout || data.audioChannels + 'ch'}${data.audioCodec ? ' ' + data.audioCodec : ''}`);
       }
-      if (data.bitrate) bits.push(`${(data.bitrate / 1e6).toFixed(2)} Mbps measured`);
+      if (data.bitrate) {
+        const over = data.sampleSeconds ? ` over ${data.sampleSeconds}s` : '';
+        bits.push(`${(data.bitrate / 1e6).toFixed(2)} Mbps measured${over}`);
+      }
+      // A stream that swings three to one across the sample has not
+      // been mismeasured - it varies, and two checks of it will
+      // disagree however long they run. Better said than hidden.
+      if (data.bitrateVariation && data.bitrateVariation >= 2) {
+        bits.push(`bitrate swings ${data.bitrateVariation}x second to second`);
+      }
+      if (data.bitrateConfident === false) {
+        bits.push('short sample - re-check for a firmer number');
+      }
       return bits.join(' · ');
     }
 
