@@ -1577,11 +1577,12 @@
   // Tier colours, from the score in probe.js. Lets a list of ten feeds be
   // scanned rather than read - green is worth watching, red is not.
   const QUALITY_TIER_CLASSES = {
-    excellent: 'bg-[#2f7d3a]/30 text-[#8ce09a]',
-    good:      'bg-[#4a9d52]/25 text-[#7fc98a]',
-    fair:      'bg-[#c9992e]/25 text-[#e0be6a]',
+    excellent: 'bg-[#2f7d3a]/35 text-[#8ce09a]',
+    great:     'bg-[#4a9d52]/25 text-[#7fc98a]',
+    good:      'bg-[#3b8fc4]/25 text-[#7bc0e6]',
+    okay:      'bg-[#c9992e]/25 text-[#e0be6a]',
     poor:      'bg-[#c0722b]/25 text-[#e8a06a]',
-    bad:       'bg-[#c0392b]/25 text-[#e56a6a]',
+    bad:       'bg-[#c0392b]/30 text-[#f08b8b]',
   };
 
   function tierClasses(tier) {
@@ -1616,7 +1617,7 @@
     }
     const best = url === bestProbedUrl(playableStreamRows().map(s => s.url).concat(savedResults.map(c => c.url), savedChannels.map(c => c.url)))
       ? '<i class="fa-solid fa-star mr-1 text-[#ffd166]" title="Best of the checked streams here"></i>' : '';
-    return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded ${tierClasses(probed.tier)} whitespace-nowrap"
+    return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded ${tierClasses(probed.tier)} leading-tight"
                   title="${escapeHtml(probed.detail || '')}">${best}${escapeHtml(probed.label)}</span>`;
   }
 
