@@ -248,9 +248,10 @@
         <!-- Dynamically injected sports inputs -->
       </div>
 
-      <!-- Network Links - only shown for M3U accounts, since the picker is
-           built from the parsed playlist. Hidden entirely for Xtream until
-           that path exists, rather than shown-but-broken. -->
+      <!-- Network Links. Shown for both connection types: the server
+           supplies the same channel list either way, parsed from the
+           playlist for M3U and built from the live stream list for
+           Xtream. Starts hidden only until the account loads. -->
       <div id="network-links-block" class="hidden">
         <div class="flex items-center justify-between gap-3 mb-2 mt-8 flex-wrap">
           <h3 class="font-bold text-sm text-[#e6e6e6]/75">Network Links</h3>
@@ -1926,15 +1927,14 @@
     // before the first render, and doing them in parallel keeps the
     // dashboard from visibly filling in one piece at a time.
     async function loadNetworkLinks() {
-      const isM3u = activeUser && activeUser.connectionType === 'm3u';
       const block = document.getElementById('network-links-block');
       if (!block) return;
 
-      // The picker is built from the parsed playlist, which only M3U
-      // accounts have. Showing an empty section to Xtream users would
-      // just raise a question the UI can't answer yet.
-      block.classList.toggle('hidden', !isM3u);
-      if (!isM3u) return;
+      // Both connection types now. The server hands this section the same
+      // channel list either way - parsed from the playlist for M3U, built
+      // from the live stream list for Xtream - so there is nothing left
+      // for the page to gate on.
+      block.classList.remove('hidden');
 
       if (networkRegistry.length === 0) {
         try {
@@ -2868,6 +2868,12 @@
       }
 
       const known = (networkSearchResults[key] || []).find(c => c.url === url);
+      // A pasted URL that matched nothing in the channel list is stored
+      // as a plain URL whatever the account type. Typing it 'xtream' off
+      // the connection alone would be a guess: the id is only meaningful
+      // if the URL really is this provider's, and a hand-pasted one need
+      // not be. Stored as-is, it plays; guessed wrong, it would resolve
+      // to a different channel entirely.
       links.push(known || {
         type: 'm3u',
         url,

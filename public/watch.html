@@ -1352,8 +1352,9 @@
 
     if (!res.ok) {
       // Says why rather than rendering an empty list that looks like "no
-      // such channel" - the usual cause is an Xtream account, which this
-      // endpoint does not serve, and that is worth stating plainly.
+      // such channel". Both connection types are served now, so the
+      // remaining causes are a provider that cannot be reached or a
+      // playlist still loading - and the server names which.
       streamSearchRows = [];
       streamSearchGroups = [];
       streamSearchNote = (res.data && res.data.error) || 'Could not search your channels.';

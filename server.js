@@ -2473,6 +2473,131 @@ function buildXtreamStreamUrl(user, streamId) {
   return `${baseUrl}/live/${encodeURIComponent(user.xtream.username)}/${encodeURIComponent(user.xtream.password)}/${streamId}.m3u8`;
 }
 
+// ---------------------------------------------------------------------
+// Xtream channel source
+// ---------------------------------------------------------------------
+//
+// The network picker, channel search, saved channels and the quality
+// probe were all M3U-only for one reason: they take a parsed playlist,
+// and an Xtream account has none. They do not actually need a playlist
+// though - they need a list of channels, and Xtream can produce one.
+//
+// So this builds the same { channels, categoryList } an M3U parse
+// produces, from the same two calls fetchAutoSearchChannels already
+// makes, and every one of those features then runs the identical code
+// for both connection types rather than growing a second implementation.
+//
+// Channels carry a streamId here, which M3U channels do not. That is
+// what lets a saved link be stored as { type: 'xtream', streamId } and
+// have its URL rebuilt from credentials at request time - so rotating an
+// Xtream password does not strand every configured channel.
+const XTREAM_SOURCE_TTL_MS = 30 * 60 * 1000;
+
+// Keyed by service + account, never by password - two accounts on one
+// provider genuinely see different channel lists, and the key has no
+// business carrying a secret.
+// What is cached is the provider's own answer - the raw stream and
+// category lists - and NOT the channel objects built from it. Those carry
+// a streamUrl with the account password in its path, so caching them
+// would serve URLs built from the old password for the rest of the TTL
+// after a rotation: suggestions handing out dead links, and the probe
+// rejecting good ones because the URL no longer matched anything in the
+// list it was checking against. Rebuilding per request costs a few
+// thousand string joins and is always right.
+const xtreamSourceCache = new Map();   // key -> { streams, categories, fetchedAt }
+const xtreamSourceInFlight = new Map(); // key -> Promise
+
+function xtreamCacheKey(user) {
+  const baseUrl = String(user.xtream.url || '').replace(/\/+$/, '');
+  return `${baseUrl}|${user.xtream.username}`;
+}
+
+async function fetchXtreamCatalog(user) {
+  const [categories, streams] = await Promise.all([
+    fetchXtreamCategories(user),
+    fetchAllXtreamLiveStreams(user)
+  ]);
+  return { categories, streams, fetchedAt: Date.now() };
+}
+
+function buildXtreamChannelSource(user, catalog) {
+  const { categories, streams } = catalog;
+
+  const getCategoryName = buildCategoryNameLookup(categories);
+  const channels = streams.map(s => ({
+    // epg_channel_id is Xtream's equivalent of tvg-id, and carries the
+    // same shared EPG naming ("espn.us"), which is what the network
+    // matcher and the link healer both key off.
+    id: s.epg_channel_id || '',
+    name: s.name || '',
+    logo: s.stream_icon || '',
+    streamId: String(s.stream_id),
+    streamUrl: buildXtreamStreamUrl(user, s.stream_id),
+    categories: [getCategoryName(s)]
+  })).filter(c => c.name && c.streamId);
+
+  const counts = new Map();
+  for (const channel of channels) {
+    for (const category of channel.categories) {
+      counts.set(category, (counts.get(category) || 0) + 1);
+    }
+  }
+
+  return {
+    channels,
+    categoryList: [...counts.entries()]
+      .map(([name, channelCount]) => ({ name, channelCount }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    fetchedAt: catalog.fetchedAt
+  };
+}
+
+// Cached, because unlike an M3U playlist - parsed once on a schedule and
+// held in memory - every one of these is a live round trip to the
+// provider. The dashboard alone fires /suggest and /status together on
+// load, so without the in-flight map below one page view would fetch the
+// entire service twice, in parallel, for no gain.
+async function getXtreamChannelSource(user) {
+  if (!user.xtream || !user.xtream.url) return null;
+  const key = xtreamCacheKey(user);
+
+  const cached = xtreamSourceCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < XTREAM_SOURCE_TTL_MS) {
+    return buildXtreamChannelSource(user, cached);
+  }
+
+  // Deduplicated, not just cached. The dashboard fires /suggest and
+  // /status together on load, so on a cold cache both would otherwise
+  // pull the entire service down in parallel for one page view.
+  const inFlight = xtreamSourceInFlight.get(key);
+  const pending = inFlight || (async () => {
+    try {
+      const catalog = await fetchXtreamCatalog(user);
+      // An empty list means the provider answered with nothing useful -
+      // down, rate limiting, credentials rejected. Serving that as the
+      // truth would empty the picker and read as "your channels are
+      // gone", so a previous good answer is kept instead.
+      if (catalog.streams.length === 0 && cached) {
+        console.error('[Xtream] Live stream list came back empty; keeping the previous one.');
+        return cached;
+      }
+      xtreamSourceCache.set(key, catalog);
+      console.log(`[Xtream] Catalog fetched: ${catalog.streams.length} stream(s), ${catalog.categories.length} category(ies)`);
+      return catalog;
+    } catch (err) {
+      console.error('[Xtream] Failed to fetch the catalog:', err.message);
+      return cached || null;
+    } finally {
+      xtreamSourceInFlight.delete(key);
+    }
+  })();
+
+  if (!inFlight) xtreamSourceInFlight.set(key, pending);
+
+  const catalog = await pending;
+  return catalog ? buildXtreamChannelSource(user, catalog) : null;
+}
+
 // Runs a sport's standing search (networks.AUTO_SEARCH) against whichever
 // source the account uses, returning { name, url, group } matches.
 //
@@ -2685,11 +2810,28 @@ async function authenticateForChannels(req, res) {
   }
   clearFailedAttempts(ip);
 
-  if (user.connectionType !== 'm3u' || !user.m3u || !user.m3u.playlistUrl) {
-    // Xtream accounts reach the same feature through their own channel
-    // list rather than a parsed playlist; that path isn't built yet, so
-    // say so plainly instead of returning a confusingly empty result.
-    res.status(400).json({ error: 'Network links currently require an M3U account.' });
+  // Xtream reaches the same features through its own channel list rather
+  // than a parsed playlist. Both arrive here in the same shape, so
+  // everything downstream - suggestions, search, probing, link healing -
+  // is one implementation serving both.
+  if (user.connectionType !== 'm3u') {
+    if (!user.xtream || !user.xtream.url) {
+      res.status(400).json({ error: 'No Xtream connection is configured on this account.' });
+      return null;
+    }
+    const xtreamSource = await getXtreamChannelSource(user);
+    if (!xtreamSource) {
+      res.status(503).json({
+        error: 'Could not reach your Xtream provider. This usually clears on its own - try again in a moment.',
+        notReady: true
+      });
+      return null;
+    }
+    return { user, source: xtreamSource };
+  }
+
+  if (!user.m3u || !user.m3u.playlistUrl) {
+    res.status(400).json({ error: 'No M3U playlist is configured on this account.' });
     return null;
   }
 
@@ -2838,10 +2980,18 @@ app.post('/api/networks/status', async (req, res) => {
   const auth = await authenticateForChannels(req, res);
   if (!auth) return;
 
+  // An xtream-typed link stores an id, not a URL, so without a builder
+  // resolveNetworkLinks has nothing to resolve it to and reports every
+  // one of them as "no Xtream credentials configured" - the whole picker
+  // showing broken while being perfectly healthy.
+  const buildXtreamUrl = (auth.user.xtream && auth.user.xtream.url)
+    ? (streamId) => buildXtreamStreamUrl(auth.user, streamId)
+    : null;
+
   const status = {};
   for (const network of networks.NETWORKS) {
     const { resolved, problems } = networks.resolveNetworkLinks(
-      auth.user.networkLinks, network.key, auth.source
+      auth.user.networkLinks, network.key, auth.source, buildXtreamUrl
     );
     if (resolved.length === 0 && problems.length === 0) continue;
     status[network.key] = {

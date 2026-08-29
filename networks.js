@@ -1331,7 +1331,11 @@ function suggestChannelsForNetwork(networkKey, channels, options = {}) {
       tvgId: channel.id,
       name: channel.name,
       group: channel.categories?.[0] || '',
-      type: 'm3u',
+      // Present on Xtream channels, absent on M3U ones, and makeLinkEntry
+      // already types an entry off exactly that. An Xtream link then
+      // stores the id and has its URL rebuilt from credentials at request
+      // time, so rotating a password does not strand every saved channel.
+      streamId: channel.streamId,
     }),
     score,
     preferred,
@@ -1432,7 +1436,7 @@ function searchChannels(query, channels, options = {}) {
           tvgId: channel.id,
           name: channel.name,
           group: groups[0] || '',
-          type: 'm3u',
+          streamId: channel.streamId,
         }),
         groups,
       }
