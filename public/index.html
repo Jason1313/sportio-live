@@ -239,6 +239,10 @@
             <button id="network-check-all-10-btn" onclick="checkQualityForAllNetworks({ passes: 10 })"
                     title="Check every channel 10 times, round-robin, and average all the readings together"
                     class="text-xs font-bold text-[#e6e6e6]/45 hover:text-[#5aa8d1] transition">&times;10</button>
+            <button id="network-categories-btn" onclick="toggleCategoriesPanel()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
+              <i class="fa-solid fa-filter"></i>
+              Categories
+            </button>
             <button id="network-defaults-btn" onclick="toggleDefaultsPanel()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
               <i class="fa-solid fa-thumbtack"></i>
               Defaults
@@ -258,7 +262,33 @@
           <br class="mb-1">
           These channels are for <span class="text-[#e6e6e6]/80 font-semibold">UFC cards only</span>. Dana White's Contender Series and PFL are found by their own automatic searches instead, because the UFC channels do not carry those shows. Everything else on the ESPN MMA schedule - RIZIN, LFA, UAE Warriors, Road to UFC - still gets a card, but no automatic search: there is no term that would be right across every promotion, and a wrong guess fills the list with channels showing another sport. Open the event in the watch portal and search your channels by hand for those.
         </p>
-        <!-- Default presets. Several, named, because stream ids are per
+        <!-- Which playlist categories any search may look in. Saved on the
+           account, so it is chosen once and then applies everywhere -
+           the suggestions and channel search here, and the search in the
+           watch portal, which goes through the same endpoint. -->
+      <div id="network-categories-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-4">
+        <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Searchable categories</h4>
+        <p class="text-[11px] text-[#e6e6e6]/45 mb-3 leading-relaxed">
+          Tick the categories worth searching and the rest stop appearing anywhere &mdash; suggestions,
+          channel search here, and the search in the watch portal. Channels you have already saved keep
+          working whatever you pick. With nothing ticked, everything is searched.
+        </p>
+        <div class="flex gap-2 mb-2">
+          <input type="text" id="categories-filter" oninput="renderCategoryPicker()" placeholder="Filter this list..."
+                 class="flex-1 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
+          <button onclick="setAllVisibleCategories(true)" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 font-bold py-2 px-3 rounded-lg text-[11px] transition shrink-0">Select shown</button>
+          <button onclick="setAllVisibleCategories(false)" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 font-bold py-2 px-3 rounded-lg text-[11px] transition shrink-0">Clear shown</button>
+        </div>
+        <div id="categories-list" class="max-h-72 overflow-y-auto bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg p-2 space-y-0.5 mb-3"></div>
+        <div class="flex items-center justify-between gap-3">
+          <span id="categories-summary" class="text-[11px] text-[#e6e6e6]/45"></span>
+          <button onclick="saveSearchCategories()" class="bg-[#3b8fc4] hover:bg-[#4fa3d8] font-bold py-2 px-4 rounded-lg text-xs transition shrink-0">
+            Save categories
+          </button>
+        </div>
+      </div>
+
+      <!-- Default presets. Several, named, because stream ids are per
            provider: a set pinned against one IPTV service identifies
            nothing on another, so an instance serving two providers needs
            one set for each. -->
@@ -2486,6 +2516,115 @@
     // Only ids travel - never a URL, which for M3U carries the provider
     // username and password in its path. A bare "429939" is not a
     // credential.
+    // Every category the provider offers, and the subset this account
+    // searches. Held here while the panel is open; nothing is persisted
+    // until Save is pressed, so a mis-click is undone by closing it.
+    let allCategories = [];
+    let selectedCategories = new Set();
+
+    function toggleCategoriesPanel() {
+      const panel = document.getElementById('network-categories-panel');
+      if (!panel) return;
+      const opening = panel.classList.contains('hidden');
+      panel.classList.toggle('hidden', !opening);
+      if (opening) loadCategoryPicker();
+    }
+
+    async function loadCategoryPicker() {
+      const list = document.getElementById('categories-list');
+      list.innerHTML = '<p class="text-[11px] text-[#e6e6e6]/40 italic p-2">Loading categories...</p>';
+      try {
+        const res = await fetch('/api/networks/categories', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          list.innerHTML = `<p class="text-[11px] text-[#e56a6a] p-2">${escapeHtml((data && data.error) || 'Could not load categories.')}</p>`;
+          return;
+        }
+        allCategories = data.categories || [];
+        selectedCategories = new Set(data.selected || []);
+        renderCategoryPicker();
+      } catch (err) {
+        list.innerHTML = '<p class="text-[11px] text-[#e56a6a] p-2">Network error while loading categories.</p>';
+      }
+    }
+
+    // The categories currently passing the filter box. Bulk actions work
+    // on exactly these, which is what makes them safe on a playlist with
+    // six hundred groups: filter to "USA", press Select shown.
+    function visibleCategories() {
+      const needle = (document.getElementById('categories-filter').value || '').trim().toLowerCase();
+      if (!needle) return allCategories;
+      return allCategories.filter(c => c.name.toLowerCase().includes(needle));
+    }
+
+    function renderCategoryPicker() {
+      const list = document.getElementById('categories-list');
+      const summary = document.getElementById('categories-summary');
+      if (!list) return;
+
+      const visible = visibleCategories();
+      list.innerHTML = visible.length === 0
+        ? '<p class="text-[11px] text-[#e6e6e6]/40 italic p-2">Nothing matches that filter.</p>'
+        : visible.map(cat => `
+            <label class="flex items-center gap-2 text-xs px-1.5 py-1 rounded hover:bg-[#3b4d58]/60 cursor-pointer">
+              <input type="checkbox" ${selectedCategories.has(cat.name) ? 'checked' : ''}
+                     onchange="toggleCategory(${JSON.stringify(cat.name).replace(/"/g, '&quot;')})"
+                     class="rounded bg-[#3b4d58] border-[#e6e6e6]/15 text-[#3b8fc4] focus:ring-0 shrink-0">
+              <span class="flex-1 min-w-0 truncate">${escapeHtml(cat.name)}</span>
+              <span class="text-[10px] text-[#e6e6e6]/35 shrink-0">${cat.channelCount}</span>
+            </label>`).join('');
+
+      if (summary) {
+        summary.textContent = selectedCategories.size === 0
+          ? `Nothing ticked - all ${allCategories.length} categories are searched.`
+          : `${selectedCategories.size} of ${allCategories.length} categories searched.`;
+      }
+    }
+
+    function toggleCategory(name) {
+      if (selectedCategories.has(name)) selectedCategories.delete(name);
+      else selectedCategories.add(name);
+      renderCategoryPicker();
+    }
+
+    function setAllVisibleCategories(on) {
+      for (const cat of visibleCategories()) {
+        if (on) selectedCategories.add(cat.name);
+        else selectedCategories.delete(cat.name);
+      }
+      renderCategoryPicker();
+    }
+
+    async function saveSearchCategories() {
+      const chosen = [...selectedCategories];
+      try {
+        const res = await fetch('/api/user/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uuid: activeUser.uuid, password: activeUser.password, searchCategories: chosen
+          })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          showStatus((data && data.error) || 'Could not save categories.', true);
+          return;
+        }
+        activeUser.searchCategories = chosen;
+        showStatus(chosen.length === 0
+          ? 'Category filter cleared - every category is searched.'
+          : `Searching ${chosen.length} categor${chosen.length === 1 ? 'y' : 'ies'}.`);
+        // Every suggestion on screen was produced under the old filter.
+        loadNetworkLinks();
+      } catch (err) {
+        showStatus('Network error while saving categories.', true);
+      }
+    }
+
     // Presets as last reported by the server. Metadata only - the stream
     // ids stay there, since nothing here needs them.
     let defaultPresets = [];

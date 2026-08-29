@@ -2833,11 +2833,48 @@ app.get('/api/networks', (req, res) => {
 // playlist serves the whole registry, which is far cheaper than one round
 // trip per network and means the dashboard can populate the entire
 // section in a single request.
+// The account's category allowlist, applied to everything that SEARCHES
+// the playlist - the network suggestions and the channel search, on both
+// the dashboard and the watch portal.
+//
+// Deliberately not applied to the source itself. A saved channel has to
+// keep resolving, and the quality probe validates a URL against the
+// channel list before opening it; filtering there would make a channel
+// the user had already chosen look missing, and make probing it fail,
+// purely because its group is not one they browse. The filter belongs on
+// the question "what should I offer you", never on "is this thing you
+// already picked still real".
+//
+// Empty means no filter rather than no channels. Somebody who unticks
+// everything has made a mistake, not expressed a preference, and a
+// search that silently returns nothing forever is a bad way to find that
+// out.
+function channelsForSearch(user, channels) {
+  const selected = Array.isArray(user.searchCategories) ? user.searchCategories : [];
+  if (selected.length === 0) return channels;
+  const wanted = new Set(selected);
+  return channels.filter(channel =>
+    (channel.categories || []).some(category => wanted.has(category)));
+}
+
+// Every category the account can see, with how many channels each holds,
+// alongside the ones currently chosen. Feeds the dashboard's picker.
+app.post('/api/networks/categories', async (req, res) => {
+  const auth = await authenticateForChannels(req, res);
+  if (!auth) return;
+
+  return res.json({
+    success: true,
+    categories: auth.source.categoryList || [],
+    selected: Array.isArray(auth.user.searchCategories) ? auth.user.searchCategories : [],
+  });
+});
+
 app.post('/api/networks/suggest', async (req, res) => {
   const auth = await authenticateForChannels(req, res);
   if (!auth) return;
 
-  const suggestions = networks.suggestAllNetworks(auth.source.channels, {
+  const suggestions = networks.suggestAllNetworks(channelsForSearch(auth.user, auth.source.channels), {
     defaults: mergedNetworkDefaults()
   });
   return res.json({ success: true, suggestions, presets: describePresets() });
@@ -2863,8 +2900,11 @@ app.post('/api/networks/search', async (req, res) => {
     ? req.body.excludeGroups.filter(g => typeof g === 'string').slice(0, 50)
     : [];
 
+  // Two filters, and they are not the same thing. The account's category
+  // allowlist decides what is searchable at all; excludeGroups is the
+  // caller narrowing one particular set of results.
   const { channels, groups, truncated } = networks.searchChannels(
-    query, auth.source.channels, { limit: 50, excludeGroups }
+    query, channelsForSearch(auth.user, auth.source.channels), { limit: 50, excludeGroups }
   );
   return res.json({ success: true, channels, groups, truncated });
 });
@@ -3050,7 +3090,7 @@ app.post('/api/user/register', async (req, res) => {
   if (!ENCRYPTION_KEY_CONFIGURED) {
     return res.status(503).json({ error: 'Encryption key not configured yet. See the homepage for setup instructions.' });
   }
-  const { xtream, m3u, connectionType, selectedSports, password, timeZone, sportOrder, networkLinks, savedChannels } = req.body;
+  const { xtream, m3u, connectionType, selectedSports, password, timeZone, sportOrder, networkLinks, savedChannels, searchCategories } = req.body;
   if (!password || typeof password !== 'string' || password.length === 0) {
     return res.status(400).json({ error: 'A password is required.' });
   }
@@ -3073,6 +3113,9 @@ app.post('/api/user/register', async (req, res) => {
     sportOrder,
     networkLinks: networkLinks || {},
     savedChannels: savedChannels || [],
+    // Which playlist categories any search may look in. Empty means all
+    // of them - see channelsForSearch.
+    searchCategories: Array.isArray(searchCategories) ? searchCategories : [],
     createdAt: new Date().toISOString()
   };
   saveUserConfigs();
@@ -3131,6 +3174,7 @@ app.post('/api/user/login', async (req, res) => {
     selectedSports: user.selectedSports, 
     timeZone: user.timeZone || 'America/New_York',
     sportOrder: user.sportOrder || [],
+    searchCategories: user.searchCategories || [],
     networkLinks: tierNetworkLinks(user.networkLinks),
     savedChannels: (user.savedChannels || []).map(withQualityTier),
     manifestUrl: `/user/${uuid}/manifest.json` 
@@ -3138,7 +3182,7 @@ app.post('/api/user/login', async (req, res) => {
 });
 
 app.post('/api/user/update', async (req, res) => {
-  const { uuid, password, xtream, m3u, selectedSports, timeZone, sportOrder, networkLinks, savedChannels } = req.body;
+  const { uuid, password, xtream, m3u, selectedSports, timeZone, sportOrder, networkLinks, savedChannels, searchCategories } = req.body;
   const ip = req.ip;
 
   if (isRateLimited(ip)) {
@@ -3156,6 +3200,11 @@ app.post('/api/user/update', async (req, res) => {
   if (xtream !== undefined) user.xtream = xtream;
   if (m3u !== undefined) user.m3u = m3u;
   if (selectedSports !== undefined) user.selectedSports = selectedSports;
+  if (searchCategories !== undefined) {
+    user.searchCategories = Array.isArray(searchCategories)
+      ? searchCategories.filter(c => typeof c === 'string' && c)
+      : [];
+  }
   if (timeZone) user.timeZone = timeZone;
   if (sportOrder !== undefined) user.sportOrder = sportOrder;
 
