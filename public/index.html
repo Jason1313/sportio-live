@@ -2568,7 +2568,17 @@
       }
       return `<span onclick="${retry}"
                     class="text-[10px] font-bold px-1.5 py-0.5 rounded ${tierClasses(probed.tier)} hover:brightness-125 cursor-pointer"
-                    title="${escapeHtml(probed.detail ? probed.detail + ' | ' : '')}${probed.persisted ? 'Saved from an earlier check' : 'Measured just now'} - click to add another sample to the average, shift-click to start over">${escapeHtml(probed.label)}</span>`;
+                    title="${escapeHtml(probed.detail ? probed.detail + ' | ' : '')}${probed.persisted ? 'Saved from an earlier check' : 'Measured just now'} - click to add another sample to the average, shift-click to start over">${escapeHtml(probed.label)}${sampleCountHtml(probed)}</span>`;
+    }
+
+    // How many checks are behind the reading, on the badge rather than
+    // only in the tooltip. Session state, not part of the label - the
+    // label is persisted onto the account and travels into Stremio's
+    // stream titles, where a count of this session's checks would mean
+    // nothing at all.
+    function sampleCountHtml(probed) {
+      if (!probed || !(probed.samples > 1)) return '';
+      return `<span class="opacity-55 ml-1 font-normal">&times;${probed.samples}</span>`;
     }
 
     async function probeSearchResults(key, options = {}) {

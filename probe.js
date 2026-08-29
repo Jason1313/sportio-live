@@ -103,9 +103,9 @@ const probeCache = new Map(); // url -> { result, probedAt }
 const MAX_ACCUMULATED_SAMPLES = 10;
 const probeSamples = new Map(); // url -> [{ bits, seconds, at }]
 
-function addProbeSample(url, bits, seconds) {
+function addProbeSample(url, bits, seconds, rates) {
   const samples = probeSamples.get(url) || [];
-  samples.push({ bits, seconds, at: Date.now() });
+  samples.push({ bits, seconds, rates: rates || [], at: Date.now() });
   while (samples.length > MAX_ACCUMULATED_SAMPLES) samples.shift();
   probeSamples.set(url, samples);
   return samples;
@@ -114,13 +114,23 @@ function addProbeSample(url, bits, seconds) {
 function aggregateOf(samples) {
   let bits = 0;
   let seconds = 0;
+  let rates = [];
   for (const sample of samples) {
     bits += sample.bits;
     seconds += sample.seconds;
+    rates = rates.concat(sample.rates || []);
   }
-  return seconds > 0
-    ? { bitrate: Math.round(bits / seconds), seconds: Math.round(seconds * 10) / 10, samples: samples.length }
-    : null;
+  if (seconds <= 0) return null;
+  return {
+    bitrate: Math.round(bits / seconds),
+    seconds: Math.round(seconds * 10) / 10,
+    samples: samples.length,
+    // Pooled across every check, so the swing describes the stream
+    // rather than the last twenty seconds of it. It was previously taken
+    // from the latest check alone, which made it the one figure on the
+    // badge that did not settle as a channel was checked more.
+    variation: spreadOf(rates),
+  };
 }
 
 // Forgets everything measured about a stream, so the next check starts
@@ -497,6 +507,22 @@ function scoreQualityLabel(label) {
 // Video packets only. The audio track is real bandwidth but it is not
 // picture, and folding it in would flatter a stream with 5.1 audio into
 // looking like it had a better image.
+// The spread between the 10th and 90th percentile second, not between
+// the largest and smallest. Max over min is the most outlier-sensitive
+// statistic available: one second holding a scene-change keyframe
+// against one static second reads as a 6x swing on a stream nobody would
+// call unsteady, which is alarming without being informative.
+// Percentiles describe the body of the sample instead of its two most
+// extreme moments.
+function spreadOf(rates) {
+  if (!rates || rates.length < 5) return null;
+  const sorted = [...rates].sort((a, b) => a - b);
+  const at = (q) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.round(q * (sorted.length - 1))))];
+  const low = at(0.10);
+  const high = at(0.90);
+  return low > 0 ? Math.round((high / low) * 10) / 10 : null;
+}
+
 function measureVideoBitrate(packets, videoIndex, fps) {
   const videoPackets = packets
     .filter(p => Number(p.stream_index) === Number(videoIndex) && Number(p.size) > 0)
@@ -557,24 +583,12 @@ function measureVideoBitrate(packets, videoIndex, fps) {
   if (seconds.length > 2) seconds.pop();
   const rates = seconds.map(k => buckets.get(k) * 8);
 
-  // Reported as the spread between the 10th and 90th percentile second,
-  // not between the largest and smallest. Max over min is the most
-  // outlier-sensitive statistic available: one second containing a
-  // scene-change keyframe against one static second reads as a 6x swing
-  // on a stream nobody would call unsteady, which is alarming without
-  // being informative. Percentiles describe the body of the sample.
-  let variation = null;
-  if (rates.length >= 5) {
-    const sorted = [...rates].sort((a, b) => a - b);
-    const at = (q) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.round(q * (sorted.length - 1))))];
-    const low = at(0.10);
-    const high = at(0.90);
-    if (low > 0) variation = Math.round((high / low) * 10) / 10;
-  }
+  const variation = spreadOf(rates);
 
   return {
     bitrate: Math.round((bytes * 8) / span),
     seconds: span,
+    rates,
     sampleSeconds: Math.round(span * 10) / 10,
     variation,
     confident: span >= MIN_CONFIDENT_SAMPLE_SECONDS,
@@ -750,8 +764,8 @@ async function probeStream(url, options = {}) {
       const thisCheck = measured ? measured.bitrate : null;
       let aggregate = null;
       if (measured && measured.seconds > 0) {
-        aggregate = aggregateOf(
-          addProbeSample(url, measured.bitrate * measured.seconds, measured.seconds));
+        aggregate = aggregateOf(addProbeSample(
+          url, measured.bitrate * measured.seconds, measured.seconds, measured.rates));
       }
       const bitrate = aggregate ? aggregate.bitrate : thisCheck;
       const bpp = bitsPerPixel({ bitrate, width: video.width, height: video.height, fps });
@@ -782,7 +796,9 @@ async function probeStream(url, options = {}) {
         // seconds of a stalling stream is not read as the same kind of
         // fact as one taken over twenty.
         sampleSeconds: measured ? measured.sampleSeconds : null,
-        bitrateVariation: measured ? measured.variation : null,
+        bitrateVariation: (aggregate && aggregate.variation != null)
+          ? aggregate.variation
+          : (measured ? measured.variation : null),
         bitrateConfident: measured ? measured.confident : false,
         // How settled the figure is: how many checks are behind it, how
         // much stream they cover in total, and what this one said on its
