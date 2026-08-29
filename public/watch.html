@@ -1617,6 +1617,9 @@
     // How settled the number is. A single 20 second sample of a
     // variable-bitrate sports feed is noisy; each further check folds
     // into the average and tightens it.
+    // The one verdict the bpp on the badge does not explain by
+    // itself: a rich stream can still be Bad for its frame rate.
+    if (data.tooSlow) bits.unshift('rated Bad on frame rate - under 50fps');
     if (data.samples > 1) {
       bits.unshift(`average of ${data.samples} checks over ${data.totalSampleSeconds}s`);
       if (data.lastBitrate) bits.push(`this check read ${(data.lastBitrate / 1e6).toFixed(2)} Mbps`);
@@ -1629,13 +1632,13 @@
 
   // Tier colours, from the score in probe.js. Lets a list of ten feeds be
   // scanned rather than read - green is worth watching, red is not.
+  // Four bands, matching probe.js. Green down to red, so a list can be
+  // read by colour before it is read by word.
   const QUALITY_TIER_CLASSES = {
-    excellent: 'bg-[#2f7d3a]/35 text-[#8ce09a]',
-    great:     'bg-[#4a9d52]/25 text-[#7fc98a]',
-    good:      'bg-[#3b8fc4]/25 text-[#7bc0e6]',
-    okay:      'bg-[#c9992e]/25 text-[#e0be6a]',
-    poor:      'bg-[#c0722b]/25 text-[#e8a06a]',
-    bad:       'bg-[#c0392b]/30 text-[#f08b8b]',
+    great: 'bg-[#2f7d3a]/35 text-[#8ce09a]',
+    good:  'bg-[#4a9d52]/25 text-[#7fc98a]',
+    okay:  'bg-[#c9992e]/25 text-[#e0be6a]',
+    bad:   'bg-[#c0392b]/30 text-[#f08b8b]',
   };
 
   function tierClasses(tier) {

@@ -210,16 +210,14 @@ function formatBitrate(bitsPerSecond) {
     : `${Math.round(bitsPerSecond / 1000)}kbps`;
 }
 
-// Bits per pixel per frame - the number that actually predicts how a
-// stream looks, as against how big it claims to be.
+// Bits per pixel per frame - the number the whole rating is built on.
 //
-// Resolution and frame rate describe the container; this describes how
-// much information is being spent filling it. Two 1080p60 feeds at 2 and
-// 8 Mbps are the same by every other measure here and are not remotely
-// the same to watch, which is the exact case the whole probe exists to
-// settle. As a rough guide for h264: under about 0.05 blocks up on fast
-// motion, 0.10 is respectable, above 0.15 is clean. h265 buys roughly a
-// third off those thresholds for the same picture.
+// Resolution and frame rate describe the container a stream is poured
+// into; this describes how much information is being spent filling it.
+// Two 1080p60 feeds at 2 and 8 Mbps are identical by every other measure
+// and are not remotely the same to watch, and a 720p feed handed the
+// same bitrate as a 1080p one is getting more than twice as much per
+// pixel.
 //
 // Frame rate, not field rate, and full frame height either way - an
 // interlaced frame still carries every line, just not from one instant.
@@ -229,263 +227,200 @@ function bitsPerPixel({ bitrate, width, height, fps }) {
   return isFinite(value) && value > 0 ? value : null;
 }
 
-// The UI's one-line summary, and what gets persisted onto a saved
-// channel. Degrades a piece at a time rather than all at once: an
-// unreadable bitrate still leaves the resolution and codec worth showing,
-// and a stream that only yields its height still labels as "1080p".
+// ---------------------------------------------------------------------
+// Quality rating
+// ---------------------------------------------------------------------
 //
-// Old stored labels are plain "1080p60" strings and stay perfectly
-// readable, so nothing needs migrating.
-function formatQualityLabel({ height, fps, interlaced, codec, bitrate, bpp, tier }) {
+// The rating is bits per pixel, and nothing else.
+//
+// Earlier versions weighed a resolution ceiling against how close the
+// bitrate came to filling it. That needed a table of what each
+// resolution "wants" - a table that had to be tuned, was wrong twice,
+// and decided outcomes for reasons nobody could see. bpp already carries
+// resolution and frame rate inside it: a 1080p60 feed needs 2.25x the
+// bitrate of a 720p60 one to reach the same figure, so spending the same
+// bitrate on more pixels shows up as the lower number it honestly is.
+// One measure, and the bands are read straight off it.
+const BPP_BANDS = [
+  [0.10, 'great'],
+  [0.07, 'good'],
+  [0.05, 'okay'],
+  [0, 'bad'],
+];
+
+// Below this the stream is Bad whatever its bpp. Sport is motion, and
+// half the frames of it is not something a generous bitrate buys back -
+// a 30fps feed with beautiful still frames is still a 30fps feed of a
+// fast-moving game.
+//
+// Applied to the rate the badge shows, which for an interlaced mode is
+// its field rate: 1080i60 carries sixty distinct samples of motion a
+// second, and marking something the badge itself calls "1080i60" as too
+// slow would be indefensible on its face. Interlacing costs it in the
+// ordering nudge below instead.
+const MIN_SMOOTH_FPS = 50;
+
+const TIER_DISPLAY_NAMES = {
+  great: 'Great',
+  good: 'Good',
+  okay: 'Okay',
+  bad: 'Bad',
+};
+
+function tierDisplayName(tier) {
+  return TIER_DISPLAY_NAMES[tier] || '';
+}
+
+function tierForBpp(bpp) {
+  for (const [floor, tier] of BPP_BANDS) {
+    if (bpp >= floor) return tier;
+  }
+  return 'bad';
+}
+
+// The rate the badge shows, and the one the smoothness rule is applied
+// to - field rate for interlaced, frame rate otherwise.
+function displayedRate(fps, interlaced) {
+  if (!fps) return null;
+  return interlaced ? Math.round(fps * 2) : fps;
+}
+
+// A 0-100 figure used ONLY for ordering one stream against another. The
+// tier is what anybody reads and it comes from bpp alone; this exists so
+// two streams inside one band can still be told apart, and so the better
+// of two near-identical readings is the one with more pixels behind it.
+//
+// Piecewise across the band edges, so 0.05, 0.07 and 0.10 always land on
+// the same scores whatever else is changed.
+const SCORE_POINTS = [
+  [0, 0], [0.05, 40], [0.07, 60], [0.10, 80], [0.20, 100],
+];
+
+// The score interval each band owns, matching the band edges in
+// SCORE_POINTS. A stream can move within its own interval and never out
+// of it.
+const TIER_SCORE_RANGE = {
+  bad: [0, 39.9],
+  okay: [40, 59.9],
+  good: [60, 79.9],
+  great: [80, 100],
+};
+
+function bppScore(bpp) {
+  if (bpp <= 0) return 0;
+  for (let i = 1; i < SCORE_POINTS.length; i++) {
+    const [x1, y1] = SCORE_POINTS[i - 1];
+    const [x2, y2] = SCORE_POINTS[i];
+    if (bpp <= x2) return y1 + ((bpp - x1) / (x2 - x1)) * (y2 - y1);
+  }
+  return 100;
+}
+
+// Small enough that it can never move a stream between bands - those are
+// 20 points apart and this is worth at most 2.4 - and large enough to
+// settle a tie. At the same bpp, more pixels is more picture.
+function resolutionNudge(height, interlaced) {
+  const byHeight = height >= 2160 ? 2.4
+    : height >= 1440 ? 2.2
+    : height >= 1080 ? 2.0
+    : height >= 900 ? 1.5
+    : height >= 720 ? 1.0
+    : height >= 576 ? 0.5
+    : 0;
+  // An interlaced frame is two half-pictures from different instants, so
+  // it is worth less than a progressive one of the same height.
+  return interlaced ? byHeight * 0.5 : byHeight;
+}
+
+// Returns { score, tier, tooSlow } or null when there is not enough to
+// judge on.
+//
+// bpp is the whole basis, which is also why a reading recovered from a
+// stored label rates identically to one measured a moment ago: the label
+// carries the bpp.
+function scoreQuality(reading) {
+  if (!reading || !reading.height) return null;
+  const { height, fps, interlaced, bpp } = reading;
+
+  // Without a bitrate there is no bpp and so no honest rating -
+  // resolution on its own is exactly what this exists to stop people
+  // trusting. A legacy "1080p60" label lands here and stays unrated
+  // rather than being guessed at.
+  if (!bpp) return null;
+
+  const rate = displayedRate(fps, interlaced);
+  const tooSlow = rate != null && rate < MIN_SMOOTH_FPS;
+
+  const tier = tooSlow ? 'bad' : tierForBpp(bpp);
+
+  // A stream failing the smoothness rule sorts below everything that
+  // passes it, however many bits it spends on its few frames.
+  if (tooSlow) {
+    return { score: Math.round(Math.min(39, bppScore(bpp) * 0.4) * 10) / 10, tier, tooSlow };
+  }
+
+  // The nudge is kept INSIDE the band. Added freely it could carry a
+  // 1080p feed at 0.099bpp above a 720p one at 0.101 - two points of
+  // resolution beating the band boundary itself, so a Good stream would
+  // outrank a Great one in a list sorted by score. bpp decides the band
+  // and decides the order between bands; resolution only ever settles
+  // position within one.
+  const [floor, ceiling] = TIER_SCORE_RANGE[tier];
+  const nudged = bppScore(bpp) + resolutionNudge(height, interlaced);
+  const score = Math.min(ceiling, Math.max(floor, nudged));
+
+  return { score: Math.round(score * 10) / 10, tier, tooSlow };
+}
+
+// What the badge shows: the verdict, the format, and the number the
+// verdict was read off. Everything else - codec, bitrate, how many
+// checks are behind it, how much it swings - is real but secondary and
+// lives in the hover detail, rather than crowding the one line that has
+// to be readable at a glance down a list of ten.
+function formatQualityLabel({ height, fps, interlaced, bpp, tier }) {
   if (!height) return '';
 
   // Broadcast names an interlaced mode by its FIELD rate: 29.97 frames a
   // second interlaced is "1080i60" everywhere it is written down, never
   // "1080i30". Progressive is named by its frame rate as normal.
   const scan = interlaced ? 'i' : 'p';
-  const rate = fps ? (interlaced ? Math.round(fps * 2) : fps) : '';
+  const rate = displayedRate(fps, interlaced) || '';
 
-  // The verdict leads, because it is the part that can be read at a
-  // glance; the measurements that produced it follow for anyone who
-  // wants to check the working.
   const parts = [];
   const tierName = tierDisplayName(tier);
   if (tierName) parts.push(tierName);
-  parts.push(`${height}${scan}${rate}`);
-  const codecLabel = displayCodec(codec);
-  if (codecLabel) parts.push(codecLabel);
-  const bitrateLabel = formatBitrate(bitrate);
-  if (bitrateLabel) parts.push(bitrateLabel);
-  if (bpp) parts.push(`${bpp.toFixed(3)}bpp`);
-  return parts.join(' · ');
+  parts.push(String(height) + scan + rate);
+  if (bpp) parts.push(bpp.toFixed(3) + 'bpp');
+  return parts.join(' \u00b7 ');
 }
 
-// ---------------------------------------------------------------------
-// Quality scoring
-// ---------------------------------------------------------------------
-//
-// One number for "how good will this look", so a list of ten feeds of the
-// same channel can be ordered instead of read.
-//
-// Two terms, multiplied. A CEILING for what the format could look like at
-// its best - 1080p60 can look better than 720p60, which can look better
-// than 1080p30 - and an ADEQUACY for how close the bitrate gets to
-// filling it. Neither works alone, which is the whole problem: resolution
-// alone ranks a starved 1080p above a well-fed 720p, and bits per pixel
-// alone ranks a small slow stream above a big fast one because it has
-// less to fill.
-//
-// Measured against real readings from a live provider. A 1080p60 feed at
-// 3.8 Mbps (0.030bpp) lands below every 720p60 at 5+ Mbps, which is the
-// right answer - at that bitrate the extra pixels are being spent on
-// blocking artefacts rather than detail.
-
-// Bits per pixel per frame at which h264 stops visibly improving on
-// sports content. Everything else is expressed relative to this, so the
-// codecs sit in the right ratio to each other rather than needing their
-// own tables: h265 reaches the same picture on roughly a third less.
-const REFERENCE_BPP = {
-  h264: 0.070,
-  hevc: 0.045,
-  h265: 0.045,
-  av1: 0.038,
-  vp9: 0.050,
-  mpeg2video: 0.130,
-  mpeg2: 0.130,
-};
-const DEFAULT_REFERENCE_BPP = 0.070;
-
-// Higher resolutions need FEWER bits per pixel to look equally good, and
-// leaving that out was actively wrong: it had a 3.8 Mbps 720p feed
-// outranking a 7.3 Mbps 1080p one, which is the reverse of what anyone
-// looking at the two would say.
-//
-// The reason is that a bigger picture has more for the encoder to
-// exploit - more spatial redundancy, and artefacts spread over more
-// pixels are less visible at the same viewing distance. Real encoding
-// ladders show it plainly: they give 1080p roughly 1.8x the bitrate of
-// 720p, not the 2.25x the pixel count alone would demand. These factors
-// are that ratio, with the table calibrated at 720p.
-// Tuned so the crossover lands at roughly EQUAL ABSOLUTE BITRATE: give
-// a 1080p60 and a 720p60 feed the same Mbps and the 1080p wins, which is
-// the ordinary case; the 720p only takes it when it has meaningfully
-// more to spend. An earlier set demanded 1.85x for 1080p and produced
-// the opposite - a 5.4 Mbps 720p scoring 90 against the same bitrate at
-// 1080p scoring 69, which is not a defensible reading of those two
-// streams. These sit nearer 1.5x.
-const RESOLUTION_BPP_FACTORS = [
-  [2160, 0.46], [1440, 0.56], [1080, 0.66], [900, 0.80],
-  [720, 1.00], [576, 1.15], [480, 1.25], [0, 1.40],
-];
-
-function referenceBppFor(codec, height) {
-  const base = REFERENCE_BPP[String(codec || '').toLowerCase()] || DEFAULT_REFERENCE_BPP;
-  for (const [minHeight, factor] of RESOLUTION_BPP_FACTORS) {
-    if (height >= minHeight) return base * factor;
-  }
-  return base * 1.30;
-}
-
-// What each resolution is worth at full bitrate. Deliberately not
-// proportional to pixel count - 1080p is 2.25x the pixels of 720p and
-// nothing like 2.25x the picture, and treating it as such would make
-// resolution swamp every other term.
-// Compressed deliberately. Resolution is the headline number and the
-// least reliable one: it says how many pixels arrive, not whether there
-// are enough bits to make them worth having. Keeping 720p close behind
-// 1080p leaves the bitrate term room to overturn the order, which is
-// what it should do when a 1080p feed is starved - while still letting
-// 1080p win outright when both are properly fed.
-const RESOLUTION_CEILINGS = [
-  [2160, 115], [1440, 106], [1080, 100], [900, 92],
-  [720, 85], [576, 72], [480, 62], [360, 48], [0, 34],
-];
-
-function resolutionCeiling(height) {
-  for (const [minHeight, ceiling] of RESOLUTION_CEILINGS) {
-    if (height >= minHeight) return ceiling;
-  }
-  return 32;
-}
-
-// Frame rate matters more than the pixel count it is usually traded
-// against: 60fps at 720p is a better watch than 30fps at 1080p on sport,
-// and the curve is set so that it comes out that way (82 against 75).
-function frameRateFactor(fps) {
-  if (!fps) return 0.85;   // unknown - assume typical rather than punish
-  return 0.5 + 0.5 * Math.min(1, fps / 60);
-}
-
-// Asymmetric on purpose, and this is where most of the verdict is
-// decided.
-//
-// BELOW the reference bitrate the penalty is superlinear: at half the
-// bits a stream is well under half as watchable, because compression
-// artefacts do not fade in gently - they arrive as blocking on exactly
-// the fast motion sport is made of. An exponent above 1 is what makes a
-// starved 1080p feed fall behind a well-fed 720p one rather than merely
-// slipping a place.
-//
-// ABOVE it the reward is small and saturates fast. Past the point where
-// the encode is visually transparent there is nothing left to buy, so a
-// lavishly over-provisioned 720p feed gains a few points and cannot
-// climb past a 1080p feed that is also properly fed.
-const ADEQUACY_SHORTFALL_EXPONENT = 1.35;
-const ADEQUACY_SURPLUS_CEILING = 0.12;
-
-function adequacy(ratio) {
-  if (!ratio || ratio <= 0) return 0;
-  if (ratio <= 1) return Math.pow(ratio, ADEQUACY_SHORTFALL_EXPONENT);
-  return 1 + ADEQUACY_SURPLUS_CEILING * (1 - Math.exp(-2 * (ratio - 1)));
-}
-
-// Six bands, so the badge answers "is this worth watching" without the
-// numbers beside it having to be interpreted. The boundaries are placed
-// against real readings from a live provider rather than round numbers:
-// Okay and below is where a feed starts visibly costing you something.
-const QUALITY_TIERS = [
-  [100, 'excellent'],
-  [87, 'great'],
-  [74, 'good'],
-  [62, 'okay'],
-  [40, 'poor'],
-  [0, 'bad'],
-];
-
-const TIER_DISPLAY_NAMES = {
-  excellent: 'Excellent',
-  great: 'Great',
-  good: 'Good',
-  okay: 'Okay',
-  poor: 'Poor',
-  bad: 'Bad',
-};
-
-function tierForScore(score) {
-  for (const [minScore, tier] of QUALITY_TIERS) {
-    if (score >= minScore) return tier;
-  }
-  return 'bad';
-}
-
-function tierDisplayName(tier) {
-  return TIER_DISPLAY_NAMES[tier] || '';
-}
-
-// Returns { score, tier } or null when there is not enough to judge on.
-//
-// bpp is all the adequacy term needs, and that is not a shortcut: the
-// ratio works out as bpp/referenceBpp exactly, because the reference
-// bitrate is referenceBpp x the same pixel count bpp was divided by. It
-// means a reading recovered from a stored label scores identically to one
-// measured a moment ago, with no width to carry around.
-function scoreQuality(reading) {
-  if (!reading || !reading.height) return null;
-  const { height, fps, interlaced, codec, bpp, anamorphic, width, profile, audioChannels } = reading;
-
-  // Without a bitrate there is no adequacy term and therefore no honest
-  // score - resolution on its own is the thing this exists to stop people
-  // trusting. A legacy "1080p60" label lands here and stays untiered.
-  if (!bpp) return null;
-
-  let ceiling = resolutionCeiling(height);
-
-  // Interlaced carries half the temporal information its field rate
-  // suggests, and combs on the motion sport is made of.
-  ceiling *= frameRateFactor(interlaced && fps ? fps : fps);
-  if (interlaced) ceiling *= 0.92;
-
-  // A 1440x1080 frame is stretched to 1920 on screen. Not a total loss -
-  // it is still 1080 lines - but it is not a 1920x1080 picture either.
-  if (anamorphic && width && height) {
-    const expectedWidth = (height * 16) / 9;
-    if (width < expectedWidth) ceiling *= Math.sqrt(width / expectedWidth);
-  }
-
-  // Baseline has no B-frames and spends its bitrate worse than Main or
-  // High at the same number.
-  if (profile && /baseline/i.test(profile)) ceiling *= 0.95;
-
-  let score = ceiling * adequacy(bpp / referenceBppFor(codec, height));
-
-  // Surround audio is a genuine difference between two otherwise equal
-  // feeds, but it is not picture - deliberately small enough to break a
-  // tie and never to move a stream between tiers.
-  if (audioChannels && audioChannels > 2) score += 1.5;
-
-  const rounded = Math.max(0, Math.min(120, Math.round(score * 10) / 10));
-  return { score: rounded, tier: tierForScore(rounded) };
-}
-
-// Recovers a scoreable reading from a label this module wrote, so a
-// quality saved in a previous session tiers the same as a fresh one
-// without a second field having to be persisted alongside it.
-// "1080p60 · h264 · 6.0Mbps · 0.048bpp" -> { height, fps, interlaced, codec, bpp }
+// Recovers a rateable reading from a label this module wrote, so a
+// quality saved in a previous session rates the same as a fresh one
+// without a second field having to be persisted beside it.
+// "Great \u00b7 1080p60 \u00b7 0.101bpp" -> { height, fps, interlaced, bpp, tier }
 function parseQualityLabel(label) {
   // Split on the separator rather than pattern-matching across the whole
-  // string. With a tier word in front, a regex looking for "codec between
-  // two separators" happily matched "1080p60" instead - each field is
-  // recognised by its own shape here, and unknown fields are ignored
-  // rather than mistaken for something else.
-  const parts = String(label || '').split('·').map(p => p.trim()).filter(Boolean);
+  // string: each field is recognised by its own shape, and anything
+  // unrecognised is ignored rather than mistaken for something else.
+  const parts = String(label || '').split('\u00b7').map(p => p.trim()).filter(Boolean);
 
-  const out = { height: null, fps: null, interlaced: false, codec: null, bpp: null, tier: null };
+  const out = { height: null, fps: null, interlaced: false, bpp: null, tier: null, codec: null };
   for (const part of parts) {
     const form = part.match(/^(\d{3,4})([pi])(\d+)?$/);
     if (form) {
       out.height = Number(form[1]);
       out.interlaced = form[2] === 'i';
       const labelled = form[3] ? Number(form[3]) : null;
-      // The label writes an interlaced mode by its field rate, so halve
-      // it back to the frame rate the score is computed on.
+      // Written as a field rate for interlaced, so halve it back.
       out.fps = labelled ? (out.interlaced ? labelled / 2 : labelled) : null;
       continue;
     }
-    const bpp = part.match(/^([\d.]+)bpp$/);
-    if (bpp) { out.bpp = Number(bpp[1]); continue; }
-    if (/^[\d.]+(Mbps|kbps)$/.test(part)) continue;   // bitrate is implied by bpp
+    const bppPart = part.match(/^([\d.]+)bpp$/);
+    if (bppPart) { out.bpp = Number(bppPart[1]); continue; }
+    if (/^[\d.]+(Mbps|kbps)$/.test(part)) continue;
     const tierKey = part.toLowerCase();
     if (TIER_DISPLAY_NAMES[tierKey]) { out.tier = tierKey; continue; }
+    // Labels written before this format carried the codec; keep it.
     if (/^[a-z][a-z0-9]*$/i.test(part) && !out.codec) out.codec = part;
   }
 
@@ -497,16 +432,6 @@ function scoreQualityLabel(label) {
   return reading ? scoreQuality(reading) : null;
 }
 
-// Counts the video bitrate off the wire.
-//
-// ffprobe DOES report stream.bit_rate, and on a live MPEG-TS feed it is
-// almost always empty - it is read from container metadata, and a live
-// mux carries none. So it is measured instead: total the video packets
-// and divide by the timespan they cover.
-//
-// Video packets only. The audio track is real bandwidth but it is not
-// picture, and folding it in would flatter a stream with 5.1 audio into
-// looking like it had a better image.
 // The spread between the 10th and 90th percentile second, not between
 // the largest and smallest. Max over min is the most outlier-sensitive
 // statistic available: one second holding a scene-change keyframe
@@ -776,7 +701,10 @@ async function probeStream(url, options = {}) {
         height: video.height,
         fps,
         interlaced,
-        codec: video.codec_name || null,
+        // Spelled the way people say it - hevc IS h265 and nothing else,
+        // and the hover detail is the only place the codec appears now
+        // that the badge carries just the rating, format and bpp.
+        codec: displayCodec(video.codec_name),
         profile: video.profile || null,
         pixFmt: video.pix_fmt || null,
         // Not 1:1 means the stored frame is narrower or wider than what
@@ -810,17 +738,14 @@ async function probeStream(url, options = {}) {
 
       // Scored before the label is written, because the label leads with
       // the tier the score produces.
-      const scored = scoreQuality({
-        height: video.height, width: video.width, fps, interlaced,
-        codec: video.codec_name, bpp,
-        anamorphic: result.anamorphic, profile: video.profile,
-        audioChannels: result.audioChannels,
-      });
+      const scored = scoreQuality({ height: video.height, fps, interlaced, bpp });
       result.score = scored ? scored.score : null;
       result.tier = scored ? scored.tier : null;
+      // Rated Bad for its frame rate rather than its bitrate. Surfaced
+      // because otherwise a rich stream reading Bad looks like a mistake.
+      result.tooSlow = scored ? !!scored.tooSlow : false;
       result.label = formatQualityLabel({
-        height: video.height, fps, interlaced, codec: video.codec_name,
-        bitrate, bpp, tier: result.tier,
+        height: video.height, fps, interlaced, bpp, tier: result.tier,
       });
     }
   } catch (err) {
@@ -845,7 +770,8 @@ module.exports = {
   tierDisplayName,
   scoreQuality,
   scoreQualityLabel,
-  tierForScore,
+  tierForBpp,
+  MIN_SMOOTH_FPS,
   formatBitrate,
   bitsPerPixel,
   measureVideoBitrate,
