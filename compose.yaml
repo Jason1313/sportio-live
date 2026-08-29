@@ -18,3 +18,61 @@ services:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
     volumes:
       - ./data:/usr/src/app/data
+
+  # Optional. Puts the app on the tailnet at
+  # https://sportio.<your-tailnet>.ts.net, with Tailscale terminating TLS
+  # and proxying to the container above. The app needs no changes for
+  # this: it already sets `trust proxy`, so the X-Forwarded-Proto that
+  # Serve sends is what makes self-generated URLs say https.
+  #
+  #   docker compose --profile tailscale up -d
+  #
+  # Or put COMPOSE_PROFILES=tailscale in .env and it comes up with
+  # everything else, with no extra flag to remember.
+  ts-sportio:
+    image: tailscale/tailscale:latest
+    container_name: ts-sportio
+    # Behind a profile so it is opt-in. Without one this container starts
+    # on every `docker compose up`, and on a machine with no auth key it
+    # would crash-loop next to a perfectly healthy app - which is most
+    # machines, this repo being public. Delete this line to make Tailscale
+    # unconditional.
+    profiles: ["tailscale"]
+    # The tailnet device name.
+    hostname: sportio
+    environment:
+      # Plain ${...}, not the ${TS_AUTHKEY:?...} form. Compose interpolates
+      # the whole file before it works out which services a profile
+      # selects, so the `:?` would refuse to start Sportio itself on any
+      # machine with no Tailscale key, profile or no profile. A missing key
+      # therefore surfaces at runtime instead: this container comes up and
+      # reports the authentication failure in `docker logs ts-sportio`.
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_SERVE_CONFIG=/config/serve.json
+      # These tags must already exist in the tailnet ACL, and the auth key
+      # must be authorized to apply them, or the container starts and then
+      # fails to register.
+      - TS_EXTRA_ARGS=--advertise-tags=tag:container,tag:shared
+    volumes:
+      # Named volume, so the node keeps its identity across recreates.
+      # Losing this is what makes every restart register a brand new
+      # machine in the tailnet.
+      - ts-state:/var/lib/tailscale
+      # Read-only - tailscaled only ever reads this file. It has to exist
+      # on disk before the first start: Docker silently creates a
+      # DIRECTORY at a bind-mount source that is missing, and tailscaled
+      # then fails with an error that points at the config rather than at
+      # the absent file.
+      - ./serve.json:/config/serve.json:ro
+    depends_on:
+      - sportio-live
+    restart: unless-stopped
+    # No cap_add: NET_ADMIN and no /dev/net/tun on purpose. Those are for
+    # running a subnet router or an exit node; this container only proxies
+    # to a sibling, which tailscaled does in userspace mode - the image's
+    # default when there is no tun device. Adding them would hand it
+    # network privileges the job does not call for.
+
+volumes:
+  ts-state:
