@@ -328,18 +328,66 @@ let m3uSettings = loadM3uSettings();
 // nothing on a different IPTV service.
 const NETWORK_DEFAULTS_FILE = path.join(DATA_DIR, 'network-defaults.json');
 
+// Stored as a list of named presets rather than one map, because stream
+// ids are per provider: a set pinned against one IPTV service identifies
+// nothing on another. Keeping several named sets side by side is what
+// lets one instance carry defaults for more than one provider, and
+// deleting one is how a stale set stops polluting suggestions.
+//
+// Every preset contributes its ids to the suggestions. That works
+// precisely BECAUSE the ids are provider-specific - the sets that belong
+// to some other service match no channel here and are inert - and it is
+// why each preset also records the host it was captured from, so a human
+// can tell at a glance which one is which and remove the one that no
+// longer applies.
+function emptyDefaults() {
+  return { presets: [] };
+}
+
+function normalisePreset(raw, index) {
+  if (!raw || typeof raw !== 'object') return null;
+  const networks = {};
+  for (const [key, ids] of Object.entries(raw.networks || {})) {
+    if (!Array.isArray(ids)) continue;
+    const clean = ids.filter(id => typeof id === 'string' && id);
+    if (clean.length > 0) networks[key] = clean;
+  }
+  if (Object.keys(networks).length === 0) return null;
+  return {
+    id: String(raw.id || `preset-${index + 1}`),
+    name: String(raw.name || `Preset ${index + 1}`).slice(0, 60),
+    source: String(raw.source || '').slice(0, 120),
+    createdAt: raw.createdAt || new Date().toISOString(),
+    networks,
+  };
+}
+
 function loadNetworkDefaults() {
-  if (!fs.existsSync(NETWORK_DEFAULTS_FILE)) return {};
+  if (!fs.existsSync(NETWORK_DEFAULTS_FILE)) return emptyDefaults();
   try {
     const raw = JSON.parse(fs.readFileSync(NETWORK_DEFAULTS_FILE, 'utf8'));
-    const out = {};
-    for (const [key, ids] of Object.entries(raw)) {
-      if (Array.isArray(ids)) out[key] = ids.filter(id => typeof id === 'string' && id);
+
+    if (Array.isArray(raw.presets)) {
+      return { presets: raw.presets.map(normalisePreset).filter(Boolean) };
     }
-    return out;
+
+    // The old shape: one bare { NETWORK: [ids] } map with no name. Wrapped
+    // rather than discarded - somebody pinned those deliberately, and the
+    // only thing missing is a name for them.
+    const migrated = normalisePreset({
+      id: 'preset-1',
+      name: 'Saved defaults',
+      source: '',
+      networks: raw,
+    }, 0);
+    if (!migrated) return emptyDefaults();
+    console.log('[Defaults] Migrated the single default set into a named preset.');
+    const upgraded = { presets: [migrated] };
+    saveNetworkDefaults(upgraded);
+    return upgraded;
   } catch (err) {
     console.error('[Storage] Error loading network-defaults.json:', err.message);
-    return {};
+    return emptyDefaults();
   }
 }
 
@@ -349,6 +397,49 @@ function saveNetworkDefaults(defaults) {
   } catch (err) {
     console.error('[Storage] Failed to save network-defaults.json:', err.message);
   }
+}
+
+// The union every preset contributes to, in preset order. Ids repeat
+// harmlessly; the Set keeps the first occurrence, which preserves the
+// order the operator arranged them in.
+function mergedNetworkDefaults() {
+  const merged = {};
+  for (const preset of networkDefaults.presets) {
+    for (const [key, ids] of Object.entries(preset.networks)) {
+      if (!merged[key]) merged[key] = [];
+      for (const id of ids) {
+        if (!merged[key].includes(id)) merged[key].push(id);
+      }
+    }
+  }
+  return merged;
+}
+
+// The host a preset was captured from. Host only, never the path or the
+// query - an M3U playlist URL carries the account credentials in its
+// path, and this string is shown in the dashboard and written to a file.
+function providerHostFor(user) {
+  const raw = user.connectionType === 'm3u'
+    ? (user.m3u && user.m3u.playlistUrl)
+    : (user.xtream && user.xtream.url);
+  try {
+    return new URL(String(raw || '')).host;
+  } catch (err) {
+    return '';
+  }
+}
+
+// Metadata only. The stream ids themselves are of no use to the
+// dashboard and are the one part worth not shipping around.
+function describePresets() {
+  return networkDefaults.presets.map(preset => ({
+    id: preset.id,
+    name: preset.name,
+    source: preset.source,
+    createdAt: preset.createdAt,
+    networkCount: Object.keys(preset.networks).length,
+    channelCount: Object.values(preset.networks).reduce((n, ids) => n + ids.length, 0),
+  }));
 }
 
 let networkDefaults = loadNetworkDefaults();
@@ -2747,9 +2838,9 @@ app.post('/api/networks/suggest', async (req, res) => {
   if (!auth) return;
 
   const suggestions = networks.suggestAllNetworks(auth.source.channels, {
-    defaults: networkDefaults
+    defaults: mergedNetworkDefaults()
   });
-  return res.json({ success: true, suggestions, defaults: networkDefaults });
+  return res.json({ success: true, suggestions, presets: describePresets() });
 });
 
 // Free-text search over the whole playlist, for overriding a suggestion
@@ -2801,20 +2892,60 @@ app.post('/api/networks/defaults', async (req, res) => {
   const auth = await authenticateForChannels(req, res);
   if (!auth) return;
 
-  if (req.body.fromNetworkLinks === true) {
+  const action = req.body.action || 'list';
+
+  if (action === 'save') {
+    const name = String(req.body.name || '').trim().slice(0, 60);
+    if (!name) {
+      return res.status(400).json({ error: 'Give the preset a name.' });
+    }
+
     const derived = {};
     for (const [networkKey, links] of Object.entries(auth.user.networkLinks || {})) {
       if (!Array.isArray(links)) continue;
       const ids = [...new Set(links.map(l => networks.streamIdFromUrl(l.url)).filter(Boolean))];
       if (ids.length > 0) derived[networkKey] = ids;
     }
-    networkDefaults = derived;
+    if (Object.keys(derived).length === 0) {
+      return res.status(400).json({ error: 'No channels are configured, so there is nothing to save.' });
+    }
+
+    // Saving over a name replaces that preset in place rather than
+    // leaving two of the same name behind - re-pinning after adding a
+    // channel is the common case, and it should not accumulate.
+    const preset = {
+      id: `preset-${Date.now().toString(36)}`,
+      name,
+      source: providerHostFor(auth.user),
+      createdAt: new Date().toISOString(),
+      networks: derived,
+    };
+    const existing = networkDefaults.presets.findIndex(p => p.name.toLowerCase() === name.toLowerCase());
+    if (existing >= 0) {
+      preset.id = networkDefaults.presets[existing].id;
+      networkDefaults.presets[existing] = preset;
+    } else {
+      networkDefaults.presets.push(preset);
+    }
+
     saveNetworkDefaults(networkDefaults);
     const total = Object.values(derived).reduce((n, ids) => n + ids.length, 0);
-    console.log(`[Defaults] Saved ${total} stream id(s) across ${Object.keys(derived).length} network(s)`);
+    console.log(`[Defaults] ${existing >= 0 ? 'Replaced' : 'Saved'} preset "${name}"` +
+      ` (${preset.source || 'unknown host'}): ${total} stream id(s) across ${Object.keys(derived).length} network(s)`);
   }
 
-  return res.json({ success: true, defaults: networkDefaults });
+  if (action === 'delete') {
+    const id = String(req.body.id || '');
+    const before = networkDefaults.presets.length;
+    networkDefaults.presets = networkDefaults.presets.filter(p => p.id !== id);
+    if (networkDefaults.presets.length === before) {
+      return res.status(404).json({ error: 'That preset no longer exists.' });
+    }
+    saveNetworkDefaults(networkDefaults);
+    console.log(`[Defaults] Deleted preset ${id}`);
+  }
+
+  return res.json({ success: true, presets: describePresets() });
 });
 
 // Probes ONE stream for its resolution and frame rate. One URL per

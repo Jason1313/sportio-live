@@ -239,9 +239,9 @@
             <button id="network-check-all-10-btn" onclick="checkQualityForAllNetworks({ passes: 10 })"
                     title="Check every channel 10 times, round-robin, and average all the readings together"
                     class="text-xs font-bold text-[#e6e6e6]/45 hover:text-[#5aa8d1] transition">&times;10</button>
-            <button id="network-defaults-btn" onclick="saveNetworkDefaults()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
+            <button id="network-defaults-btn" onclick="toggleDefaultsPanel()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
               <i class="fa-solid fa-thumbtack"></i>
-              Save As Defaults
+              Defaults
             </button>
             <button id="network-suggest-all-btn" onclick="applyAllNetworkSuggestions()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
               <i class="fa-solid fa-wand-magic-sparkles"></i>
@@ -258,7 +258,30 @@
           <br class="mb-1">
           These channels are for <span class="text-[#e6e6e6]/80 font-semibold">UFC cards only</span>. Dana White's Contender Series and PFL are found by their own automatic searches instead, because the UFC channels do not carry those shows. Everything else on the ESPN MMA schedule - RIZIN, LFA, UAE Warriors, Road to UFC - still gets a card, but no automatic search: there is no term that would be right across every promotion, and a wrong guess fills the list with channels showing another sport. Open the event in the watch portal and search your channels by hand for those.
         </p>
-        <div id="network-links-container" class="space-y-3">
+        <!-- Default presets. Several, named, because stream ids are per
+           provider: a set pinned against one IPTV service identifies
+           nothing on another, so an instance serving two providers needs
+           one set for each. -->
+      <div id="network-defaults-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-4">
+        <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Default presets</h4>
+        <p class="text-[11px] text-[#e6e6e6]/45 mb-3 leading-relaxed">
+          Pins the channels you have configured as the suggestions every new account starts from.
+          Stream ids only &mdash; no URLs and no provider credentials. Those ids are numbered by your
+          IPTV provider, so a preset applies to that provider alone; save a separate one for each,
+          and delete any that no longer apply.
+        </p>
+        <div class="flex gap-2 mb-3">
+          <input type="text" id="defaults-preset-name" maxlength="60" placeholder="Name this preset, e.g. the provider it is for"
+                 onkeydown="if(event.key==='Enter')saveDefaultsPreset()"
+                 class="flex-1 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
+          <button onclick="saveDefaultsPreset()" class="bg-[#3b8fc4] hover:bg-[#4fa3d8] font-bold py-2 px-3 rounded-lg text-xs transition shrink-0">
+            Save current
+          </button>
+        </div>
+        <div id="defaults-preset-list" class="space-y-1.5"></div>
+      </div>
+
+      <div id="network-links-container" class="space-y-3">
           <!-- Dynamically injected network accordions -->
         </div>
       </div>
@@ -2463,7 +2486,74 @@
     // Only ids travel - never a URL, which for M3U carries the provider
     // username and password in its path. A bare "429939" is not a
     // credential.
-    async function saveNetworkDefaults() {
+    // Presets as last reported by the server. Metadata only - the stream
+    // ids stay there, since nothing here needs them.
+    let defaultPresets = [];
+
+    function toggleDefaultsPanel() {
+      const panel = document.getElementById('network-defaults-panel');
+      if (!panel) return;
+      const opening = panel.classList.contains('hidden');
+      panel.classList.toggle('hidden', !opening);
+      if (opening) refreshDefaultPresets();
+    }
+
+    function renderDefaultPresets() {
+      const box = document.getElementById('defaults-preset-list');
+      if (!box) return;
+      if (defaultPresets.length === 0) {
+        box.innerHTML = '<p class="text-[11px] text-[#e6e6e6]/40 italic">Nothing pinned yet.</p>';
+        return;
+      }
+      box.innerHTML = defaultPresets.map(preset => `
+        <div class="flex items-center gap-3 bg-[#2f3e47] border border-[#e6e6e6]/10 rounded-lg px-3 py-2">
+          <span class="flex-1 min-w-0">
+            <span class="block text-xs font-semibold truncate">${escapeHtml(preset.name)}</span>
+            <span class="block text-[10px] text-[#e6e6e6]/45 truncate">
+              ${preset.channelCount} channel${preset.channelCount === 1 ? '' : 's'} across
+              ${preset.networkCount} network${preset.networkCount === 1 ? '' : 's'}${
+                preset.source ? ` &middot; <span class="font-mono">${escapeHtml(preset.source)}</span>` : ''}
+            </span>
+          </span>
+          <button onclick="deleteDefaultsPreset('${escapeHtml(preset.id)}', '${escapeHtml(preset.name)}')"
+                  title="Delete this preset"
+                  class="text-xs px-1.5 py-1 rounded text-[#e56a6a]/70 hover:text-[#e56a6a] hover:bg-[#3b4d58] transition shrink-0">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>`).join('');
+    }
+
+    async function postDefaults(body) {
+      const res = await fetch('/api/networks/defaults', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, ...body })
+      });
+      const data = await res.json().catch(() => null);
+      return { ok: res.ok, data };
+    }
+
+    async function refreshDefaultPresets() {
+      try {
+        const { ok, data } = await postDefaults({ action: 'list' });
+        if (ok && data && data.success) {
+          defaultPresets = data.presets || [];
+          renderDefaultPresets();
+        }
+      } catch (err) {
+        /* The panel simply shows whatever it last knew. */
+      }
+    }
+
+    async function saveDefaultsPreset() {
+      const input = document.getElementById('defaults-preset-name');
+      const name = input.value.trim();
+      if (!name) {
+        showStatus('Give the preset a name first.', true);
+        input.focus();
+        return;
+      }
+
       // Counted by STREAM id, so each feed is its own pin. Counting by
       // channel id collapsed five CBS Sports Network feeds into one,
       // because they all share "cbssportsnetwork.us" and it cannot tell
@@ -2477,36 +2567,50 @@
         total += ids.length;
         summary.push(`${network.label}: ${ids.length}`);
       }
-
       if (total === 0) {
         showStatus('No channels configured yet, so there is nothing to pin.', true);
         return;
       }
 
+      const replacing = defaultPresets.some(p => p.name.toLowerCase() === name.toLowerCase());
       const ok = confirm(
-        `Pin ${total} channel${total === 1 ? '' : 's'} as the default suggestions for this Sportio instance?\n\n` +
+        `${replacing ? 'Replace' : 'Save'} the preset "${name}" with ${total} channel${total === 1 ? '' : 's'}?\n\n` +
         `${summary.join('\n')}\n\n` +
         `Stream ids only - no URLs and no provider credentials.\n\n` +
-        `These identify the exact feeds you picked, which means they apply to this IPTV ` +
-        `provider. A different provider numbers its streams differently, so you would pin ` +
-        `again there.\n\nThis replaces any previously pinned defaults.`
-      );
+        (replacing
+          ? 'A preset of that name already exists and will be overwritten.'
+          : 'Other presets are left alone. Every preset contributes its channels to the suggestions, ' +
+            'and the ones belonging to another provider match nothing here.'));
       if (!ok) return;
 
       try {
-        const res = await fetch('/api/networks/defaults', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, fromNetworkLinks: true })
-        });
-        const data = await res.json();
-        if (!res.ok || !data.success) {
-          showStatus(data.error || 'Could not save defaults.', true);
+        const { ok: httpOk, data } = await postDefaults({ action: 'save', name });
+        if (!httpOk || !data || !data.success) {
+          showStatus((data && data.error) || 'Could not save the preset.', true);
           return;
         }
-        showStatus(`Pinned ${total} channel${total === 1 ? '' : 's'} as defaults.`);
+        defaultPresets = data.presets || [];
+        renderDefaultPresets();
+        input.value = '';
+        showStatus(`Pinned ${total} channel${total === 1 ? '' : 's'} as "${name}".`);
       } catch (err) {
-        showStatus('Network error while saving defaults.', true);
+        showStatus('Network error while saving the preset.', true);
+      }
+    }
+
+    async function deleteDefaultsPreset(id, name) {
+      if (!confirm(`Delete the preset "${name}"?\n\nIt stops contributing to the suggestions new accounts start from. Nothing already configured on any account changes.`)) return;
+      try {
+        const { ok, data } = await postDefaults({ action: 'delete', id });
+        if (!ok || !data || !data.success) {
+          showStatus((data && data.error) || 'Could not delete the preset.', true);
+          return;
+        }
+        defaultPresets = data.presets || [];
+        renderDefaultPresets();
+        showStatus(`Deleted "${name}".`);
+      } catch (err) {
+        showStatus('Network error while deleting the preset.', true);
       }
     }
 
