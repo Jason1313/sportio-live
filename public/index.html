@@ -215,9 +215,6 @@
           <div id="active-uuid-display" class="font-mono text-sm text-[#5aa8d1] font-bold"></div>
         </div>
         <div class="flex items-center gap-2">
-          <button onclick="refreshCategories()" class="bg-[#c9992e] hover:bg-[#dba93e] text-[#1a1a1a] text-xs font-bold py-2 px-4 rounded-lg transition flex items-center">
-            <i class="fa-solid fa-rotate mr-2"></i>Refresh Categories
-          </button>
           <button id="copy-link-btn" onclick="handleCopyLinkButton()" class="bg-[#4a6fa5] hover:bg-[#5a82bc] text-xs font-bold py-2 px-4 rounded-lg transition flex items-center">
             <i class="fa-solid fa-copy mr-2"></i>Copy Install Link
           </button>
@@ -493,7 +490,6 @@
       UFC: 'fa-hand-fist'
     };
     let activeUser = null;
-    let fetchedCategories = [];
 
     // --- Network Links state ---
     // networkRegistry comes from the server rather than being duplicated
@@ -825,7 +821,6 @@
           // so the entire downstream Category Search UI works unchanged -
           // a group-title string serves as both the id and the display
           // name here, since M3U has no separate numeric-id concept.
-          fetchedCategories = data.categories.map(c => ({ category_id: c.name, category_name: c.name }));
           wizardGoToPassword();
         } else {
           // Indicate which URL was the problem where the backend could
@@ -884,7 +879,6 @@
         const data = await res.json();
         if (data.success) {
           wizardXtream = { url, username, password };
-          fetchedCategories = data.categories;
           btn.dataset.mode = 'next';
           btn.innerHTML = 'Next';
           btn.onclick = wizardGoToPassword;
@@ -986,91 +980,12 @@
           document.getElementById('active-uuid-display').textContent = uuid;
           showView('dashboard');
 
-          const x = activeUser.xtream;
-          const m = activeUser.m3u;
-          const hasXtream = x && x.url && x.username && x.password;
-          const hasM3u = m && m.playlistUrl && m.epgUrl;
-          if (hasXtream || hasM3u) {
-            await refreshCategories();
-          } else {
-            showStatus('Successfully authenticated!');
-          }
+          showStatus('Successfully authenticated!');
         } else {
           showStatus(data.error || 'Login failed.', true);
         }
       } catch (err) {
         showStatus('Network error during login.', true);
-      }
-    }
-
-    async function fetchCategories() {
-      if (!activeUser || !activeUser.xtream || !activeUser.xtream.url) {
-        return showStatus('No Xtream credentials saved yet. Click Edit Xtream to add them.', true);
-      }
-      const { url, username, password } = activeUser.xtream;
-
-      showStatus('Fetching categories from Xtream server...');
-
-      try {
-        const res = await fetch('/api/xtream/categories', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, username, password })
-        });
-        const data = await res.json();
-        if (data.success) {
-          fetchedCategories = data.categories;
-          showStatus(`Fetched ${fetchedCategories.length} categories!`);
-        } else {
-          showStatus(data.error || 'Failed to fetch categories.', true);
-        }
-      } catch (err) {
-        showStatus('Network error while connecting to Xtream API.', true);
-      }
-    }
-
-    // Companion to fetchCategories() above, for M3U accounts - reads from
-    // the scheduler's already-fresh cache (via /api/m3u/categories)
-    // rather than re-importing the account's URLs from scratch, since
-    // that's a real, multi-second operation with no reason to repeat it
-    // just to view already-selected categories.
-    async function fetchM3uCategories() {
-      if (!activeUser || !activeUser.m3u || !activeUser.m3u.playlistUrl) {
-        return showStatus('No M3U URLs saved yet. Click Edit M3U to add them.', true);
-      }
-
-      showStatus('Loading categories...');
-
-      try {
-        const res = await fetch('/api/m3u/categories', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password })
-        });
-        const data = await res.json();
-        if (data.success) {
-          fetchedCategories = data.categories.map(c => ({ category_id: c.name, category_name: c.name }));
-          if (data.notReady) {
-            showStatus('M3U data is still loading in the background - try again shortly.', true);
-          } else {
-            showStatus(`Loaded ${fetchedCategories.length} categories!`);
-          }
-        } else {
-          showStatus(data.error || 'Failed to load categories.', true);
-        }
-      } catch (err) {
-        showStatus('Network error while loading M3U categories.', true);
-      }
-    }
-
-    // Single entry point for both the login flow and the dashboard's
-    // "Refresh Categories" button - branches by connectionType once, here,
-    // rather than duplicating that same branch at every call site.
-    async function refreshCategories() {
-      if (activeUser && activeUser.connectionType === 'm3u') {
-        await fetchM3uCategories();
-      } else {
-        await fetchCategories();
       }
     }
 
@@ -1214,7 +1129,6 @@
           // Hold onto both the verified credentials and the categories this
           // test already fetched, so Confirm doesn't need to hit the API again.
           editXtreamTestedCredentials = { url, username, password };
-          fetchedCategories = data.categories;
           const btn = document.getElementById('edit-xtream-btn');
           btn.onclick = confirmEditXtream;
           btn.innerHTML = 'Confirm';
@@ -1339,7 +1253,6 @@
 
         if (data.success) {
           editM3uImportedValues = { playlistUrl, epgUrl };
-          fetchedCategories = data.categories.map(c => ({ category_id: c.name, category_name: c.name }));
           btn.onclick = confirmEditM3u;
           btn.innerHTML = 'Confirm';
           btn.className = 'w-full bg-[#3b8fc4] hover:bg-[#4fa3d8] active:scale-95 transition-all duration-150 font-bold py-2.5 rounded-lg text-xs';
