@@ -2734,7 +2734,14 @@ const M3U_WARM_COOLDOWN_MS = 2 * 60 * 1000;
 function warmM3uSourceInBackground(user) {
   const playlistUrl = user && user.m3u && user.m3u.playlistUrl;
   const epgUrl = user && user.m3u && user.m3u.epgUrl;
-  if (!playlistUrl || !epgUrl) return;
+  // The playlist is the only thing required. This used to refuse to warm
+  // without an EPG URL as well, which made an account that had none sit
+  // on "your playlist is still loading" permanently - the cache could
+  // never fill, so every channel search, suggestion and category lookup
+  // failed forever with a message promising it was nearly there. Nothing
+  // reads the EPG at all since the tier matcher was removed, so requiring
+  // one to fetch a playlist was guarding nothing.
+  if (!playlistUrl) return;
 
   const lastAttempt = m3uWarmAttempts.get(playlistUrl) || 0;
   if (Date.now() - lastAttempt < M3U_WARM_COOLDOWN_MS) return;

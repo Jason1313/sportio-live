@@ -2530,25 +2530,49 @@
       if (opening) loadCategoryPicker();
     }
 
+    function categoryPickerMessage(text, retry) {
+      document.getElementById('categories-list').innerHTML =
+        `<p class="text-[11px] text-[#e56a6a] p-2 leading-relaxed">${escapeHtml(text)}` +
+        (retry ? ' <button onclick="loadCategoryPicker()" class="underline font-bold hover:text-[#e56a6a]">Try again</button>' : '') +
+        '</p>';
+    }
+
     async function loadCategoryPicker() {
       const list = document.getElementById('categories-list');
       list.innerHTML = '<p class="text-[11px] text-[#e6e6e6]/40 italic p-2">Loading categories...</p>';
+
+      // Three failures worth telling apart, because they were all
+      // reported as "Network error" before and only one of them was:
+      // the request not completing, the server refusing it, and this
+      // page throwing while drawing the answer. The third was inside the
+      // same try as the fetch, so a rendering bug accused the network.
+      let data;
       try {
         const res = await fetch('/api/networks/categories', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password })
         });
-        const data = await res.json().catch(() => null);
+        data = await res.json().catch(() => null);
         if (!res.ok || !data || !data.success) {
-          list.innerHTML = `<p class="text-[11px] text-[#e56a6a] p-2">${escapeHtml((data && data.error) || 'Could not load categories.')}</p>`;
+          const reason = (data && data.error) || `The server answered ${res.status}.`;
+          // notReady means the playlist cache is still filling, which is
+          // a wait rather than a fault - so it offers to ask again.
+          categoryPickerMessage(reason, !!(data && data.notReady));
           return;
         }
+      } catch (err) {
+        categoryPickerMessage(`Could not reach the server: ${err.message}`, true);
+        return;
+      }
+
+      try {
         allCategories = data.categories || [];
         selectedCategories = new Set(data.selected || []);
         renderCategoryPicker();
       } catch (err) {
-        list.innerHTML = '<p class="text-[11px] text-[#e56a6a] p-2">Network error while loading categories.</p>';
+        console.error('[Categories] Failed to render the picker:', err);
+        categoryPickerMessage(`Loaded ${(data.categories || []).length} categories but could not draw them: ${err.message}`, true);
       }
     }
 
