@@ -2468,9 +2468,30 @@ async function fetchAllXtreamLiveStreams(user) {
   }
 }
 
+// Every Xtream stream URL in the app is built here, and the extension is
+// the reason it is worth having one place.
+//
+// Xtream Codes serves a live stream two ways: .m3u8 (HLS) and .ts (raw
+// MPEG-TS). Both are standard and this app has always asked for .m3u8,
+// but HLS output is the one providers commonly leave disabled or serve
+// badly - and the failure is silent in exactly the way that is hardest
+// to read. The player launches, connects, gets nothing playable, and
+// sits there looking like the app handed it an empty address.
+//
+// So it is per account rather than per instance: it describes the
+// provider, and every account here brings its own. Defaults to m3u8, so
+// nothing changes for anyone already working.
+const XTREAM_STREAM_FORMATS = ['m3u8', 'ts'];
+
+function xtreamStreamFormat(user) {
+  const configured = user && user.xtream && user.xtream.streamFormat;
+  return XTREAM_STREAM_FORMATS.includes(configured) ? configured : 'm3u8';
+}
+
 function buildXtreamStreamUrl(user, streamId) {
   const baseUrl = user.xtream.url.replace(/\/+$/, '');
-  return `${baseUrl}/live/${encodeURIComponent(user.xtream.username)}/${encodeURIComponent(user.xtream.password)}/${streamId}.m3u8`;
+  const ext = xtreamStreamFormat(user);
+  return `${baseUrl}/live/${encodeURIComponent(user.xtream.username)}/${encodeURIComponent(user.xtream.password)}/${streamId}.${ext}`;
 }
 
 // ---------------------------------------------------------------------
@@ -3820,7 +3841,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     const { resolved, problems } = networks.resolveNetworkLinks(
       user.networkLinks, networkKey, netSource,
       (streamId) => (user.xtream && user.xtream.url)
-        ? `${user.xtream.url.replace(/\/+$/, '')}/live/${encodeURIComponent(user.xtream.username)}/${encodeURIComponent(user.xtream.password)}/${streamId}.m3u8`
+        ? buildXtreamStreamUrl(user, streamId)
         : null
     );
 
@@ -3920,7 +3941,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
       // rather than storing it, so the builder is passed in - only this
       // route has the credentials in hand.
       (streamId) => (user.xtream && user.xtream.url)
-        ? `${user.xtream.url.replace(/\/+$/, '')}/live/${encodeURIComponent(user.xtream.username)}/${encodeURIComponent(user.xtream.password)}/${streamId}.m3u8`
+        ? buildXtreamStreamUrl(user, streamId)
         : null
     );
     linkProblems = problems;
@@ -4008,7 +4029,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
         name: s.name,
         description: epg.text,
         startTimestamp: epg.startTimestamp,
-        streamUrl: `${user.xtream.url.replace(/\/+$/, '')}/live/${encodeURIComponent(user.xtream.username)}/${encodeURIComponent(user.xtream.password)}/${s.stream_id}.m3u8`,
+        streamUrl: buildXtreamStreamUrl(user, s.stream_id),
         categoryLabel: getCategoryName(s)
       };
     });

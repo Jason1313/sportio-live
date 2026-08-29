@@ -322,6 +322,24 @@
         </div>
       </div>
 
+      <!-- Xtream stream format. Its own control rather than a field in the
+           Edit Xtream panel above: that panel is a credential change and
+           makes you re-enter and re-test a working username and password
+           to touch anything in it. This is not a credential, it is a fact
+           about the provider, and it saves on its own. -->
+      <div id="xtream-format-block" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-6">
+        <label class="block text-xs font-bold text-[#e6e6e6]/70 mb-1">Stream format</label>
+        <p class="text-[11px] text-[#e6e6e6]/45 mb-2.5 leading-relaxed">
+          Xtream serves every channel two ways. If a stream opens your player but nothing ever plays, try the other
+          one &mdash; providers often leave HLS switched off, and it fails silently rather than reporting an error.
+        </p>
+        <select id="xtream-format-select" onchange="saveXtreamStreamFormat()"
+                class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
+          <option value="m3u8">.m3u8 &mdash; HLS (default)</option>
+          <option value="ts">.ts &mdash; MPEG-TS (try this if nothing plays)</option>
+        </select>
+      </div>
+
       <!-- M3U URLs (collapsed until Edit M3U is clicked) -->
       <div id="edit-m3u-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-6 space-y-3">
         <input type="text" id="edit-m3u-playlist-url" oninput="updateEditM3uButton()" placeholder="Playlist URL (http://...)" class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
@@ -3076,6 +3094,15 @@
         document.getElementById('edit-m3u-trigger-btn').classList.add('flex');
       }
 
+      // Xtream-only, and it describes the provider rather than the
+      // account, so it reads whatever is saved and offers the other one.
+      const formatBlock = document.getElementById('xtream-format-block');
+      if (formatBlock) {
+        formatBlock.classList.toggle('hidden', isM3u);
+        document.getElementById('xtream-format-select').value =
+          (activeUser && activeUser.xtream && activeUser.xtream.streamFormat) === 'ts' ? 'ts' : 'm3u8';
+      }
+
       renderCategoryConfig(
         getVisibleSports(),
         'sports-config-container',
@@ -3142,6 +3169,36 @@
       } catch (err) {
         showStatus('Network error while saving settings.', true);
         return false;
+      }
+    }
+
+    // Saves immediately rather than waiting for the dashboard's Save
+    // button. The whole point of this control is to try the other format
+    // and see whether a stream plays, and a change you have to remember
+    // to save first would just read as "the setting did nothing".
+    async function saveXtreamStreamFormat() {
+      if (!activeUser || !activeUser.xtream) return;
+      const select = document.getElementById('xtream-format-select');
+      const streamFormat = select.value === 'ts' ? 'ts' : 'm3u8';
+      const previous = activeUser.xtream.streamFormat || 'm3u8';
+      const xtream = { ...activeUser.xtream, streamFormat };
+
+      try {
+        const res = await fetch('/api/user/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, xtream })
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'save failed');
+        activeUser.xtream = xtream;
+        showStatus(`Streams will now use .${streamFormat}. Re-check a channel's quality to confirm it plays.`);
+        // Every saved link and suggestion on screen carries the old
+        // extension in its URL, so they are all stale.
+        loadNetworkLinks();
+      } catch (err) {
+        select.value = previous;
+        showStatus('Could not save the stream format.', true);
       }
     }
 
