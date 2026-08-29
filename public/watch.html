@@ -66,8 +66,17 @@
       body .hdr-row { flex-wrap: wrap; gap: 0.5rem; padding: 0.5rem 0.75rem; }
       body .wordmark { font-size: 0.9375rem; letter-spacing: -0.01em; }
       body .setup-btn { margin-left: auto; }
-      body .setup-btn-text { display: none; }
-      body .setup-btn i { margin-right: 0; font-size: 1.0625rem; }
+      /* Thumb-sized, and spaced apart. Two 17px icons 25px apart is close
+         to a coin toss on a phone, and one of them logs you out. The
+         negative margins keep the row the height it already was. */
+      body .setup-btn, body .logout-btn {
+        padding: 0.5rem;
+        margin-top: -0.375rem;
+        margin-bottom: -0.375rem;
+      }
+      body .logout-btn { margin-left: 0.125rem; }
+      body .setup-btn-text, body .logout-btn-text { display: none; }
+      body .setup-btn i, body .logout-btn i { margin-right: 0; font-size: 1.0625rem; }
 
       #catalog-tabs {
         order: 3;
@@ -164,6 +173,10 @@
             class="setup-btn text-xs font-bold text-[#e6e6e6]/60 hover:text-[#e6e6e6] transition shrink-0">
       <i class="fa-solid fa-gear mr-1.5"></i><span class="setup-btn-text">Player setup</span>
     </button>
+    <!-- Rendered by renderLogoutButton, which also decides whether it is
+         shown at all - a log out control on the sign-in screen would be
+         offering to undo something that has not happened. -->
+    <button id="logout-btn" onclick="logOut()" class="logout-btn hidden"></button>
   </div>
 </header>
 
@@ -830,6 +843,9 @@
     boot();
   }
 
+  // `message` is optional now. A rejected password is an error and says
+  // so; a deliberate log out is not, and an empty red line under the
+  // fields would imply something had gone wrong with it.
   function forgetAccount(message) {
     localStorage.removeItem('sportio.uuid');
     localStorage.removeItem('sportio.password');
@@ -837,8 +853,71 @@
     password = '';
     show('gate');
     const el = document.getElementById('gate-error');
-    el.textContent = message;
-    el.classList.remove('hidden');
+    el.textContent = message || '';
+    el.classList.toggle('hidden', !message);
+    renderLogoutButton(false);
+  }
+
+  // Two steps on purpose. Signing back in needs the UUID - 36 characters
+  // nobody has memorised - so a mis-tapped log out in a header that is
+  // mostly icons on a phone costs a trip to the dashboard to look it up
+  // again. The first click arms it and says so, and it disarms itself
+  // shortly after, which is what an accident looks like.
+  let logoutArmTimer = null;
+
+  function renderLogoutButton(armed) {
+    const btn = document.getElementById('logout-btn');
+    if (!btn) return;
+    btn.className = `logout-btn text-xs font-bold transition shrink-0 ${uuid ? '' : 'hidden'} ${
+      armed ? 'text-[#e56a6a]' : 'text-[#e6e6e6]/60 hover:text-[#e6e6e6]'}`;
+    btn.title = armed ? 'Click again to log out' : 'Log out';
+    btn.setAttribute('aria-label', btn.title);
+    btn.innerHTML = `<i class="fa-solid ${armed ? 'fa-triangle-exclamation' : 'fa-right-from-bracket'} mr-1.5"></i>` +
+      `<span class="logout-btn-text">${armed ? 'Log out?' : 'Log out'}</span>`;
+  }
+
+  function disarmLogout() {
+    clearTimeout(logoutArmTimer);
+    logoutArmTimer = null;
+    renderLogoutButton(false);
+  }
+
+  function logOut() {
+    if (!logoutArmTimer) {
+      renderLogoutButton(true);
+      showToast('Tap again to log out.');
+      logoutArmTimer = setTimeout(disarmLogout, 4000);
+      return;
+    }
+    disarmLogout();
+
+    // Everything the account brought with it. Without this, signing in as
+    // somebody else shows the previous account's tabs and channels for
+    // the moment before their own arrive - and the probe cache is keyed
+    // by URL, so it would carry another account's stream addresses.
+    closeStreams();
+    catalogs = [];
+    activeCatalog = null;
+    catalogMetas = [];
+    conferenceChoice = {};
+    savedChannels = [];
+    savedResults = [];
+    savedGroups = [];
+    savedExcluded = new Set();
+    savedSelection = new Set();
+    probeResults = {};
+    streamRows = [];
+    streamSearchRows = [];
+    document.getElementById('catalog-tabs').innerHTML = '';
+    document.getElementById('grid').innerHTML = '';
+    document.getElementById('saved-list').innerHTML = '';
+    document.getElementById('saved-results').innerHTML = '';
+    showEmpty('');
+
+    forgetAccount('');
+    document.getElementById('gate-uuid').value = '';
+    document.getElementById('gate-password').value = '';
+    showToast('Logged out.');
   }
 
   async function postJson(url, body) {
@@ -857,6 +936,7 @@
 
   // --- Browsing ------------------------------------------------------
   async function boot() {
+    renderLogoutButton(false);
     if (!uuid) { show('gate'); return; }
     try {
       const res = await fetch(`/user/${encodeURIComponent(uuid)}/manifest.json`);
@@ -895,6 +975,7 @@
     ];
 
     renderTabs();
+    renderLogoutButton(false);
     show('browse');
 
     // Home handles the no-leagues-configured case itself.
