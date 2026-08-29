@@ -197,6 +197,16 @@
        Android device - see showSetupPlatform(). -->
   <div id="setup-platform-tabs" class="flex gap-1.5 mb-5"></div>
 
+  <!-- Outside both panels on purpose. This one setting decides what every
+       link on the page becomes, and while it lived inside the Android tab
+       a desktop visitor could neither see it nor change it - which is
+       precisely the situation it needs to be reachable in. -->
+  <div class="bg-[#1f2b36] border border-white/10 rounded-lg p-4 mb-5">
+    <h2 class="text-xs font-bold text-[#e6e6e6]/70 mb-0.5">What streams open in</h2>
+    <p class="text-[11px] text-[#e6e6e6]/45 mb-2.5">Stored in this browser, so each device can differ.</p>
+    <div id="play-target-picker" class="space-y-1.5"></div>
+  </div>
+
   <div id="setup-windows">
   <p class="text-xs text-[#e6e6e6]/55 mb-5 leading-relaxed">
     Clicking a stream hands its URL to a <code class="text-[#5aa8d1]">sportio:</code> link, which Windows passes
@@ -279,13 +289,7 @@
       </li>
 
       <li>
-        <span class="font-bold text-[#e6e6e6]">2. Choose what streams open in</span>
-        <span class="text-[#e6e6e6]/45">&mdash; stored in this browser, so each device can differ.</span>
-        <div id="play-target-picker" class="mt-2 space-y-1.5"></div>
-      </li>
-
-      <li>
-        <span class="font-bold text-[#e6e6e6]">3. Tap any stream</span>
+        <span class="font-bold text-[#e6e6e6]">2. Tap any stream</span>
         <span class="text-[#e6e6e6]/45">&mdash; the first time, Android asks whether to open it in VLC. Accept, and
         it stops asking. VLC shows the channel name while it buffers; if it sits on a black screen for more than a
         few seconds, that stream is probably down &mdash; use <span class="font-semibold text-[#e6e6e6]/70">Check
@@ -472,25 +476,47 @@
   const PLAY_TARGETS = {
     desktop: {
       label: 'Desktop helper',
-      hint: 'The sportio: link and script set up under Windows.',
-      note: 'Handed to your media player. If nothing opens, check Player setup.'
+      hint: 'The sportio: link and script set up under Windows.'
     },
     vlc: {
       label: 'VLC for Android',
-      hint: 'Opens VLC directly. Nothing to install but VLC itself.',
-      note: 'Opening in VLC. If nothing happens, VLC may not be installed.'
+      hint: 'Opens VLC directly. Nothing to install but VLC itself.'
     },
     choose: {
       label: 'Ask Android',
-      hint: 'Android offers whichever players you have. Useful for MX Player, Just Player and the rest.',
-      note: 'Handed to Android. Pick a player when it asks.'
+      hint: 'Android offers whichever players you have. Useful for MX Player, Just Player and the rest.'
     }
   };
+
+  // One line for every target. It used to name the player - "Opening in
+  // VLC" - which was wrong in both directions: it appeared on a desktop
+  // where VLC is not involved at all, and on Android it named one app
+  // when the link may well have gone to another.
+  const PLAY_NOTE = 'Opening in external player.';
 
   const isAndroid = () => /android/i.test(navigator.userAgent);
 
   let playTarget = localStorage.getItem(PLAY_TARGET_KEY) || (isAndroid() ? 'vlc' : 'desktop');
   if (!PLAY_TARGETS[playTarget]) playTarget = 'desktop';
+
+  // Which target applies, as against which one is stored.
+  //
+  // An intent: URI can only be followed by an Android browser. Stored
+  // anywhere else - set while testing, carried in on a synced profile,
+  // picked from a phone-shaped window - it turned every link on the page
+  // into an href no desktop browser can resolve, and the only symptom
+  // was a click that did nothing whatsoever. That is a silent, total
+  // failure of the page's one job, decided by a value nothing on screen
+  // was showing.
+  //
+  // The stored preference is left alone rather than corrected, so a
+  // phone still honours it. It simply stops applying where it cannot
+  // work.
+  function effectivePlayTarget() {
+    const stored = PLAY_TARGETS[playTarget] ? playTarget : 'desktop';
+    if (!isAndroid() && (stored === 'vlc' || stored === 'choose')) return 'desktop';
+    return stored;
+  }
 
   // An Android intent: URI. VLC's manifest matches a VIEW intent that
   // carries BOTH an http/https data URI and a video/* mime type. The
@@ -529,8 +555,9 @@
   }
 
   function playLink(streamUrl, name) {
-    if (playTarget === 'vlc') return androidIntentLink(streamUrl, name, VLC_PACKAGE);
-    if (playTarget === 'choose') return androidIntentLink(streamUrl, name, '');
+    const target = effectivePlayTarget();
+    if (target === 'vlc') return androidIntentLink(streamUrl, name, VLC_PACKAGE);
+    if (target === 'choose') return androidIntentLink(streamUrl, name, '');
     return `${PROTOCOL}:${toBase64Url(streamUrl)}`;
   }
 
@@ -758,6 +785,20 @@
                 </span>
               </button>`;
     }).join('');
+
+    // Says so when the stored choice is not the one being used. Without
+    // this the override is as invisible as the bug it fixes: the picker
+    // would show "VLC for Android" selected on a desktop while every
+    // link on the page was quietly using the helper instead.
+    const effective = effectivePlayTarget();
+    if (effective !== playTarget) {
+      box.insertAdjacentHTML('beforeend', `
+        <p class="text-[11px] text-[#c9992e] leading-snug pt-1">
+          <i class="fa-solid fa-circle-info mr-1"></i>Not in effect here &mdash;
+          ${escapeHtml(PLAY_TARGETS[playTarget].label)} needs an Android browser, so this device is using
+          ${escapeHtml(PLAY_TARGETS[effective].label)}. The choice is kept for the devices that can use it.
+        </p>`);
+    }
   }
 
   function toggleSetup() {
@@ -1645,10 +1686,10 @@
 
   function notePlaying() {
     // The browser cannot tell us whether the player actually started, so
-    // this says what was attempted rather than claiming success. The
-    // wording follows the target, because "check Player setup" is wrong
-    // advice on Android - there is no script there to have got wrong.
-    showToast((PLAY_TARGETS[playTarget] || PLAY_TARGETS.desktop).note);
+    // this says what was attempted rather than claiming success - and
+    // says it without naming a player, since which one opens is a
+    // decision made by the OS well after this page is done.
+    showToast(PLAY_NOTE);
   }
 
   // ------------------------------------------------------------------
