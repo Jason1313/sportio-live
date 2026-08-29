@@ -2017,7 +2017,8 @@
         if (!Array.isArray(links)) continue;
         for (const link of links) {
           if (link.probedQuality && !probeResults[link.url]) {
-            probeResults[link.url] = { label: link.probedQuality, persisted: true };
+            probeResults[link.url] = { label: link.probedQuality, persisted: true,
+                                       tier: link.probedTier, score: link.probedScore };
           }
         }
       }
@@ -2481,6 +2482,23 @@
     // feed, a Baseline-profile encode, stereo where another feed has 5.1.
     // Shown on hover rather than inline, because the badge sits in a row
     // that is already tight and this is detail you go looking for.
+    // Tier colours, from the score in probe.js. The badge stops being a
+    // fact you have to interpret and becomes one you can scan: green is
+    // worth watching, red is not, and the ordering within a list is the
+    // score behind it.
+    const QUALITY_TIER_CLASSES = {
+      excellent: 'bg-[#2f7d3a]/30 text-[#8ce09a]',
+      good:      'bg-[#4a9d52]/25 text-[#7fc98a]',
+      fair:      'bg-[#c9992e]/25 text-[#e0be6a]',
+      poor:      'bg-[#c0722b]/25 text-[#e8a06a]',
+      bad:       'bg-[#c0392b]/25 text-[#e56a6a]',
+    };
+    const DEFAULT_QUALITY_CLASSES = 'bg-[#4a9d52]/25 text-[#7fc98a]';
+
+    function tierClasses(tier) {
+      return QUALITY_TIER_CLASSES[tier] || DEFAULT_QUALITY_CLASSES;
+    }
+
     function probeDetailText(data) {
       if (!data || !data.ok) return '';
       const bits = [];
@@ -2524,7 +2542,7 @@
                       title="${escapeHtml(probed.error)} - click to re-check">failed &#8635;</span>`;
       }
       return `<span onclick="${retry}"
-                    class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#4a9d52]/25 text-[#7fc98a] hover:bg-[#4a9d52]/40 cursor-pointer"
+                    class="text-[10px] font-bold px-1.5 py-0.5 rounded ${tierClasses(probed.tier)} hover:brightness-125 cursor-pointer"
                     title="${escapeHtml(probed.detail ? probed.detail + ' | ' : '')}${probed.persisted ? 'Saved from an earlier check' : 'Measured just now'} - click to re-check">${escapeHtml(probed.label)}</span>`;
     }
 
@@ -2785,7 +2803,8 @@
         });
         const data = await res.json();
         probeResults[url] = data.ok
-          ? { label: data.label, fps: data.fps, height: data.height, detail: probeDetailText(data) }
+          ? { label: data.label, fps: data.fps, height: data.height, detail: probeDetailText(data),
+              tier: data.tier, score: data.score }
           : { error: data.error || 'probe failed' };
         refreshProbeBadges(url);
         applyProbeToSavedLinks(url);

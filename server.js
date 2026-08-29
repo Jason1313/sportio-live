@@ -2932,7 +2932,7 @@ app.post('/api/networks/saved', async (req, res) => {
   const { resolved, problems } = networks.resolveSavedChannels(
     auth.user.savedChannels, auth.source
   );
-  return res.json({ success: true, channels: resolved, problems });
+  return res.json({ success: true, channels: resolved.map(withQualityTier), problems });
 });
 
 // Reads and writes the instance-wide preferred tvg-ids.
@@ -3060,6 +3060,26 @@ app.post('/api/user/register', async (req, res) => {
   return res.json({ success: true, uuid, manifestUrl: `/user/${uuid}/manifest.json` });
 });
 
+// Attaches a tier to a quality that was measured in an earlier session.
+//
+// The score is recovered from the stored label rather than persisted
+// beside it - scoreQualityLabel reads back everything the model needs -
+// so a channel checked weeks ago colours exactly like one checked a
+// moment ago, and no saved account had to gain a field for it.
+function withQualityTier(entry) {
+  if (!entry || !entry.probedQuality) return entry;
+  const scored = probe.scoreQualityLabel(entry.probedQuality);
+  return scored ? { ...entry, probedScore: scored.score, probedTier: scored.tier } : entry;
+}
+
+function tierNetworkLinks(networkLinks) {
+  const out = {};
+  for (const [key, links] of Object.entries(networkLinks || {})) {
+    out[key] = Array.isArray(links) ? links.map(withQualityTier) : links;
+  }
+  return out;
+}
+
 app.post('/api/user/login', async (req, res) => {
   if (!ENCRYPTION_KEY_CONFIGURED) {
     return res.status(503).json({ error: 'Encryption key not configured yet. See the homepage for setup instructions.' });
@@ -3092,8 +3112,8 @@ app.post('/api/user/login', async (req, res) => {
     sportCategories: user.sportCategories, 
     timeZone: user.timeZone || 'America/New_York',
     sportOrder: user.sportOrder || [],
-    networkLinks: user.networkLinks || {},
-    savedChannels: user.savedChannels || [],
+    networkLinks: tierNetworkLinks(user.networkLinks),
+    savedChannels: (user.savedChannels || []).map(withQualityTier),
     manifestUrl: `/user/${uuid}/manifest.json` 
   });
 });

@@ -1430,7 +1430,7 @@
         });
         const data = res.data || {};
         probeResults[stream.url] = data.ok
-          ? { label: data.label, detail: probeDetailText(data) }
+          ? { label: data.label, detail: probeDetailText(data), tier: data.tier, score: data.score }
           : { error: data.error || 'probe failed' };
 
         // A measured quality is worth keeping on a channel that is also
@@ -1459,7 +1459,8 @@
   function seedProbeResultsFromSaved() {
     for (const channel of savedChannels) {
       if (channel.probedQuality && !probeResults[channel.url]) {
-        probeResults[channel.url] = { label: channel.probedQuality, persisted: true };
+        probeResults[channel.url] = { label: channel.probedQuality, persisted: true,
+                                      tier: channel.probedTier, score: channel.probedScore };
       }
     }
   }
@@ -1492,6 +1493,37 @@
     return bits.join(' · ');
   }
 
+  // Tier colours, from the score in probe.js. Lets a list of ten feeds be
+  // scanned rather than read - green is worth watching, red is not.
+  const QUALITY_TIER_CLASSES = {
+    excellent: 'bg-[#2f7d3a]/30 text-[#8ce09a]',
+    good:      'bg-[#4a9d52]/25 text-[#7fc98a]',
+    fair:      'bg-[#c9992e]/25 text-[#e0be6a]',
+    poor:      'bg-[#c0722b]/25 text-[#e8a06a]',
+    bad:       'bg-[#c0392b]/25 text-[#e56a6a]',
+  };
+
+  function tierClasses(tier) {
+    return QUALITY_TIER_CLASSES[tier] || 'bg-[#4a9d52]/25 text-[#7fc98a]';
+  }
+
+  // The pick of whatever is currently on screen. Marked rather than
+  // sorted: these lists are ordered deliberately - saved links by the
+  // slot order the operator chose - and quietly resequencing them would
+  // trade one kind of answer for another.
+  function bestProbedUrl(urls) {
+    let bestUrl = null;
+    let bestScore = -1;
+    for (const url of urls) {
+      const probed = probeResults[url];
+      if (!probed || probed.error || typeof probed.score !== 'number') continue;
+      if (probed.score > bestScore) { bestScore = probed.score; bestUrl = url; }
+    }
+    // A single reading is not a comparison, so nothing is crowned.
+    return urls.filter(u => probeResults[u] && typeof probeResults[u].score === 'number').length > 1
+      ? bestUrl : null;
+  }
+
   function probeBadge(url) {
     const probed = probeResults[url];
     if (!probed) return '';
@@ -1501,8 +1533,10 @@
     if (probed.error) {
       return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#c0392b]/25 text-[#e56a6a]" title="${escapeHtml(probed.error)}">failed</span>`;
     }
-    return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#4a9d52]/25 text-[#7fc98a] whitespace-nowrap"
-                  title="${escapeHtml(probed.detail || '')}">${escapeHtml(probed.label)}</span>`;
+    const best = url === bestProbedUrl(playableStreamRows().map(s => s.url).concat(savedResults.map(c => c.url), savedChannels.map(c => c.url)))
+      ? '<i class="fa-solid fa-star mr-1 text-[#ffd166]" title="Best of the checked streams here"></i>' : '';
+    return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded ${tierClasses(probed.tier)} whitespace-nowrap"
+                  title="${escapeHtml(probed.detail || '')}">${best}${escapeHtml(probed.label)}</span>`;
   }
 
   function onSavedSearchInput() {
@@ -1619,7 +1653,7 @@
         });
         const data = res.data || {};
         probeResults[channel.url] = data.ok
-          ? { label: data.label, detail: probeDetailText(data) }
+          ? { label: data.label, detail: probeDetailText(data), tier: data.tier, score: data.score }
           : { error: data.error || 'probe failed' };
 
         // Keep a measured quality with the channel if it is already saved.
