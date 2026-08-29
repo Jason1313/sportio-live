@@ -406,6 +406,26 @@
   const HOME_CATALOG_ID = 'home';
   const PROBE_MAX_RESULTS = 20;
   const PROBE_DELAY_MS = 5000;
+
+  // A repeat check runs down the whole list and then starts again, rather
+  // than taking one channel ten times over.
+  //
+  // Ten consecutive samples of one stream cover three unbroken minutes of
+  // the same broadcast - that is one long look, not ten independent ones,
+  // and it would settle on whatever those particular minutes contained.
+  // Going round the list puts the length of the list between a channel and
+  // its next sample, so each pass catches different play. Which is the
+  // whole point of averaging: the samples have to be of different moments.
+  const DEEP_CHECK_PASSES = 10;
+
+  function passOrder(targets, passes) {
+    const runs = [];
+    for (let pass = 0; pass < passes; pass++) {
+      for (const target of targets) runs.push({ target, pass });
+    }
+    return runs;
+  }
+
   let savedChannels = [];
   let savedResults = [];
   let savedGroups = [];
@@ -1393,6 +1413,12 @@
         class="w-full text-[11px] font-bold py-1.5 rounded transition ${probeInProgress
           ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd] hover:bg-white/5'}">
         <i class="fa-solid fa-gauge-high mr-1.5"></i>${label}</button>`
+      + `<button onclick="probeStreams({ passes: DEEP_CHECK_PASSES })" ${probeInProgress ? 'disabled' : ''}
+                title="Check each of these ${target.length} streams 10 times, round-robin, and average the readings"
+                class="w-full text-[10px] font-bold py-1 rounded transition ${probeInProgress
+                  ? 'text-[#e6e6e6]/25 cursor-not-allowed' : 'text-[#e6e6e6]/45 hover:text-[#5aa8d1] hover:bg-white/5'}">
+          Check &times;10 and average
+        </button>`
       + resetLinkHtml(target, 'probeStreams({ reset: true })');
   }
 
@@ -1498,11 +1524,15 @@
       : playable;
     if (target.length === 0 || target.length > PROBE_MAX_RESULTS) return;
 
+    const passes = Math.max(1, options.passes || 1);
+    if (passes > 1 && !confirmDeepCheck(target.length, passes)) return;
+
     probeInProgress = true;
     renderStreams();
+    const runs = passOrder(target, passes);
     try {
-      for (let i = 0; i < target.length; i++) {
-        const stream = target[i];
+      for (let i = 0; i < runs.length; i++) {
+        const stream = runs[i].target;
         probeResults[stream.url] = { checking: true };
         renderStreams();
 
@@ -1523,11 +1553,12 @@
         if (savedEntry && data.ok) savedEntry.probedQuality = data.label;
 
         renderStreams();
-        if (!data.cached && i < target.length - 1) {
+        if (!data.cached && i < runs.length - 1) {
           await new Promise(r => setTimeout(r, PROBE_DELAY_MS));
         }
       }
-      showToast(`Checked ${target.length} stream${target.length === 1 ? '' : 's'}.`);
+      showToast(`Checked ${target.length} stream${target.length === 1 ? '' : 's'}${
+        passes > 1 ? `, ${passes} times each` : ''}.`);
     } finally {
       probeInProgress = false;
       renderStreams();
@@ -1632,6 +1663,25 @@
   // into a running average, which is right until the provider re-encodes
   // a channel - at which point the samples behind the average describe a
   // stream that no longer exists and the only cure is to start over.
+  // A repeat check is a long errand - ten passes over twenty streams runs
+  // to tens of minutes - so it says so before starting rather than
+  // appearing to hang.
+  function confirmDeepCheck(count, passes) {
+    const minutes = Math.round((count * passes * 12) / 60);
+    return confirm(
+      `Check ${count} stream${count === 1 ? '' : 's'} ${passes} times each, averaging every ` +
+      `reading together.
+
+That is ${count * passes} checks and takes roughly ${minutes} minute` +
+      `${minutes === 1 ? '' : 's'}, depending on how quickly your provider serves.
+
+` +
+      `The list is worked through in order and then started again, so each pass samples a ` +
+      `different moment of each stream rather than one long stretch of the same one.
+
+Start now?`);
+  }
+
   function resetLinkHtml(rows, call) {
     const averaged = rows.filter(r => (probeResults[r.url] || {}).samples > 1).length;
     if (averaged === 0) return '';
@@ -1749,6 +1799,12 @@
         class="w-full text-[11px] font-bold py-1.5 rounded transition ${probeInProgress
           ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd] hover:bg-white/5'}">
         <i class="fa-solid fa-gauge-high mr-1.5"></i>${label}</button>`
+      + `<button onclick="probeSavedSearch({ passes: DEEP_CHECK_PASSES })" ${probeInProgress ? 'disabled' : ''}
+                title="Check each of these ${target.length} streams 10 times, round-robin, and average the readings"
+                class="w-full text-[10px] font-bold py-1 rounded transition ${probeInProgress
+                  ? 'text-[#e6e6e6]/25 cursor-not-allowed' : 'text-[#e6e6e6]/45 hover:text-[#5aa8d1] hover:bg-white/5'}">
+          Check &times;10 and average
+        </button>`
       + resetLinkHtml(target, 'probeSavedSearch({ reset: true })');
   }
 
@@ -1759,11 +1815,15 @@
       : savedResults;
     if (target.length === 0 || target.length > PROBE_MAX_RESULTS) return;
 
+    const passes = Math.max(1, options.passes || 1);
+    if (passes > 1 && !confirmDeepCheck(target.length, passes)) return;
+
     probeInProgress = true;
     renderSavedResults();
+    const runs = passOrder(target, passes);
     try {
-      for (let i = 0; i < target.length; i++) {
-        const channel = target[i];
+      for (let i = 0; i < runs.length; i++) {
+        const channel = runs[i].target;
         probeResults[channel.url] = { checking: true };
         renderSavedResults();
 
@@ -1784,11 +1844,12 @@
 
         renderSavedResults();
         renderSavedList();
-        if (!data.cached && i < target.length - 1) {
+        if (!data.cached && i < runs.length - 1) {
           await new Promise(r => setTimeout(r, PROBE_DELAY_MS));
         }
       }
-      showToast(`Checked ${target.length} channel${target.length === 1 ? '' : 's'}.`);
+      showToast(`Checked ${target.length} channel${target.length === 1 ? '' : 's'}${
+        passes > 1 ? `, ${passes} times each` : ''}.`);
     } finally {
       probeInProgress = false;
       renderSavedResults();

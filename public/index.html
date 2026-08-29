@@ -260,6 +260,9 @@
               <i class="fa-solid fa-gauge-high"></i>
               Check All Quality
             </button>
+            <button id="network-check-all-10-btn" onclick="checkQualityForAllNetworks({ passes: 10 })"
+                    title="Check every channel 10 times, round-robin, and average all the readings together"
+                    class="text-xs font-bold text-[#e6e6e6]/45 hover:text-[#5aa8d1] transition">&times;10</button>
             <button id="network-defaults-btn" onclick="saveNetworkDefaults()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
               <i class="fa-solid fa-thumbtack"></i>
               Save As Defaults
@@ -2228,7 +2231,10 @@
         <button id="network-saved-probe-btn-${key}" onclick="${call}" ${probeInProgress ? 'disabled' : ''}
                 class="text-[11px] font-bold transition ${probeInProgress ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd]'}">
           <i class="fa-solid fa-gauge-high mr-1"></i>${label}
-        </button>`;
+        </button>
+        <button onclick="probeSavedLinks('${key}', { force: true, passes: DEEP_CHECK_PASSES })" ${probeInProgress ? 'disabled' : ''}
+                title="Check these ${links.length} channels 10 times each and average the readings"
+                class="text-[11px] font-bold transition ${probeInProgress ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#e6e6e6]/45 hover:text-[#5aa8d1]'}">&times;10</button>`;
 
       return `
         <div class="flex items-center justify-between gap-3 px-1 pt-1">
@@ -2426,6 +2432,26 @@
     const PROBE_MAX_RESULTS = 20;
     const PROBE_DELAY_MS = 5000;
 
+    // A repeat check runs down the whole list and then starts again, rather
+    // than taking one channel ten times over.
+    //
+    // Ten consecutive samples of one stream cover three unbroken minutes of
+    // the same broadcast - that is one long look, not ten independent ones,
+    // and it would settle on whatever those particular minutes contained.
+    // Going round the list puts the length of the list between a channel and
+    // its next sample, so each pass catches different play. Which is the
+    // whole point of averaging: the samples have to be of different moments.
+    const DEEP_CHECK_PASSES = 10;
+
+    function passOrder(targets, passes) {
+      const runs = [];
+      for (let pass = 0; pass < passes; pass++) {
+        for (const target of targets) runs.push({ target, pass });
+      }
+      return runs;
+    }
+
+
     // url -> { label, error }. Memory only, so it dies with the page. A
     // provider can re-encode a channel at any time and a stale badge that
     // outlived the session would look authoritative while being wrong.
@@ -2581,6 +2607,27 @@
       return `<span class="opacity-55 ml-1 font-normal">&times;${probed.samples}</span>`;
     }
 
+    // A repeat check is a genuinely long errand - ten passes over twenty
+    // channels is measured in tens of minutes - so it says how long
+    // before starting rather than appearing to hang.
+    function confirmDeepCheck(count, passes) {
+      const estimate = formatDuration(count * passes * PROBE_SECONDS_EACH);
+      return confirm(
+        `Check ${count} channel${count === 1 ? '' : 's'} ${passes} times each, ` +
+        `averaging every reading together.
+
+` +
+        `That is ${count * passes} checks and takes around ${estimate}, depending on how ` +
+        `quickly your provider serves.
+
+` +
+        `The list is worked through in order and then started again, so each pass samples ` +
+        `a different moment of each stream rather than one long stretch of the same one.
+
+` +
+        `Start now?`);
+    }
+
     async function probeSearchResults(key, options = {}) {
       if (probeInProgress) {
         showStatus('A quality check is already running.', true);
@@ -2624,16 +2671,22 @@
         return;
       }
 
+      const passes = Math.max(1, options.passes || 1);
+      if (passes > 1 && !confirmDeepCheck(toProbe.length, passes)) return;
+
       probeInProgress = true;
       const button = document.getElementById(`network-probe-btn-${key}`);
+      const runs = passOrder(toProbe, passes);
 
       try {
-        for (let i = 0; i < toProbe.length; i++) {
-          const channel = toProbe[i];
+        for (let i = 0; i < runs.length; i++) {
+          const channel = runs[i].target;
           const isRetry = !!probeResults[channel.url];
           if (button) {
             button.disabled = true;
-            button.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-1.5"></i>Checking ${i + 1} of ${toProbe.length}...`;
+            button.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-1.5"></i>${
+              passes > 1 ? `Pass ${runs[i].pass + 1}/${passes} &middot; ` : ''}Checking ${
+              (i % toProbe.length) + 1} of ${toProbe.length}...`;
           }
 
           const wasCached = await probeOneChannel(channel.url, isRetry);
@@ -2642,7 +2695,7 @@
           // A cached answer contacted nothing, so there's nothing to be
           // polite about - only pause between probes that actually hit
           // the provider.
-          if (!wasCached && i < toProbe.length - 1) {
+          if (!wasCached && i < runs.length - 1) {
             await new Promise(r => setTimeout(r, PROBE_DELAY_MS));
           }
         }
@@ -2688,7 +2741,7 @@
     // than seconds and each probe opens a connection to the provider -
     // starting it unaware is how you end up wondering why your own
     // playback just dropped.
-    async function checkQualityForAllNetworks() {
+    async function checkQualityForAllNetworks(options = {}) {
       if (probeInProgress) {
         showStatus('A quality check is already running.', true);
         return;
@@ -2715,9 +2768,11 @@
         return;
       }
 
-      const estimate = formatDuration(targets.length * PROBE_SECONDS_EACH);
+      const passes = Math.max(1, options.passes || 1);
+      const estimate = formatDuration(targets.length * passes * PROBE_SECONDS_EACH);
       const ok = confirm(
-        `Check the quality of ${targets.length} channel${targets.length === 1 ? '' : 's'} across ` +
+        `Check the quality of ${targets.length} channel${targets.length === 1 ? '' : 's'}` +
+        `${passes > 1 ? `, ${passes} times each` : ''} across ` +
         `${new Set(targets.map(t => t.key)).size} network${new Set(targets.map(t => t.key)).size === 1 ? '' : 's'}.\n\n` +
         `This takes around ${estimate}, depending on how quickly your provider serves - ` +
         `each channel is sampled for a fixed span of video, which a fast provider delivers in ` +
@@ -2734,25 +2789,28 @@
       const startedAt = Date.now();
       const button = document.getElementById('network-check-all-btn');
       const touched = new Set();
+      const runs = passOrder(targets, passes);
 
       try {
-        for (let i = 0; i < targets.length; i++) {
-          const target = targets[i];
+        for (let i = 0; i < runs.length; i++) {
+          const target = runs[i].target;
           touched.add(target.key);
           // Measured, not assumed, from the second channel onwards. The
           // constant above is a guess about someone else's server; by
           // here there is a real number for this one.
           const secondsEach = i > 0 ? (Date.now() - startedAt) / i / 1000 : PROBE_SECONDS_EACH;
-          const remaining = formatDuration(Math.round((targets.length - i) * secondsEach));
+          const remaining = formatDuration(Math.round((runs.length - i) * secondsEach));
           if (button) {
             button.disabled = true;
-            button.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${i + 1}/${targets.length} &middot; ~${remaining} left`;
+            button.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${
+              passes > 1 ? `pass ${runs[i].pass + 1}/${passes} &middot; ` : ''}${
+              (i % targets.length) + 1}/${targets.length} &middot; ~${remaining} left`;
           }
 
           const wasCached = await probeOneChannel(target.link.url, !!probeResults[target.link.url]);
           refreshNetworkLinksRegion(target.key);
 
-          if (!wasCached && i < targets.length - 1) {
+          if (!wasCached && i < runs.length - 1) {
             await new Promise(r => setTimeout(r, PROBE_DELAY_MS));
           }
         }
@@ -2904,16 +2962,22 @@
         return;
       }
 
+      const passes = Math.max(1, options.passes || 1);
+      if (passes > 1 && !confirmDeepCheck(toProbe.length, passes)) return;
+
       probeInProgress = true;
       const button = document.getElementById(`network-saved-probe-btn-${key}`);
+      const runs = passOrder(toProbe, passes);
 
       try {
-        for (let i = 0; i < toProbe.length; i++) {
-          const link = toProbe[i];
+        for (let i = 0; i < runs.length; i++) {
+          const link = runs[i].target;
           const isRetry = !!probeResults[link.url];
           if (button) {
             button.disabled = true;
-            button.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-1.5"></i>Checking ${i + 1} of ${toProbe.length}...`;
+            button.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-1.5"></i>${
+              passes > 1 ? `Pass ${runs[i].pass + 1}/${passes} &middot; ` : ''}Checking ${
+              (i % toProbe.length) + 1} of ${toProbe.length}...`;
           }
 
           // Badges update themselves via refreshProbeBadges, so nothing
@@ -2921,7 +2985,7 @@
           // its results untouched while this runs.
           const wasCached = await probeOneChannel(link.url, isRetry);
 
-          if (!wasCached && i < toProbe.length - 1) {
+          if (!wasCached && i < runs.length - 1) {
             await new Promise(r => setTimeout(r, PROBE_DELAY_MS));
           }
         }
@@ -3168,10 +3232,15 @@
         call = `probeSearchResults('${key}')`;
       }
 
-      return `<button id="network-probe-btn-${key}" onclick="${call}" ${probeInProgress ? 'disabled' : ''}
-                      class="w-full text-[11px] font-bold py-1.5 rounded transition ${probeInProgress ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd] hover:bg-[#3b4d58]'}">
-                <i class="fa-solid fa-gauge-high mr-1.5"></i>${label}
-              </button>`;
+      return `<div class="flex items-center gap-1">
+                <button id="network-probe-btn-${key}" onclick="${call}" ${probeInProgress ? 'disabled' : ''}
+                        class="flex-1 text-[11px] font-bold py-1.5 rounded transition ${probeInProgress ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd] hover:bg-[#3b4d58]'}">
+                  <i class="fa-solid fa-gauge-high mr-1.5"></i>${label}
+                </button>
+                <button onclick="probeSearchResults('${key}', { force: true, passes: DEEP_CHECK_PASSES })" ${probeInProgress ? 'disabled' : ''}
+                        title="Check 10 times each, round-robin, and average the readings"
+                        class="text-[11px] font-bold py-1.5 px-2 rounded transition shrink-0 ${probeInProgress ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#e6e6e6]/45 hover:text-[#5aa8d1] hover:bg-[#3b4d58]'}">&times;10</button>
+              </div>`;
     }
 
     function renderNetworkSearchResults(key) {
