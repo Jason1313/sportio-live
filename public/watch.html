@@ -1430,7 +1430,7 @@
         });
         const data = res.data || {};
         probeResults[stream.url] = data.ok
-          ? { label: data.label }
+          ? { label: data.label, detail: probeDetailText(data) }
           : { error: data.error || 'probe failed' };
 
         // A measured quality is worth keeping on a channel that is also
@@ -1469,6 +1469,29 @@
     return match ? match[1] : '';
   }
 
+  // The parts of a reading that do not fit in the badge but change what
+  // it means: a 1440x1080 frame presenting as "1080", an interlaced feed,
+  // stereo where another feed carries 5.1. On hover rather than inline,
+  // because these rows are already tight.
+  function probeDetailText(data) {
+    if (!data || !data.ok) return '';
+    const bits = [];
+    if (data.width && data.height) bits.push(`${data.width}x${data.height}`);
+    if (data.anamorphic && data.sampleAspectRatio) {
+      bits.push(`anamorphic ${data.sampleAspectRatio} - fewer real pixels than the height suggests`);
+    }
+    if (data.interlaced) bits.push('interlaced');
+    const codecPart = [data.codec, data.profile].filter(Boolean).join(' ');
+    if (codecPart) bits.push(codecPart);
+    if (data.pixFmt) bits.push(data.pixFmt);
+    if (data.hdr) bits.push('HDR');
+    if (data.audioChannels) {
+      bits.push(`audio ${data.audioLayout || data.audioChannels + 'ch'}${data.audioCodec ? ' ' + data.audioCodec : ''}`);
+    }
+    if (data.bitrate) bits.push(`${(data.bitrate / 1e6).toFixed(2)} Mbps measured`);
+    return bits.join(' · ');
+  }
+
   function probeBadge(url) {
     const probed = probeResults[url];
     if (!probed) return '';
@@ -1478,7 +1501,8 @@
     if (probed.error) {
       return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#c0392b]/25 text-[#e56a6a]" title="${escapeHtml(probed.error)}">failed</span>`;
     }
-    return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#4a9d52]/25 text-[#7fc98a]">${escapeHtml(probed.label)}</span>`;
+    return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#4a9d52]/25 text-[#7fc98a] whitespace-nowrap"
+                  title="${escapeHtml(probed.detail || '')}">${escapeHtml(probed.label)}</span>`;
   }
 
   function onSavedSearchInput() {
@@ -1595,7 +1619,7 @@
         });
         const data = res.data || {};
         probeResults[channel.url] = data.ok
-          ? { label: data.label }
+          ? { label: data.label, detail: probeDetailText(data) }
           : { error: data.error || 'probe failed' };
 
         // Keep a measured quality with the channel if it is already saved.

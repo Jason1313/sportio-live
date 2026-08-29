@@ -21,7 +21,21 @@ const FFPROBE_BIN = process.env.FFPROBE_PATH || 'ffprobe';
 
 // How long to let ffprobe run before giving up. A live stream that hasn't
 // produced a decodable frame in this long is not one worth listing.
-const PROBE_TIMEOUT_MS = 12000;
+//
+// Raised from 12s when bitrate measurement was added: the probe now holds
+// the connection for PROBE_SAMPLE_SECONDS on purpose, and the old ceiling
+// left almost no room for connect time on top of that - a healthy but
+// slow-to-start stream would have been reported as dead.
+const PROBE_TIMEOUT_MS = 25000;
+
+// How much of the stream to actually read. Bitrate cannot be taken from
+// metadata on a live feed - see measureVideoBitrate - so it has to be
+// counted off the wire, and this is the window it is counted over. Long
+// enough to average across a GOP or two (a keyframe is far larger than
+// the frames after it, so a one-second sample reads high or low depending
+// purely on where it landed), short enough to keep a 20-channel check
+// inside a few minutes.
+const PROBE_SAMPLE_SECONDS = 8;
 
 // Minimum gap between two probes that actually contact the provider.
 // Enforced here rather than trusting the caller, because the cost of
@@ -64,11 +78,129 @@ function parseFrameRate(ratio) {
   return Math.round(fps * 100) / 100;
 }
 
-// A short label for the UI: "1080p60", "720p30", or just "1080p" when the
-// frame rate couldn't be determined.
-function formatQualityLabel({ height, fps }) {
+// ffprobe's codec names, in the spelling people actually use. hevc IS
+// h265 and nothing else, but a badge reading "hevc" makes you look it up
+// - and telling h264 from h265 at a glance is most of the point of
+// showing the codec at all, since the same bitrate buys markedly more
+// picture on the newer one.
+const CODEC_DISPLAY_NAMES = {
+  hevc: 'h265',
+  h264: 'h264',
+  mpeg2video: 'mpeg2',
+  av1: 'av1',
+  vp9: 'vp9',
+};
+
+function displayCodec(codecName) {
+  if (!codecName) return null;
+  return CODEC_DISPLAY_NAMES[codecName] || codecName;
+}
+
+// tt/bb/tb/bt are the interlaced field orders; progressive and unknown
+// are not. Worth separating because an interlaced feed and a progressive
+// one of the same height are not the same picture - interlaced combs on
+// exactly the fast motion a sports feed is made of - and both were being
+// labelled "1080p" indiscriminately.
+const INTERLACED_FIELD_ORDERS = new Set(['tt', 'bb', 'tb', 'bt']);
+
+function isInterlaced(fieldOrder) {
+  return INTERLACED_FIELD_ORDERS.has(String(fieldOrder || '').toLowerCase());
+}
+
+function formatBitrate(bitsPerSecond) {
+  if (!bitsPerSecond || bitsPerSecond <= 0) return '';
+  return bitsPerSecond >= 1000000
+    ? `${(bitsPerSecond / 1000000).toFixed(1)}Mbps`
+    : `${Math.round(bitsPerSecond / 1000)}kbps`;
+}
+
+// Bits per pixel per frame - the number that actually predicts how a
+// stream looks, as against how big it claims to be.
+//
+// Resolution and frame rate describe the container; this describes how
+// much information is being spent filling it. Two 1080p60 feeds at 2 and
+// 8 Mbps are the same by every other measure here and are not remotely
+// the same to watch, which is the exact case the whole probe exists to
+// settle. As a rough guide for h264: under about 0.05 blocks up on fast
+// motion, 0.10 is respectable, above 0.15 is clean. h265 buys roughly a
+// third off those thresholds for the same picture.
+//
+// Frame rate, not field rate, and full frame height either way - an
+// interlaced frame still carries every line, just not from one instant.
+function bitsPerPixel({ bitrate, width, height, fps }) {
+  if (!bitrate || !width || !height || !fps) return null;
+  const value = bitrate / (width * height * fps);
+  return isFinite(value) && value > 0 ? value : null;
+}
+
+// The UI's one-line summary, and what gets persisted onto a saved
+// channel. Degrades a piece at a time rather than all at once: an
+// unreadable bitrate still leaves the resolution and codec worth showing,
+// and a stream that only yields its height still labels as "1080p".
+//
+// Old stored labels are plain "1080p60" strings and stay perfectly
+// readable, so nothing needs migrating.
+function formatQualityLabel({ height, fps, interlaced, codec, bitrate, bpp }) {
   if (!height) return '';
-  return fps ? `${height}p${fps}` : `${height}p`;
+
+  // Broadcast names an interlaced mode by its FIELD rate: 29.97 frames a
+  // second interlaced is "1080i60" everywhere it is written down, never
+  // "1080i30". Progressive is named by its frame rate as normal.
+  const scan = interlaced ? 'i' : 'p';
+  const rate = fps ? (interlaced ? Math.round(fps * 2) : fps) : '';
+
+  const parts = [`${height}${scan}${rate}`];
+  const codecLabel = displayCodec(codec);
+  if (codecLabel) parts.push(codecLabel);
+  const bitrateLabel = formatBitrate(bitrate);
+  if (bitrateLabel) parts.push(bitrateLabel);
+  if (bpp) parts.push(`${bpp.toFixed(3)}bpp`);
+  return parts.join(' · ');
+}
+
+// Counts the video bitrate off the wire.
+//
+// ffprobe DOES report stream.bit_rate, and on a live MPEG-TS feed it is
+// almost always empty - it is read from container metadata, and a live
+// mux carries none. So it is measured instead: total the video packets
+// and divide by the timespan they cover.
+//
+// Video packets only. The audio track is real bandwidth but it is not
+// picture, and folding it in would flatter a stream with 5.1 audio into
+// looking like it had a better image.
+function measureVideoBitrate(packets, videoIndex, fps) {
+  const videoPackets = packets.filter(p =>
+    Number(p.stream_index) === Number(videoIndex) && Number(p.size) > 0);
+  // Too few to average anything meaningful over - a handful of packets is
+  // as likely to be one keyframe as a representative sample.
+  if (videoPackets.length < 10) return null;
+
+  let bytes = 0;
+  let earliest = Infinity;
+  let latest = -Infinity;
+  for (const packet of videoPackets) {
+    bytes += Number(packet.size);
+    const time = Number(packet.dts_time);
+    if (Number.isFinite(time)) {
+      if (time < earliest) earliest = time;
+      if (time > latest) latest = time;
+    }
+  }
+
+  // Preferred: the span the packets actually cover. Reduced by one frame
+  // because the last packet's own duration is not inside the span between
+  // first and last timestamp, which at a short sample would overstate the
+  // rate by a percent or two.
+  let seconds = null;
+  if (Number.isFinite(earliest) && Number.isFinite(latest) && latest > earliest) {
+    seconds = (latest - earliest) + (fps ? 1 / fps : 0);
+  }
+  // Fallback for a stream that reports no usable timestamps: one video
+  // packet is one frame closely enough for this.
+  if (!seconds && fps) seconds = videoPackets.length / fps;
+  if (!seconds || seconds <= 0.5) return null;
+
+  return Math.round((bytes * 8) / seconds);
 }
 
 function getCached(url) {
@@ -97,23 +229,68 @@ function getCachedProbeLabel(url) {
   return cached && cached.ok && cached.label ? cached.label : null;
 }
 
-function runFfprobe(url) {
-  return new Promise((resolve, reject) => {
-    execFile(FFPROBE_BIN, [
+// The full argument list, and a reduced one to fall back to.
+//
+// The reduced list is what this probe asked for before bitrate
+// measurement existed, and it is kept because ffprobe builds vary: an
+// older one - in somebody else's image, or a distro behind Alpine's -
+// may not accept the packet section or -read_intervals. The cost of
+// being wrong about that would be every quality check failing rather
+// than merely losing the new fields, which is a bad trade for a feature
+// that used to work. So an option error, and only an option error, drops
+// back to the known-good list and still returns a resolution.
+const FFPROBE_OPTION_ERROR = /unrecognized option|unknown option|failed to set value|option .* not found/i;
+
+function ffprobeArgs(url, legacy) {
+  if (legacy) {
+    return [
       '-v', 'error',
-      // First video stream only. Audio and subtitle streams say nothing
-      // about picture quality and only slow the probe down.
       '-select_streams', 'v:0',
-      '-show_entries', 'stream=width,height,avg_frame_rate,r_frame_rate,codec_name',
+      '-show_entries', 'stream=width,height,avg_frame_rate,r_frame_rate,codec_name,field_order',
       '-of', 'json',
-      // Enough of the stream to find a keyframe and read the SPS, without
-      // pulling megabytes of video for what is a two-number answer.
+      '-analyzeduration', '3000000',
+      '-probesize', '3000000',
+      '-rw_timeout', '8000000',
+      url
+    ];
+  }
+
+  return [
+      '-v', 'error',
+      // Every stream, not just v:0. Audio says something a picture
+      // measurement cannot - 5.1 against stereo separates two feeds that
+      // are otherwise identical - and -select_streams is global, so
+      // restricting it here would also restrict the packets below and
+      // make the audio unreachable in this one call. Packets are filtered
+      // back down to the video stream in code instead, which keeps this
+      // to a single connection to the provider.
+      '-show_entries',
+      'stream=index,codec_type,codec_name,profile,width,height,avg_frame_rate,' +
+      'r_frame_rate,field_order,pix_fmt,sample_aspect_ratio,color_transfer,' +
+      'channels,channel_layout:packet=size,dts_time,stream_index',
+      // The bitrate sample window. Without this ffprobe reads to the end
+      // of the file, which for a live stream is never.
+      '-read_intervals', `%+${PROBE_SAMPLE_SECONDS}`,
+      '-of', 'json',
+      // Enough of the stream to find a keyframe and read the SPS.
       '-analyzeduration', '3000000',
       '-probesize', '3000000',
       // Stops ffprobe hanging on a socket that connects but never sends.
       '-rw_timeout', '8000000',
       url
-    ], { timeout: PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+  ];
+}
+
+function runFfprobe(url, options = {}) {
+  const legacy = options.legacy === true;
+  return new Promise((resolve, reject) => {
+    // maxBuffer is raised for the packet list: eight seconds of 60fps
+    // video is a few hundred packet objects, and audio adds more. Still
+    // far below what a stalled stream could produce, so it stays a guard.
+    execFile(FFPROBE_BIN, ffprobeArgs(url, legacy), {
+      timeout: PROBE_TIMEOUT_MS,
+      maxBuffer: 16 * 1024 * 1024
+    }, (err, stdout, stderr) => {
       if (err) {
         if (err.code === 'ENOENT') {
           return reject(new Error('ffprobe is not installed in this container'));
@@ -121,7 +298,13 @@ function runFfprobe(url) {
         if (err.killed) {
           return reject(new Error('Timed out - the stream did not respond'));
         }
-        return reject(new Error(String(stderr || err.message).trim().split('\n')[0] || 'probe failed'));
+        const message = String(stderr || err.message).trim().split('\n')[0] || 'probe failed';
+        if (!legacy && FFPROBE_OPTION_ERROR.test(message)) {
+          const optionError = new Error(message);
+          optionError.ffprobeOptionError = true;
+          return reject(optionError);
+        }
+        return reject(new Error(message));
       }
       resolve(stdout);
     });
@@ -159,19 +342,50 @@ async function probeStream(url, options = {}) {
 
   let result;
   try {
-    const stdout = await runFfprobe(url);
-    const stream = (JSON.parse(stdout).streams || [])[0];
-    if (!stream || !stream.height) {
+    let stdout;
+    try {
+      stdout = await runFfprobe(url);
+    } catch (err) {
+      if (!err.ffprobeOptionError) throw err;
+      console.error('[Probe] ffprobe rejected the detailed options, falling back:', err.message);
+      stdout = await runFfprobe(url, { legacy: true });
+    }
+    const parsed = JSON.parse(stdout);
+    const streams = parsed.streams || [];
+    const video = streams.find(s => s.codec_type === 'video') || streams[0];
+    const audio = streams.find(s => s.codec_type === 'audio') || null;
+
+    if (!video || !video.height) {
       result = { ok: false, error: 'No video stream found' };
     } else {
-      const fps = parseFrameRate(stream.avg_frame_rate) || parseFrameRate(stream.r_frame_rate);
+      const fps = parseFrameRate(video.avg_frame_rate) || parseFrameRate(video.r_frame_rate);
+      const interlaced = isInterlaced(video.field_order);
+      const bitrate = measureVideoBitrate(parsed.packets || [], video.index, fps);
+      const bpp = bitsPerPixel({ bitrate, width: video.width, height: video.height, fps });
+
       result = {
         ok: true,
-        width: stream.width || null,
-        height: stream.height,
+        width: video.width || null,
+        height: video.height,
         fps,
-        codec: stream.codec_name || null,
-        label: formatQualityLabel({ height: stream.height, fps })
+        interlaced,
+        codec: video.codec_name || null,
+        profile: video.profile || null,
+        pixFmt: video.pix_fmt || null,
+        // Not 1:1 means the stored frame is narrower or wider than what
+        // gets displayed: a 1440x1080 feed presents as 1080 and carries a
+        // quarter fewer pixels than a real one. The label cannot show
+        // that without becoming unreadable, so it rides in the details.
+        sampleAspectRatio: video.sample_aspect_ratio || null,
+        anamorphic: !!video.sample_aspect_ratio
+          && !['1:1', '0:1', 'N/A'].includes(video.sample_aspect_ratio),
+        hdr: ['smpte2084', 'arib-std-b67'].includes(String(video.color_transfer || '')),
+        audioCodec: audio ? audio.codec_name || null : null,
+        audioChannels: audio && audio.channels ? audio.channels : null,
+        audioLayout: audio ? audio.channel_layout || null : null,
+        bitrate,
+        bpp,
+        label: formatQualityLabel({ height: video.height, fps, interlaced, codec: video.codec_name, bitrate, bpp })
       };
     }
   } catch (err) {
@@ -190,7 +404,13 @@ module.exports = {
   getCachedProbeLabel,
   parseFrameRate,
   formatQualityLabel,
+  formatBitrate,
+  bitsPerPixel,
+  measureVideoBitrate,
+  isInterlaced,
+  displayCodec,
   clearProbeCache,
   MIN_PROBE_INTERVAL_MS,
   CACHE_TTL_MS,
+  PROBE_SAMPLE_SECONDS,
 };

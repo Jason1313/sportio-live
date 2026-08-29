@@ -2476,6 +2476,30 @@
       });
     }
 
+    // The parts of a reading that do not fit in the badge but change what
+    // it means: a 1440x1080 frame presenting as "1080", an interlaced
+    // feed, a Baseline-profile encode, stereo where another feed has 5.1.
+    // Shown on hover rather than inline, because the badge sits in a row
+    // that is already tight and this is detail you go looking for.
+    function probeDetailText(data) {
+      if (!data || !data.ok) return '';
+      const bits = [];
+      if (data.width && data.height) bits.push(`${data.width}x${data.height}`);
+      if (data.anamorphic && data.sampleAspectRatio) {
+        bits.push(`anamorphic ${data.sampleAspectRatio} - fewer real pixels than the height suggests`);
+      }
+      if (data.interlaced) bits.push('interlaced');
+      const codecPart = [data.codec, data.profile].filter(Boolean).join(' ');
+      if (codecPart) bits.push(codecPart);
+      if (data.pixFmt) bits.push(data.pixFmt);
+      if (data.hdr) bits.push('HDR');
+      if (data.audioChannels) {
+        bits.push(`audio ${data.audioLayout || data.audioChannels + 'ch'}${data.audioCodec ? ' ' + data.audioCodec : ''}`);
+      }
+      if (data.bitrate) bits.push(`${(data.bitrate / 1e6).toFixed(2)} Mbps measured`);
+      return bits.join(' · ');
+    }
+
     function probeBadgeInner(key, url, interactive, fallbackLabel) {
       const probed = probeResults[url];
       if (!probed) {
@@ -2501,7 +2525,7 @@
       }
       return `<span onclick="${retry}"
                     class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#4a9d52]/25 text-[#7fc98a] hover:bg-[#4a9d52]/40 cursor-pointer"
-                    title="${probed.persisted ? 'Saved from an earlier check' : 'Measured just now'} - click to re-check">${escapeHtml(probed.label)}</span>`;
+                    title="${escapeHtml(probed.detail ? probed.detail + ' | ' : '')}${probed.persisted ? 'Saved from an earlier check' : 'Measured just now'} - click to re-check">${escapeHtml(probed.label)}</span>`;
     }
 
     async function probeSearchResults(key, options = {}) {
@@ -2761,7 +2785,7 @@
         });
         const data = await res.json();
         probeResults[url] = data.ok
-          ? { label: data.label, fps: data.fps, height: data.height }
+          ? { label: data.label, fps: data.fps, height: data.height, detail: probeDetailText(data) }
           : { error: data.error || 'probe failed' };
         refreshProbeBadges(url);
         applyProbeToSavedLinks(url);
