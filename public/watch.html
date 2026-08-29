@@ -1392,7 +1392,8 @@
     probeRow.innerHTML = `<button onclick="probeStreams()" ${probeInProgress ? 'disabled' : ''}
         class="w-full text-[11px] font-bold py-1.5 rounded transition ${probeInProgress
           ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd] hover:bg-white/5'}">
-        <i class="fa-solid fa-gauge-high mr-1.5"></i>${label}</button>`;
+        <i class="fa-solid fa-gauge-high mr-1.5"></i>${label}</button>`
+      + resetLinkHtml(target, 'probeStreams({ reset: true })');
   }
 
   function toggleStreamSelection(url) {
@@ -1489,7 +1490,7 @@
   //
   // One at a time with a gap between, never a batch - each probe opens a
   // real connection to the provider, and the server throttles them anyway.
-  async function probeStreams() {
+  async function probeStreams(options = {}) {
     if (probeInProgress) { showToast('A quality check is already running.', true); return; }
     const playable = playableStreamRows();
     const target = streamSelection.size > 0
@@ -1507,11 +1508,13 @@
 
         const res = await postJson('/api/networks/probe', {
           url: stream.url,
-          force: true    // an explicit request always re-measures
+          force: true,             // an explicit request always re-measures
+          reset: !!options.reset   // ...and can throw away the average first
         });
         const data = res.data || {};
         probeResults[stream.url] = data.ok
-          ? { label: data.label, detail: probeDetailText(data), tier: data.tier, score: data.score }
+          ? { label: data.label, detail: probeDetailText(data), tier: data.tier, score: data.score,
+              samples: data.samples }
           : { error: data.error || 'probe failed' };
 
         // A measured quality is worth keeping on a channel that is also
@@ -1580,6 +1583,13 @@
     if (data.bitrateVariation && data.bitrateVariation >= 2) {
       bits.push(`bitrate swings ${data.bitrateVariation}x second to second`);
     }
+    // How settled the number is. A single 20 second sample of a
+    // variable-bitrate sports feed is noisy; each further check folds
+    // into the average and tightens it.
+    if (data.samples > 1) {
+      bits.unshift(`average of ${data.samples} checks over ${data.totalSampleSeconds}s`);
+      if (data.lastBitrate) bits.push(`this check read ${(data.lastBitrate / 1e6).toFixed(2)} Mbps`);
+    }
     if (data.bitrateConfident === false) {
       bits.push('short sample - re-check for a firmer number');
     }
@@ -1616,6 +1626,19 @@
     // A single reading is not a comparison, so nothing is crowned.
     return urls.filter(u => probeResults[u] && typeof probeResults[u].score === 'number').length > 1
       ? bestUrl : null;
+  }
+
+  // Offered only when there is something to throw away. Each check folds
+  // into a running average, which is right until the provider re-encodes
+  // a channel - at which point the samples behind the average describe a
+  // stream that no longer exists and the only cure is to start over.
+  function resetLinkHtml(rows, call) {
+    const averaged = rows.filter(r => (probeResults[r.url] || {}).samples > 1).length;
+    if (averaged === 0) return '';
+    return `<button onclick="${call}" title="Discard the averaged samples and measure from scratch"
+                    class="w-full text-[10px] font-bold py-1 rounded text-[#e6e6e6]/40 hover:text-[#e56a6a] transition">
+              Reset averages (${averaged})
+            </button>`;
   }
 
   function probeBadge(url) {
@@ -1723,10 +1746,11 @@
     probeRow.innerHTML = `<button onclick="probeSavedSearch()" ${probeInProgress ? 'disabled' : ''}
         class="w-full text-[11px] font-bold py-1.5 rounded transition ${probeInProgress
           ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd] hover:bg-white/5'}">
-        <i class="fa-solid fa-gauge-high mr-1.5"></i>${label}</button>`;
+        <i class="fa-solid fa-gauge-high mr-1.5"></i>${label}</button>`
+      + resetLinkHtml(target, 'probeSavedSearch({ reset: true })');
   }
 
-  async function probeSavedSearch() {
+  async function probeSavedSearch(options = {}) {
     if (probeInProgress) { showToast('A quality check is already running.', true); return; }
     const target = savedSelection.size > 0
       ? savedResults.filter(c => savedSelection.has(c.url))
@@ -1743,11 +1767,13 @@
 
         const res = await postJson('/api/networks/probe', {
           url: channel.url,
-          force: true    // an explicit request always re-measures
+          force: true,
+          reset: !!options.reset
         });
         const data = res.data || {};
         probeResults[channel.url] = data.ok
-          ? { label: data.label, detail: probeDetailText(data), tier: data.tier, score: data.score }
+          ? { label: data.label, detail: probeDetailText(data), tier: data.tier, score: data.score,
+              samples: data.samples }
           : { error: data.error || 'probe failed' };
 
         // Keep a measured quality with the channel if it is already saved.

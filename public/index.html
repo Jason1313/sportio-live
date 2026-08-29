@@ -2525,6 +2525,13 @@
       if (data.bitrateVariation && data.bitrateVariation >= 2) {
         bits.push(`bitrate swings ${data.bitrateVariation}x second to second`);
       }
+      // How settled the number is. A single 20 second sample of a
+      // variable-bitrate sports feed is noisy; each further check folds
+      // into the average and tightens it.
+      if (data.samples > 1) {
+        bits.unshift(`average of ${data.samples} checks over ${data.totalSampleSeconds}s`);
+        if (data.lastBitrate) bits.push(`this check read ${(data.lastBitrate / 1e6).toFixed(2)} Mbps`);
+      }
       if (data.bitrateConfident === false) {
         bits.push('short sample - re-check for a firmer number');
       }
@@ -2547,7 +2554,12 @@
       // was previously no way to ask again. onclick stops propagation so
       // re-checking doesn't also add the channel to the network, which is
       // what the surrounding button does.
-      const retry = `event.stopPropagation(); retryOneProbe('${key}', '${escapeHtml(url)}')`;
+      // Shift for a reset. Deliberately the modifier rather than a second
+      // control: adding a sample is the ordinary action and resetting is
+      // the rare one, and a list of ten channels does not need ten more
+      // buttons on it. The tooltip says so, since a modifier nobody is
+      // told about is a modifier nobody uses.
+      const retry = `event.stopPropagation(); retryOneProbe('${key}', '${escapeHtml(url)}', event.shiftKey)`;
 
       if (probed.error) {
         return `<span onclick="${retry}"
@@ -2556,7 +2568,7 @@
       }
       return `<span onclick="${retry}"
                     class="text-[10px] font-bold px-1.5 py-0.5 rounded ${tierClasses(probed.tier)} hover:brightness-125 cursor-pointer"
-                    title="${escapeHtml(probed.detail ? probed.detail + ' | ' : '')}${probed.persisted ? 'Saved from an earlier check' : 'Measured just now'} - click to re-check">${escapeHtml(probed.label)}</span>`;
+                    title="${escapeHtml(probed.detail ? probed.detail + ' | ' : '')}${probed.persisted ? 'Saved from an earlier check' : 'Measured just now'} - click to add another sample to the average, shift-click to start over">${escapeHtml(probed.label)}</span>`;
     }
 
     async function probeSearchResults(key, options = {}) {
@@ -2833,17 +2845,17 @@
     // Probes one URL and stores the outcome. Returns whether the answer
     // came from cache, which is what decides if the caller needs to pause
     // before the next one.
-    async function probeOneChannel(url, force) {
+    async function probeOneChannel(url, force, reset) {
       try {
         const res = await fetch('/api/networks/probe', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, url, force: !!force })
+          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, url, force: !!force, reset: !!reset })
         });
         const data = await res.json();
         probeResults[url] = data.ok
           ? { label: data.label, fps: data.fps, height: data.height, detail: probeDetailText(data),
-              tier: data.tier, score: data.score }
+              tier: data.tier, score: data.score, samples: data.samples }
           : { error: data.error || 'probe failed' };
         refreshProbeBadges(url);
         applyProbeToSavedLinks(url);
@@ -2916,7 +2928,10 @@
     // Retry a single channel, from clicking its failed badge. Useful when
     // one stream failed because a connection slot was busy and re-running
     // the whole batch would be wasteful.
-    async function retryOneProbe(key, url) {
+    // `reset` throws away the running average before re-measuring, for
+    // when a provider has re-encoded a channel and the samples behind the
+    // average are describing a stream that no longer exists.
+    async function retryOneProbe(key, url, reset) {
       if (probeInProgress) {
         showStatus('A quality check is already running.', true);
         return;
@@ -2926,7 +2941,7 @@
       refreshProbeBadges(url);
       renderNetworkSearchResults(key);
       try {
-        await probeOneChannel(url, true);
+        await probeOneChannel(url, true, reset);
       } finally {
         probeInProgress = false;
         renderNetworkSearchResults(key);

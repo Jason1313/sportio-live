@@ -2988,7 +2988,14 @@ app.post('/api/networks/probe', async (req, res) => {
   // force re-probes a stream whose cached result was a failure - see
   // probeStream. Still subject to the same server-side throttle, so it
   // cannot be used to bypass the rate limiting.
-  const result = await probe.probeStream(url, { force: req.body.force === true });
+  const result = await probe.probeStream(url, {
+    force: req.body.force === true,
+    // Throws away everything measured of this stream before re-measuring.
+    // Averaging is right until the provider re-encodes a channel, at
+    // which point the old samples are describing a stream that no longer
+    // exists.
+    reset: req.body.reset === true,
+  });
 
   // Logged because there is otherwise no way to tell a real measurement
   // from a cache hit, or a full sample from a truncated one - "it went as
@@ -2999,9 +3006,17 @@ app.post('/api/networks/probe', async (req, res) => {
   if (result.cached) {
     console.log(`[Probe] #${streamId} served from cache (${result.label || result.error})`);
   } else if (result.ok) {
+    // Says both numbers when they differ: what this check measured, and
+    // the average it has been folded into. Without that, a run that read
+    // low looks like the channel having changed.
+    const thisRun = result.lastBitrate ? `${(result.lastBitrate / 1e6).toFixed(1)}Mbps this check` : '';
+    const across = result.samples > 1
+      ? `avg of ${result.samples} checks over ${result.totalSampleSeconds}s`
+      : `sampled ${result.sampleSeconds != null ? result.sampleSeconds : '?'}s of media`;
     console.log(
       `[Probe] #${streamId} ${result.label}` +
-      ` - sampled ${result.sampleSeconds != null ? result.sampleSeconds : '?'}s of media` +
+      ` - ${across}` +
+      (result.samples > 1 && thisRun ? `, ${thisRun}` : '') +
       (result.bitrateVariation ? `, swinging ${result.bitrateVariation}x` : '') +
       (result.bitrateConfident === false ? ' (SHORT SAMPLE)' : ''));
   } else {

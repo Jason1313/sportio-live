@@ -30,7 +30,7 @@ const FFPROBE_BIN = process.env.FFPROBE_PATH || 'ffprobe';
 // provider that bursts its output delivers a 60 second sample in a few
 // seconds; one that paces it in real time takes the full 60, and this
 // timeout is sized for the second kind so the first is never truncated.
-const PROBE_TIMEOUT_MS = 90000;
+const PROBE_TIMEOUT_MS = 45000;
 
 // How much of the stream to actually read.
 //
@@ -38,27 +38,18 @@ const PROBE_TIMEOUT_MS = 90000;
 // measureVideoBitrate - so it is counted off the wire, and this is the
 // window it is counted over.
 //
-// Sixty seconds, and the road here is worth recording. Eight was wildly
-// unrepeatable: one channel returned 3.3, 4.5, 6.5, 7.1, 4.3 and 4.9
-// Mbps across six checks. Twenty settled it a great deal but not
-// enough - re-measuring a set of twenty channels at twenty seconds
-// moved individual readings by 20 to 40%, and moved one from 1.6 Mbps
-// to 5.9, which is the difference between a channel this app calls Bad
-// and one it calls Excellent. That was never the stream changing. It is
-// a variable-bitrate encoder being asked what it weighs over a window
-// short enough for the answer to depend on which plays it caught.
+// Twenty seconds per check, and averaged across checks rather than
+// lengthened - see the accumulator below. Sixty seconds settled the
+// number properly but cost about 40 seconds a channel against a real
+// provider: it bursts roughly the first 30 seconds of media and then
+// falls back to serving in real time, so the back half of a 60 second
+// window is paid for second by second. Twenty sits inside the burst.
 //
-// Sixty is cheap in practice because it is sixty seconds of MEDIA, not
-// of waiting: an IPTV provider serving .ts typically bursts, and
-// measured against a real one an 18 second sample cost about 2 seconds
-// of wall clock. A provider that paces its output in real time will
-// take the full minute, which is what PROBE_TIMEOUT_MS above allows for.
-//
-// Overridable, because the right answer depends on a provider's
-// behaviour and nobody should need a rebuild to try a different one.
+// Overridable, because the right answer depends on how much a given
+// provider buffers, and nobody should need a rebuild to find out.
 const PROBE_SAMPLE_SECONDS = Math.max(
   5,
-  Math.min(300, Number(process.env.PROBE_SAMPLE_SECONDS) || 60)
+  Math.min(300, Number(process.env.PROBE_SAMPLE_SECONDS) || 20)
 );
 
 // Discarded from the front of every sample. The opening of a live
@@ -88,6 +79,64 @@ const MIN_PROBE_INTERVAL_MS = 2500;
 // which bounds staleness inside a long-running container.
 const CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const probeCache = new Map(); // url -> { result, probedAt }
+
+// Every measurement taken of a stream this session, so repeated checks
+// converge instead of replacing one another.
+//
+// A single 20 second sample of a variable-bitrate sports feed is a
+// genuinely noisy estimate - re-measuring the same channel moved
+// readings 20 to 40%, and one by 269%. Lengthening the window fixes that
+// but runs past what the provider has buffered and starts costing real
+// time. Averaging several short samples buys the same convergence at
+// burst speed, and gets better every time the channel is checked rather
+// than only when someone waits longer.
+//
+// Kept as bits and seconds rather than as a list of rates so the average
+// is weighted properly: a sample cut short by a stalling stream counts
+// for the amount of stream it actually saw, not as an equal vote.
+//
+// In memory only, like the result cache above and for the same reason -
+// a provider can re-encode a channel at any time, and an average that
+// survived a restart would quietly blend today's stream with a different
+// one. Bounded as well, so a channel checked all afternoon is an average
+// of its recent state rather than of its whole history.
+const MAX_ACCUMULATED_SAMPLES = 10;
+const probeSamples = new Map(); // url -> [{ bits, seconds, at }]
+
+function addProbeSample(url, bits, seconds) {
+  const samples = probeSamples.get(url) || [];
+  samples.push({ bits, seconds, at: Date.now() });
+  while (samples.length > MAX_ACCUMULATED_SAMPLES) samples.shift();
+  probeSamples.set(url, samples);
+  return samples;
+}
+
+function aggregateOf(samples) {
+  let bits = 0;
+  let seconds = 0;
+  for (const sample of samples) {
+    bits += sample.bits;
+    seconds += sample.seconds;
+  }
+  return seconds > 0
+    ? { bitrate: Math.round(bits / seconds), seconds: Math.round(seconds * 10) / 10, samples: samples.length }
+    : null;
+}
+
+// Forgets everything measured about a stream, so the next check starts
+// from nothing. The counterpart to averaging: an average is the right
+// default and the wrong answer the moment a provider re-encodes a
+// channel, and there has to be a way to say so.
+function resetProbeStats(url) {
+  const had = probeSamples.has(url) || probeCache.has(url);
+  probeSamples.delete(url);
+  probeCache.delete(url);
+  return had;
+}
+
+function probeSampleCount(url) {
+  return (probeSamples.get(url) || []).length;
+}
 
 let lastProbeStartedAt = 0;
 
@@ -467,6 +516,7 @@ function measureVideoBitrate(packets, videoIndex, fps) {
     const bytes = videoPackets.reduce((n, p) => n + p.size, 0);
     return {
       bitrate: Math.round((bytes * 8) / seconds),
+      seconds,
       sampleSeconds: Math.round(seconds * 10) / 10,
       variation: null,
       confident: false,
@@ -524,6 +574,7 @@ function measureVideoBitrate(packets, videoIndex, fps) {
 
   return {
     bitrate: Math.round((bytes * 8) / span),
+    seconds: span,
     sampleSeconds: Math.round(span * 10) / 10,
     variation,
     confident: span >= MIN_CONFIDENT_SAMPLE_SECONDS,
@@ -654,7 +705,9 @@ function runFfprobe(url, options = {}) {
 // the first two probes failed against an active stream and the rest
 // succeeded.
 async function probeStream(url, options = {}) {
-  const { force = false } = options;
+  const { force = false, reset = false } = options;
+
+  if (reset) resetProbeStats(url);
 
   const cached = force ? null : getCached(url);
   if (cached) return { ...cached, cached: true };
@@ -688,7 +741,19 @@ async function probeStream(url, options = {}) {
       const fps = parseFrameRate(video.avg_frame_rate) || parseFrameRate(video.r_frame_rate);
       const interlaced = isInterlaced(video.field_order);
       const measured = measureVideoBitrate(parsed.packets || [], video.index, fps);
-      const bitrate = measured ? measured.bitrate : null;
+
+      // This check on its own, then the running average it feeds. The
+      // average is what everything downstream uses - the label, the bpp,
+      // the score - because it is the better estimate; this run's own
+      // figure is carried alongside it so a wildly different sample is
+      // visible rather than silently folded in.
+      const thisCheck = measured ? measured.bitrate : null;
+      let aggregate = null;
+      if (measured && measured.seconds > 0) {
+        aggregate = aggregateOf(
+          addProbeSample(url, measured.bitrate * measured.seconds, measured.seconds));
+      }
+      const bitrate = aggregate ? aggregate.bitrate : thisCheck;
       const bpp = bitsPerPixel({ bitrate, width: video.width, height: video.height, fps });
 
       result = {
@@ -719,6 +784,12 @@ async function probeStream(url, options = {}) {
         sampleSeconds: measured ? measured.sampleSeconds : null,
         bitrateVariation: measured ? measured.variation : null,
         bitrateConfident: measured ? measured.confident : false,
+        // How settled the figure is: how many checks are behind it, how
+        // much stream they cover in total, and what this one said on its
+        // own.
+        samples: aggregate ? aggregate.samples : (thisCheck ? 1 : 0),
+        totalSampleSeconds: aggregate ? aggregate.seconds : null,
+        lastBitrate: thisCheck,
       };
 
       // Scored before the label is written, because the label leads with
@@ -753,6 +824,8 @@ module.exports = {
   parseFrameRate,
   formatQualityLabel,
   parseQualityLabel,
+  resetProbeStats,
+  probeSampleCount,
   tierDisplayName,
   scoreQuality,
   scoreQualityLabel,
