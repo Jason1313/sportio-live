@@ -171,52 +171,6 @@ function extractRealDate(title, fallbackStartTs, assumedYear) {
   return { date: parseXmltvTimestamp(fallbackStartTs), source: 'xmltv-fallback' };
 }
 
-// Builds the candidate stream list for one specific game, from a parsed
-// M3U source - normalized into the exact same {name, description,
-// startTimestamp, streamUrl} shape the existing Xtream-based tier-
-// matching logic already expects, so that logic can run completely
-// unchanged regardless of which source produced the candidates.
-//
-// For each relevant channel, picks the ONE programme entry whose real,
-// extracted date/time (not the possibly-padded XMLTV start field - see
-// extractRealDate above) sits closest to the game's own scheduled time.
-// This single choice is what actually solves the "same channel has many
-// duplicate padded programme blocks" problem for this use case - since
-// only one programme per channel is ever considered here, the duplicates
-// never even get compared against each other. Verified against real
-// provider data during design (correctly picks a genuine, close-to-game
-// entry over hours of generic padding noise on either side of it).
-function getCandidateStreamsForGame(source, configuredCategoryIds, gameTimestampSec) {
-  const categorySet = new Set(configuredCategoryIds);
-  const relevantChannels = source.channels.filter(ch => ch.categories.some(c => categorySet.has(c)));
-
-  return relevantChannels.map(ch => {
-    const programmes = source.programmesByChannel.get(ch.id) || [];
-    let bestTitle = '';
-    let bestStartTimestamp = null;
-    let bestDist = Infinity;
-
-    for (const p of programmes) {
-      const { date } = extractRealDate(p.title, p.start, new Date().getFullYear());
-      const startTimestamp = date.getTime() / 1000;
-      const dist = gameTimestampSec !== null ? Math.abs(startTimestamp - gameTimestampSec) : 0;
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestTitle = p.title;
-        bestStartTimestamp = startTimestamp;
-      }
-    }
-
-    return {
-      name: ch.name,
-      description: bestTitle,
-      startTimestamp: bestStartTimestamp,
-      streamUrl: ch.streamUrl,
-      categoryLabel: ch.categories[0] || ''
-    };
-  });
-}
-
 // ---------------------------------------------------------------------
 // Fetch + parse a full source
 // ---------------------------------------------------------------------
@@ -515,7 +469,6 @@ module.exports = {
   parseXMLTVEpg,
   extractRealDate,
   parseXmltvTimestamp,
-  getCandidateStreamsForGame,
   fetchAndParseM3USource,
   refreshM3USource,
   getCachedM3USource,

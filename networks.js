@@ -767,36 +767,23 @@ function autoSearchChannels(channels, config, options = {}) {
 // Stream policy
 // ---------------------------------------------------------------------
 
-// How a sport combines its configured links with the tier system.
+// Every sport now works the same way, so there is no policy table here
+// any more.
 //
-//   'replace' - links WIN OUTRIGHT. If the game is on a network the user
-//               has channels for, those channels are the entire answer
-//               and the tiers are not consulted. Used for NFL and college
-//               football, where ESPN tells us the exact network and a
-//               known-good channel beats a name-matching guess every time.
-//   'combine' - links first, then tier results after them. Used for UFC,
-//               where the broadcaster is a streaming service that maps to
-//               no channel, so the tiers still do real work finding
-//               event-specific channels the fixed links can't cover.
-//
-// Any sport not listed uses the tier system alone, unchanged.
-const SPORT_LINK_POLICY = {
-  NFL: 'replace',
-  NCAAFB: 'replace',
-  UFC: 'combine',
-};
-
-function getLinkPolicy(sportKey) {
-  return SPORT_LINK_POLICY[String(sportKey || '').toUpperCase()] || 'tiers-only';
-}
+// There used to be one - 'replace', 'combine' or 'tiers-only' per sport -
+// deciding whether a sport used its configured links, inferred matches,
+// or both. The inference is gone, so the only question left was which
+// sports may use their links, and the answer is all of them. Most were on
+// 'tiers-only' and never consulted a configured channel at all, which is
+// why an NBA game showed guesses even to somebody who had set up TNT.
 
 // Removes entries sharing a stream URL, keeping the first (highest
 // priority) occurrence.
 //
-// This matters more after the parser fix than before it: a network listed
-// in six playlist groups is now six selectable feeds rather than one, so
-// the same URL can genuinely arrive from both a configured link and a
-// tier match. Without this the player shows the identical stream twice.
+// A network listed in six playlist groups is six selectable feeds rather
+// than one, so the same URL can genuinely arrive from both a configured
+// link and the per-sport auto search. Without this the player shows the
+// identical stream twice.
 function dedupeByUrl(streams) {
   const seen = new Set();
   const out = [];
@@ -809,87 +796,41 @@ function dedupeByUrl(streams) {
   return out;
 }
 
-// Whether tier results will be used at all for this game. The stream
-// route calls this BEFORE doing the tier work, which for an Xtream
-// account means one EPG request per channel - all of it wasted if the
-// links are going to replace it. Kept next to buildStreamList because the
-// two must agree: if this says tiers aren't needed and buildStreamList
-// then asks for them, the result is a silently short stream list.
-function needsTiers({ sportKey, networkKey, linkCount }) {
-  const policy = getLinkPolicy(sportKey);
-  if (policy !== 'replace') return true;      // tiers-only and combine both use them
-  if (!networkKey) return true;               // streaming-only game
-  return !linkCount;                          // any configured link replaces them
-}
-
 // Decides the final ordered stream list for one game.
 //
 // Returns { streams, mode, note } where mode explains which branch ran -
 // useful for logging and for the caller deciding whether to append an
 // informational entry.
 //
-//   'links-only'   - replace policy, links found. Tiers deliberately unused.
-//   'links-first'  - combine policy: links, then tier results.
-//   'no-links'     - game IS on a configured-capable network but the user
-//                    has no channels for it. Caller should surface this;
-//                    tiers are included so the result is never empty.
-//   'tiers-only'   - no network resolved, or sport has no link policy.
+//   'links-only' - the user has channels configured for the network
+//                  carrying this game. Those channels are the answer.
+//   'no-links'   - nothing configured for it. The caller surfaces the
+//                  network name so the user knows which slot to fill.
 //
-// `autoStreams` (see AUTO_SEARCH) always sits immediately after the
-// configured links and before the tier results, in EVERY branch including
-// 'links-only'. Unlike the tiers, an auto search is a per-sport
-// declaration rather than generic inference, so a 'replace' sport that
-// discards its tier results still keeps it - and dropping it would mean a
-// promotion's only real source of channels vanishing the moment the user
-// configured a fourth link.
-function buildStreamList({ sportKey, networkKey, linkStreams, autoStreams, tierStreams }) {
-  const policy = getLinkPolicy(sportKey);
+// `autoStreams` (see AUTO_SEARCH) sits immediately after the configured
+// links. It is a per-sport standing search rather than generic inference
+// - written deliberately, scoped to a named group - which is why it
+// survived the removal of the tier system and is the one thing that can
+// find a channel nobody configured.
+function buildStreamList({ networkKey, linkStreams, autoStreams }) {
   const links = linkStreams || [];
   const auto = autoStreams || [];
-  const tiers = tierStreams || [];
+  const streams = dedupeByUrl([...links, ...auto]);
 
-  if (policy === 'tiers-only') {
-    return { streams: dedupeByUrl([...auto, ...tiers]), mode: 'tiers-only', note: '' };
+  if (links.length > 0) {
+    return { streams, mode: 'links-only', note: '' };
   }
 
-  if (policy === 'combine') {
-    // Links first, then the auto search, then tiers - links are a
-    // deliberate choice, an auto hit is a targeted search, a tier hit is
-    // inference over EPG text. Ranked by how much each one actually knows.
-    return { streams: dedupeByUrl([...links, ...auto, ...tiers]), mode: 'links-first', note: '' };
-  }
-
-  // 'replace' from here down.
-  if (!networkKey) {
-    // Streaming-only broadcast, or a network with no slot defined. The
-    // tiers are the right tool - providers list streaming events as
-    // per-event channels carrying the matchup in the name.
-    return { streams: dedupeByUrl([...auto, ...tiers]), mode: 'tiers-only', note: '' };
-  }
-
-  if (links.length === 0) {
-    // The one case that would otherwise produce a silent empty list. The
-    // caller surfaces the network name so the user knows exactly which
-    // slot to fill, and tiers still run so something is playable now.
-    return {
-      streams: dedupeByUrl([...auto, ...tiers]),
-      mode: 'no-links',
-      note: `No ${getNetworkLabel(networkKey)} channels configured`
-    };
-  }
-
-  // Any configured link at all replaces the tiers.
-  //
-  // A short list used to get them appended as a backstop, on the reasoning
-  // that one or two channels probably do not cover every situation. In
-  // practice it meant opening a card with three hand-picked, quality-
-  // checked channels and finding them followed by a list of guesses
-  // inferred from EPG text - which is not what someone who curated three
-  // channels asked to see. Choosing any channel for a network is a
-  // statement about what should play for it; the way to widen the net is
-  // the search in the watch portal, which is deliberate rather than
-  // automatic.
-  return { streams: dedupeByUrl([...links, ...auto]), mode: 'links-only', note: '' };
+  // Nothing configured. Said plainly rather than returning an empty list
+  // that looks like a failure - and it names the network, because the
+  // useful next action is to go and fill that one slot.
+  return {
+    streams,
+    mode: 'no-links',
+    note: networkKey
+      ? `No ${getNetworkLabel(networkKey)} channels configured`
+      : 'No channel configured for this broadcast',
+  };
 }
 
 // ---------------------------------------------------------------------
@@ -1468,12 +1409,10 @@ module.exports = {
   streamIdFromUrl,
   validateSavedChannels,
   resolveSavedChannels,
-  needsTiers,
   isDeadChannel,
   getEventNetworkForSport,
   getPinnedNetworksForSport,
   isPinnedNetwork,
-  getLinkPolicy,
   dedupeByUrl,
   buildStreamList,
   AUTO_SEARCH,

@@ -194,19 +194,7 @@
   <!-- Dashboard + status (normal top-aligned flow, not vertically centered) -->
   <div class="max-w-4xl mx-auto px-4 pb-8 w-full">
 
-    <!-- Setup Wizard Step 4: Select category folders (filtered to chosen leagues) -->
-    <div id="wizard-categories" class="glass rounded-xl p-6 shadow-2xl mb-8 hidden">
-      <h3 class="text-lg font-bold text-[#e6e6e6] mb-1">Category Search</h3>
-      <p class="text-xs text-[#e6e6e6]/55 mb-4">Which categories should be searched when finding streams? Use Global to assign to all leagues.</p>
-      <div id="wizard-sports-config-container" class="space-y-6"></div>
-      <div class="mt-8 border-t border-[#e6e6e6]/15 pt-6">
-        <button onclick="wizardGoToPassword()" class="w-full bg-[#3b8fc4] hover:bg-[#4fa3d8] font-bold py-3 rounded-lg text-sm transition">
-          Next
-        </button>
-      </div>
-    </div>
-
-    <!-- Setup Wizard Step 5: Set your password (new account creation) -->
+    <!-- Setup Wizard Step 4: Set your password (new account creation) -->
     <div id="wizard-password" class="glass rounded-xl p-6 shadow-2xl mb-8 max-w-[590px] mx-auto w-full hidden">
       <h3 class="text-lg font-bold text-[#e6e6e6] mb-4">Set your password</h3>
       <div class="space-y-4 mb-4">
@@ -234,18 +222,6 @@
             <i class="fa-solid fa-copy mr-2"></i>Copy Install Link
           </button>
         </div>
-      </div>
-
-      <div class="flex items-center justify-between mb-3">
-        <h3 class="font-bold text-sm text-[#e6e6e6]/75">Category Search</h3>
-        <button id="expand-all-btn" onclick="toggleAllAccordions()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
-          <i class="fa-solid fa-expand"></i>
-          Expand All
-        </button>
-      </div>
-
-      <div id="sports-config-container" class="space-y-6">
-        <!-- Dynamically injected sports inputs -->
       </div>
 
       <!-- Network Links. Shown for both connection types: the server
@@ -484,7 +460,6 @@
     let wizardSelectedSports = [];
     let wizardTimezone = 'America/New_York';
     let wizardXtream = null;
-    let wizardCategories = {};
     let wizardSportOrder = [];
 
     // Views that should sit vertically centered in the space below the header.
@@ -506,7 +481,6 @@
       'wizard-connection-type': { id: 'wizard-connection-type', centered: true },
       'wizard-xtream': { id: 'wizard-xtream', centered: true },
       'wizard-m3u': { id: 'wizard-m3u', centered: true },
-      'wizard-categories': { id: 'wizard-categories', centered: false },
       'wizard-password': { id: 'wizard-password', centered: false },
       dashboard: { id: 'dashboard-section', centered: false }
     };
@@ -539,7 +513,7 @@
 
       if (config) document.getElementById(config.id).classList.remove('hidden');
 
-      // Hooked here rather than into renderSportsConfig(), which runs on
+      // Hooked here rather than into a dashboard re-render, which runs on
       // every category change and would re-fetch suggestions each time.
       // Every route into the dashboard goes through showView, so this is
       // the one place that catches all of them. Deliberately not awaited -
@@ -564,7 +538,6 @@
       wizardSelectedSports = [];
       wizardTimezone = 'America/New_York';
       wizardXtream = null;
-      wizardCategories = {};
       wizardSportOrder = [];
 
       // Clearing the JS tracking variable above isn't enough on its own -
@@ -800,7 +773,7 @@
           // a group-title string serves as both the id and the display
           // name here, since M3U has no separate numeric-id concept.
           fetchedCategories = data.categories.map(c => ({ category_id: c.name, category_name: c.name }));
-          wizardGoToCategories();
+          wizardGoToPassword();
         } else {
           // Indicate which URL was the problem where the backend could
           // tell, rather than a generic failure message.
@@ -861,7 +834,7 @@
           fetchedCategories = data.categories;
           btn.dataset.mode = 'next';
           btn.innerHTML = 'Next';
-          btn.onclick = wizardGoToCategories;
+          btn.onclick = wizardGoToPassword;
           btn.className = 'w-full bg-[#3b8fc4] hover:bg-[#4fa3d8] active:scale-95 transition-all duration-150 font-bold py-2.5 rounded-lg text-sm';
           successEl.textContent = 'Connection success. Click next.';
           successEl.classList.remove('hidden');
@@ -875,43 +848,11 @@
       }
     }
 
-    // --- Setup Wizard: Step 4, category folder selection (filtered) ---
-
-    function wizardGoToCategories() {
-      renderWizardCategoriesConfig();
-      showView('wizard-categories');
-    }
-
-    function renderWizardCategoriesConfig() {
-      renderCategoryConfig(wizardSelectedSports, 'wizard-sports-config-container', 'wizard-', () => [], () => [], wizardSportOrder, (newOrder) => { wizardSportOrder = newOrder; });
-    }
-
-    // Shared by both the wizard's category step and the dashboard's save
-    // action, so this logic only exists in one place. For every sport
-    // except GLOBAL itself, disabled checkboxes (categories forced on via
-    // Global) are excluded - they're already captured under the GLOBAL key,
-    // no need to also duplicate them into each individual sport's list.
-    function collectCheckedCategories(sportsList, containerId) {
-      const sportCategories = {};
-      sportsList.forEach(sport => {
-        const selector = sport === 'GLOBAL'
-          ? `#${containerId} input[data-sport="${sport}"]:checked`
-          : `#${containerId} input[data-sport="${sport}"]:checked:not(:disabled)`;
-        sportCategories[sport] = Array.from(document.querySelectorAll(selector)).map(cb => cb.value);
-      });
-      return sportCategories;
-    }
-
-    function wizardCollectCategories() {
-      return collectCheckedCategories(['GLOBAL', ...wizardSelectedSports], 'wizard-sports-config-container');
-    }
+    // --- Setup Wizard: Step 4, set your password and create the account ---
 
     function wizardGoToPassword() {
-      wizardCategories = wizardCollectCategories();
       showView('wizard-password');
     }
-
-    // --- Setup Wizard: Step 5, set your password and create the account ---
 
     async function finishWizardSetup() {
       const password = document.getElementById('wizard-password-input').value;
@@ -949,7 +890,6 @@
             // Now used to pre-filter the new dashboard to exactly what was
             // chosen in the wizard, rather than showing all 11 sports.
             selectedSports: wizardSelectedSports,
-            sportCategories: wizardCategories,
             sportOrder: wizardSportOrder
           })
         });
@@ -962,11 +902,9 @@
             xtream: connectionType === 'xtream' ? wizardXtream : undefined,
             m3u: connectionType === 'm3u' ? wizardM3u : undefined,
             selectedSports: wizardSelectedSports,
-            sportCategories: wizardCategories,
             timeZone: wizardTimezone
           };
           document.getElementById('active-uuid-display').textContent = data.uuid;
-          renderSportsConfig();
           showView('dashboard');
         } else {
           errorEl.textContent = data.error || 'Failed to create account.';
@@ -1002,7 +940,6 @@
           if (hasXtream || hasM3u) {
             await refreshCategories();
           } else {
-            renderSportsConfig();
             showStatus('Successfully authenticated!');
           }
         } else {
@@ -1031,7 +968,6 @@
         if (data.success) {
           fetchedCategories = data.categories;
           showStatus(`Fetched ${fetchedCategories.length} categories!`);
-          renderSportsConfig();
         } else {
           showStatus(data.error || 'Failed to fetch categories.', true);
         }
@@ -1066,7 +1002,6 @@
           } else {
             showStatus(`Loaded ${fetchedCategories.length} categories!`);
           }
-          renderSportsConfig();
         } else {
           showStatus(data.error || 'Failed to load categories.', true);
         }
@@ -1112,7 +1047,7 @@
         const btn = document.getElementById(btnId);
         const panel = document.getElementById(panelId);
         if (!btn || !panel) return;
-        // Preserve whichever hidden/flex state renderSportsConfig() set
+        // Preserve whichever hidden/flex state the dashboard render set
         // based on connectionType - this function only cares about the
         // open/closed color styling, and must never accidentally re-show
         // a trigger button (Edit Xtream or Edit M3U) that isn't relevant
@@ -1388,7 +1323,6 @@
       activeUser.m3u = editM3uImportedValues;
       document.getElementById('edit-m3u-panel').classList.add('hidden');
       resetEditM3uState();
-      renderSportsConfig();
       markDashboardDirty();
       showStatus('M3U URLs updated for this session - click Save and Copy Link to save.');
     }
@@ -1405,290 +1339,8 @@
       activeUser.xtream = editXtreamTestedCredentials;
       document.getElementById('edit-xtream-panel').classList.add('hidden');
       resetEditXtreamState();
-      renderSportsConfig();
       markDashboardDirty();
       showStatus('Xtream credentials updated for this session - click Save and Copy Link to save.');
-    }
-
-    // Shared by both the real dashboard and the setup wizard's category step,
-    // so the two never drift out of sync with each other. idPrefix keeps each
-    // context's element IDs/classes distinct ('' for the dashboard, 'wizard-'
-    // for the wizard), and getPreSelected supplies which categories should
-    // already be checked (existing saved config for the dashboard, none yet
-    // for a brand-new wizard setup). Each sport renders as a collapsible
-    // accordion section (collapsed by default) so a long sport list doesn't
-    // turn into an endless scroll of fully-expanded folder pickers.
-    // Builds the checkbox list for one sport's categories, sorted so
-    // currently-checked categories always appear first ("sticky to the
-    // top"), rather than staying wherever they happened to be in the raw
-    // Xtream category order. For any sport other than GLOBAL itself,
-    // categories checked under Global render as checked, disabled, and
-    // globe-marked - there's no separate on/off state to toggle from
-    // within an individual league's view, only from Global itself.
-    function buildCategoryCheckboxesHtml(sport, idPrefix, checkedIds, globalCheckedIds = []) {
-      if (fetchedCategories.length === 0) {
-        return '<p class="text-xs text-[#e6e6e6]/55 italic">No categories loaded yet.</p>';
-      }
-
-      const isGlobalSection = sport === 'GLOBAL';
-
-      const sorted = [...fetchedCategories].sort((a, b) => {
-        const aChecked = checkedIds.includes(a.category_id) || (!isGlobalSection && globalCheckedIds.includes(a.category_id));
-        const bChecked = checkedIds.includes(b.category_id) || (!isGlobalSection && globalCheckedIds.includes(b.category_id));
-        if (aChecked === bChecked) return 0;
-        return aChecked ? -1 : 1;
-      });
-
-      return sorted.map(cat => {
-        const isGloballyForced = !isGlobalSection && globalCheckedIds.includes(cat.category_id);
-        const isChecked = isGloballyForced || checkedIds.includes(cat.category_id);
-        const disabledAttr = isGloballyForced ? 'disabled' : '';
-        const globeMarker = isGloballyForced ? ' <i class="fa-solid fa-globe text-[10px] opacity-60" title="Applied to every league via Global"></i>' : '';
-        const textClass = isGloballyForced ? 'text-[#e6e6e6]/45' : 'text-[#e6e6e6]/75 hover:text-[#e6e6e6]';
-        return `
-          <label class="${idPrefix}category-item-${sport} flex items-center space-x-2 text-xs ${textClass} cursor-pointer py-1" data-name="${escapeHtml(cat.category_name)}">
-            <input type="checkbox" data-sport="${sport}" value="${cat.category_id}" ${isChecked ? 'checked' : ''} ${disabledAttr} onchange="handleCategoryToggle('${idPrefix}', '${sport}')" class="rounded bg-[#3b4d58] border-[#e6e6e6]/15 text-[#3b8fc4] focus:ring-0">
-            <span>${escapeHtml(cat.category_name)}</span>${globeMarker}
-          </label>
-        `;
-      }).join('');
-    }
-
-    // Removes any lingering drop-position indicator from every draggable
-    // section in a container - called before applying a new one and on
-    // drag end/leave, so at most one section ever shows an indicator at
-    // a time.
-    function clearAllDropIndicators(container) {
-      container.querySelectorAll('[data-sport]').forEach(el => {
-        el.style.borderTop = '';
-        el.style.borderBottom = '';
-      });
-    }
-
-    function renderCategoryConfig(sportsList, containerId, idPrefix, getPreSelected, getGlobalSelected, existingOrder, onReorder) {
-      const container = document.getElementById(containerId);
-      container.innerHTML = '';
-
-      // Sorted by the user's own drag-and-drop order if one exists yet,
-      // otherwise alphabetically by display label - "FIFA World Cup"
-      // sorts under F, not its WORLDCUP key. Anything not yet present in
-      // existingOrder (e.g. a league added after the order was last set)
-      // falls back to alphabetical, sorting after everything explicitly
-      // ordered - same fallback logic the manifest itself uses.
-      const alphaSort = (a, b) => (SPORT_LABELS[a] || a).localeCompare(SPORT_LABELS[b] || b);
-      const sortedSportsList = (existingOrder && existingOrder.length > 0)
-        ? [...sportsList].sort((a, b) => {
-            const idxA = existingOrder.indexOf(a);
-            const idxB = existingOrder.indexOf(b);
-            if (idxA === -1 && idxB === -1) return alphaSort(a, b);
-            if (idxA === -1) return 1;
-            if (idxB === -1) return -1;
-            return idxA - idxB;
-          })
-        : [...sportsList].sort(alphaSort);
-
-      // Global always sits first, regardless of which real leagues are
-      // selected - it functions exactly like any other league's section,
-      // just with a globe icon instead of a sport icon. It's also never
-      // draggable, for the same reason - its position is fixed by design,
-      // not something the user reorders.
-      const fullList = ['GLOBAL', ...sortedSportsList];
-      const globalSelected = getGlobalSelected();
-
-      fullList.forEach(sport => {
-        const isGlobalSection = sport === 'GLOBAL';
-        const preSelected = isGlobalSection ? globalSelected : getPreSelected(sport);
-        const icon = isGlobalSection ? 'fa-globe' : (SPORT_ICONS[sport] || 'fa-trophy');
-        const sectionLabel = isGlobalSection ? 'Global' : (SPORT_LABELS[sport] || sport);
-
-        const section = document.createElement('div');
-        section.className = 'bg-[#3b4d58]/40 border border-[#e6e6e6]/15 rounded-lg overflow-hidden';
-
-        const categoryCheckboxesHtml = buildCategoryCheckboxesHtml(sport, idPrefix, preSelected, isGlobalSection ? [] : globalSelected);
-
-        // Effective count for a real league includes whatever's checked
-        // under Global too, since those categories are searched for every
-        // league regardless of that league's own selections.
-        const effectiveCount = isGlobalSection ? preSelected.length : preSelected.length + globalSelected.length;
-        const badgeClass = effectiveCount > 0 ? 'bg-[#3b8fc4] text-white' : 'bg-[#3b4d58] text-[#e6e6e6]/55';
-        const instructionText = isGlobalSection
-          ? 'Categories checked here are automatically searched for every league, in addition to that league\'s own selections.'
-          : 'Please choose which categories should be searched when sourcing game streams.';
-        const dragHandle = isGlobalSection ? '' : '<i class="fa-solid fa-grip-vertical text-[#e6e6e6]/40 text-sm cursor-grab active:cursor-grabbing"></i>';
-
-        section.innerHTML = `
-          <button type="button" onclick="toggleAccordionSection('${idPrefix}', '${sport}')" class="w-full flex items-center justify-between px-4 py-3 hover:bg-[#3b4d58]/40 transition text-left">
-            <div class="flex items-center gap-3">
-              ${dragHandle}
-              <i class="fa-solid ${icon} text-[#5aa8d1] text-base w-5 text-center"></i>
-              <span class="font-bold text-sm text-[#e6e6e6]">${sectionLabel}</span>
-            </div>
-            <div class="flex items-center gap-3">
-              <span id="${idPrefix}badge-${sport}" class="text-xs font-semibold px-2 py-0.5 rounded-full ${badgeClass}">${effectiveCount} selected</span>
-              <i id="${idPrefix}chevron-${sport}" class="fa-solid fa-chevron-down text-[#e6e6e6]/55 text-xs transition-transform"></i>
-            </div>
-          </button>
-          <div id="${idPrefix}body-${sport}" class="hidden px-4 pb-4">
-            <p class="text-xs text-[#e6e6e6]/55 mb-3">${instructionText}</p>
-            <div class="relative mb-2">
-              <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-xs text-[#e6e6e6]/55"></i>
-              <input type="text" id="${idPrefix}search-${sport}" onkeyup="filterCategoriesGeneric('${sport}', '${idPrefix}')" placeholder="Filter ${sectionLabel} categories..." class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg pl-8 pr-3 py-1.5 text-xs focus:border-[#3b8fc4] focus:outline-none text-[#e6e6e6]/90">
-            </div>
-            <div id="${idPrefix}checklist-${sport}" class="max-h-96 overflow-y-auto bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg p-3 space-y-1">
-              ${categoryCheckboxesHtml}
-            </div>
-          </div>
-        `;
-
-        if (!isGlobalSection) {
-          section.dataset.sport = sport;
-          section.draggable = true;
-
-          section.addEventListener('dragstart', (e) => {
-            // The "empty slot" left behind while dragging - dashed border
-            // and low opacity read clearly as "this is being moved", not
-            // just a generic dimmed state. Inline styles rather than
-            // Tailwind classes here, same reasoning as the drop indicator
-            // below - these are applied purely at runtime via JS, with no
-            // static text anywhere in the page's HTML for Tailwind's CDN
-            // JIT scanner to have already picked up.
-            section.style.opacity = '0.15';
-            section.style.border = '2px dashed rgba(230,230,230,0.3)';
-
-            // Native drag-and-drop's default cursor-following image is
-            // just a flat snapshot of the element - CSS transitions on the
-            // original don't affect it. Supplying a styled clone instead
-            // gives a genuine "picked up" look: slightly larger, tilted,
-            // with a strong shadow.
-            const dragImage = section.cloneNode(true);
-            dragImage.style.position = 'fixed';
-            dragImage.style.top = '-9999px';
-            dragImage.style.width = `${section.offsetWidth}px`;
-            dragImage.style.transform = 'scale(1.05) rotate(2deg)';
-            dragImage.style.boxShadow = '0 20px 40px rgba(0,0,0,0.5)';
-            dragImage.style.opacity = '1';
-            document.body.appendChild(dragImage);
-            e.dataTransfer.setDragImage(dragImage, e.clientX - section.getBoundingClientRect().left, e.clientY - section.getBoundingClientRect().top);
-            setTimeout(() => dragImage.remove(), 0);
-
-            e.dataTransfer.setData('text/plain', sport);
-            e.dataTransfer.effectAllowed = 'move';
-          });
-          section.addEventListener('dragend', () => {
-            section.style.opacity = '';
-            section.style.border = '';
-            clearAllDropIndicators(container);
-          });
-          section.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            e.dataTransfer.dropEffect = 'move';
-
-            // Live preview of where the item would land if dropped right
-            // now - a highlighted line on whichever edge (top/bottom) the
-            // cursor is currently closer to. Inline styles here rather
-            // than Tailwind classes, since these are applied purely via
-            // classList/style at runtime - safer than relying on the
-            // Tailwind CDN's JIT scanner picking up classes that never
-            // appear as literal text anywhere in the page's HTML.
-            clearAllDropIndicators(container);
-            const rect = section.getBoundingClientRect();
-            const insertBefore = (e.clientY - rect.top) < rect.height / 2;
-            section.style.borderTop = insertBefore ? '3px solid #3b8fc4' : '';
-            section.style.borderBottom = insertBefore ? '' : '3px solid #3b8fc4';
-          });
-          section.addEventListener('dragleave', () => {
-            section.style.borderTop = '';
-            section.style.borderBottom = '';
-          });
-          section.addEventListener('drop', (e) => {
-            e.preventDefault();
-            clearAllDropIndicators(container);
-            const draggedSport = e.dataTransfer.getData('text/plain');
-            if (!draggedSport || draggedSport === sport) return;
-            const draggedEl = container.querySelector(`[data-sport="${draggedSport}"]`);
-            if (!draggedEl) return;
-
-            const rect = section.getBoundingClientRect();
-            const insertBefore = (e.clientY - rect.top) < rect.height / 2;
-            container.insertBefore(draggedEl, insertBefore ? section : section.nextSibling);
-
-            const newOrder = Array.from(container.querySelectorAll('[data-sport]')).map(el => el.dataset.sport);
-            if (onReorder) onReorder(newOrder);
-          });
-        }
-
-        container.appendChild(section);
-      });
-    }
-
-    // Rebuilds just one section's checkbox list in its newly-sorted,
-    // checked-first order, then reapplies whatever's currently typed in
-    // that section's search box (untouched, so its value survives).
-    // Reads whatever's currently checked in the Global section directly
-    // from the DOM, so other sections always reflect the live state
-    // without needing separate state tracking.
-    function getCurrentGlobalCheckedIds(idPrefix) {
-      const containerId = `${idPrefix}sports-config-container`;
-      return Array.from(document.querySelectorAll(`#${containerId} input[data-sport="GLOBAL"]:checked`)).map(cb => cb.value);
-    }
-
-    function resortCategorySection(idPrefix, sport) {
-      const containerId = `${idPrefix}sports-config-container`;
-      const checkedIds = Array.from(document.querySelectorAll(`#${containerId} input[data-sport="${sport}"]:checked:not(:disabled)`)).map(cb => cb.value);
-      const globalCheckedIds = sport === 'GLOBAL' ? [] : getCurrentGlobalCheckedIds(idPrefix);
-
-      const checklist = document.getElementById(`${idPrefix}checklist-${sport}`);
-      checklist.innerHTML = buildCategoryCheckboxesHtml(sport, idPrefix, checkedIds, globalCheckedIds);
-
-      filterCategoriesGeneric(sport, idPrefix);
-    }
-
-    function handleCategoryToggle(idPrefix, sport) {
-      updateAccordionBadge(idPrefix, sport);
-      resortCategorySection(idPrefix, sport);
-
-      // Changing Global affects every other league's disabled/checked
-      // markers and badge counts too, so those need refreshing immediately
-      // rather than only on the next full page render.
-      if (sport === 'GLOBAL') {
-        const containerId = `${idPrefix}sports-config-container`;
-        const container = document.getElementById(containerId);
-        container.querySelectorAll(`[id^="${idPrefix}checklist-"]`).forEach(checklist => {
-          const otherSport = checklist.id.replace(`${idPrefix}checklist-`, '');
-          if (otherSport === 'GLOBAL') return;
-          resortCategorySection(idPrefix, otherSport);
-          updateAccordionBadge(idPrefix, otherSport);
-        });
-      }
-    }
-
-    function toggleAccordionSection(idPrefix, sport) {
-      document.getElementById(`${idPrefix}body-${sport}`).classList.toggle('hidden');
-      document.getElementById(`${idPrefix}chevron-${sport}`).classList.toggle('rotate-180');
-    }
-
-    function updateAccordionBadge(idPrefix, sport) {
-      const containerId = `${idPrefix}sports-config-container`;
-      const count = document.querySelectorAll(`#${containerId} input[data-sport="${sport}"]:checked`).length;
-      const badge = document.getElementById(`${idPrefix}badge-${sport}`);
-      badge.textContent = `${count} selected`;
-      badge.className = `text-xs font-semibold px-2 py-0.5 rounded-full ${count > 0 ? 'bg-[#3b8fc4] text-white' : 'bg-[#3b4d58] text-[#e6e6e6]/55'}`;
-
-      // Only the real dashboard's checkboxes represent unsaved account
-      // changes - the wizard's checkboxes are scratch state with no save
-      // button of their own, so they never mark anything dirty.
-      if (idPrefix === '') {
-        markDashboardDirty();
-      }
-    }
-
-    function filterCategoriesGeneric(sport, idPrefix) {
-      const searchInput = document.getElementById(`${idPrefix}search-${sport}`).value.toLowerCase();
-      const checkboxes = document.querySelectorAll(`.${idPrefix}category-item-${sport}`);
-      checkboxes.forEach(item => {
-        const name = item.getAttribute('data-name').toLowerCase();
-        item.classList.toggle('hidden', !name.includes(searchInput));
-      });
     }
 
     // Which sports show on the dashboard: whatever the account has explicitly
@@ -1883,7 +1535,6 @@
       const selectedSports = [...manageSportsSelection];
       activeUser.selectedSports = selectedSports;
       document.getElementById('manage-sports-panel').classList.add('hidden');
-      renderSportsConfig();
       markDashboardDirty();
       showStatus('Leagues updated for this session - click Save and Copy Link to save.');
     }
@@ -1912,32 +1563,6 @@
     // dashboardHasUnsavedChanges since they persist immediately on their
     // own, so without this the button would give no visual acknowledgment
     // at all for those saves.
-    let allAccordionsExpanded = false;
-
-    function toggleAllAccordions() {
-      allAccordionsExpanded = !allAccordionsExpanded;
-      ['GLOBAL', ...getVisibleSports()].forEach(sport => {
-        const body = document.getElementById(`body-${sport}`);
-        const chevron = document.getElementById(`chevron-${sport}`);
-        if (!body || !chevron) return;
-        if (allAccordionsExpanded) {
-          body.classList.remove('hidden');
-          chevron.classList.add('rotate-180');
-        } else {
-          body.classList.add('hidden');
-          chevron.classList.remove('rotate-180');
-        }
-      });
-      updateExpandAllButton();
-    }
-
-    function updateExpandAllButton() {
-      const btn = document.getElementById('expand-all-btn');
-      if (!btn) return;
-      btn.innerHTML = allAccordionsExpanded
-        ? '<i class="fa-solid fa-compress"></i> Collapse All'
-        : '<i class="fa-solid fa-expand"></i> Expand All';
-    }
 
     // ---------------------------------------------------------------
     // Network Links
@@ -3261,49 +2886,6 @@
       if (row) row.innerHTML = buildSearchProbeButtonHtml(key);
     }
 
-    function renderSportsConfig() {
-      // Only one of these two is ever relevant for a given account - an
-      // account has exactly one connectionType, set at registration and
-      // not currently changeable. Xtream is the default/fallback for
-      // accounts created before M3U support existed.
-      const isM3u = activeUser && activeUser.connectionType === 'm3u';
-      document.getElementById('edit-xtream-trigger-btn').classList.toggle('hidden', isM3u);
-      document.getElementById('edit-m3u-trigger-btn').classList.toggle('hidden', !isM3u);
-      if (isM3u) {
-        document.getElementById('edit-m3u-trigger-btn').classList.add('flex');
-      }
-
-      // Xtream-only, and it describes the provider rather than the
-      // account, so it reads whatever is saved and offers the other one.
-      const formatBlock = document.getElementById('xtream-format-block');
-      if (formatBlock) {
-        formatBlock.classList.toggle('hidden', isM3u);
-        document.getElementById('xtream-format-select').value =
-          (activeUser && activeUser.xtream && activeUser.xtream.streamFormat) === 'ts' ? 'ts' : 'm3u8';
-      }
-
-      renderCategoryConfig(
-        getVisibleSports(),
-        'sports-config-container',
-        '',
-        (sport) => (activeUser && activeUser.sportCategories && activeUser.sportCategories[sport]) || [],
-        () => (activeUser && activeUser.sportCategories && activeUser.sportCategories.GLOBAL) || [],
-        (activeUser && activeUser.sportOrder) || [],
-        (newOrder) => {
-          if (activeUser) activeUser.sportOrder = newOrder;
-          markDashboardDirty();
-        }
-      );
-      // A fresh render always reflects exactly what's saved on the server,
-      // so any prior unsaved-changes state is now stale - clear it.
-      dashboardHasUnsavedChanges = false;
-      updateSaveCopyButton();
-      // Every section renders collapsed by default, so the Expand/Collapse
-      // All control needs to match that on every fresh render too.
-      allAccordionsExpanded = false;
-      updateExpandAllButton();
-    }
-
     // Persists category folder selections. Returns true/false so callers
     // (the unified Copy Link button) know whether it's safe to proceed.
     // The single function that actually persists anything to the server -
@@ -3316,12 +2898,6 @@
     async function saveAllChanges() {
       if (!activeUser) return false;
 
-      const collected = collectCheckedCategories(['GLOBAL', ...getVisibleSports()], 'sports-config-container');
-      // Merge with whatever was already saved, so any sport currently hidden
-      // via Manage Sports keeps its folder selections intact rather than
-      // being wiped out just because it wasn't on screen to collect from.
-      const sportCategories = { ...(activeUser.sportCategories || {}), ...collected };
-
       try {
         const res = await fetch('/api/user/update', {
           method: 'POST',
@@ -3332,14 +2908,12 @@
             xtream: activeUser.xtream,
             selectedSports: activeUser.selectedSports,
             timeZone: activeUser.timeZone,
-            sportCategories,
             sportOrder: activeUser.sportOrder,
             networkLinks: activeUser.networkLinks || {}
           })
         });
         const data = await res.json();
         if (data.success) {
-          activeUser.sportCategories = sportCategories;
           return true;
         } else {
           showStatus(data.error || 'Failed to save settings.', true);
