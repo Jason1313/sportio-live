@@ -2647,13 +2647,18 @@
     // Roughly what one probe costs end to end: the deliberate gap between
     // probes plus the time ffprobe itself takes to pull enough of the
     // stream to read a frame.
-    // Roughly what one channel costs end to end: the probe's own sample
-    // window plus the gap left between probes. Quoted in the confirm
-    // dialog and counted down while it runs, so it has to track
-    // PROBE_SAMPLE_SECONDS in probe.js - it was left at 7 when the sample
-    // went to 20 and the dialog then promised a two minute job that took
-    // eight.
-    const PROBE_SECONDS_EACH = 25;
+    // The opening guess at what one channel costs, before there is any
+    // evidence to go on.
+    //
+    // It cannot be right for everyone and does not try to be: the probe
+    // samples a fixed span of MEDIA, and how long that takes to arrive is
+    // the provider's business. One that bursts its output delivers a
+    // minute of it in a few seconds; one that paces it in real time takes
+    // the minute. Measured against a real bursting provider, a channel
+    // came in around 12s end to end including the gap between probes.
+    // The countdown stops using this as soon as it has timed a channel
+    // itself - see checkQualityForAllNetworks.
+    const PROBE_SECONDS_EACH = 12;
 
     // Checks every channel across every network, in one pass.
     //
@@ -2692,13 +2697,19 @@
       const ok = confirm(
         `Check the quality of ${targets.length} channel${targets.length === 1 ? '' : 's'} across ` +
         `${new Set(targets.map(t => t.key)).size} network${new Set(targets.map(t => t.key)).size === 1 ? '' : 's'}.\n\n` +
-        `This takes about ${estimate}. Channels are checked one at a time on purpose - ` +
+        `This takes around ${estimate}, depending on how quickly your provider serves - ` +
+        `each channel is sampled for a fixed span of video, which a fast provider delivers in ` +
+        `a fraction of the time it represents.
+
+` +
+        `Channels are checked one at a time on purpose - ` +
         `each one opens a connection to your provider, and doing them at once risks ` +
         `interrupting anything you are currently watching.\n\nStart now?`
       );
       if (!ok) return;
 
       probeInProgress = true;
+      const startedAt = Date.now();
       const button = document.getElementById('network-check-all-btn');
       const touched = new Set();
 
@@ -2706,7 +2717,11 @@
         for (let i = 0; i < targets.length; i++) {
           const target = targets[i];
           touched.add(target.key);
-          const remaining = formatDuration((targets.length - i) * PROBE_SECONDS_EACH);
+          // Measured, not assumed, from the second channel onwards. The
+          // constant above is a guess about someone else's server; by
+          // here there is a real number for this one.
+          const secondsEach = i > 0 ? (Date.now() - startedAt) / i / 1000 : PROBE_SECONDS_EACH;
+          const remaining = formatDuration(Math.round((targets.length - i) * secondsEach));
           if (button) {
             button.disabled = true;
             button.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${i + 1}/${targets.length} &middot; ~${remaining} left`;

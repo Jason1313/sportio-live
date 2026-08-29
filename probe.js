@@ -26,7 +26,11 @@ const FFPROBE_BIN = process.env.FFPROBE_PATH || 'ffprobe';
 // the connection for PROBE_SAMPLE_SECONDS on purpose, and the old ceiling
 // left almost no room for connect time on top of that - a healthy but
 // slow-to-start stream would have been reported as dead.
-const PROBE_TIMEOUT_MS = 45000;
+// Has to clear the sample window with room for connect time on top. A
+// provider that bursts its output delivers a 60 second sample in a few
+// seconds; one that paces it in real time takes the full 60, and this
+// timeout is sized for the second kind so the first is never truncated.
+const PROBE_TIMEOUT_MS = 90000;
 
 // How much of the stream to actually read.
 //
@@ -34,16 +38,28 @@ const PROBE_TIMEOUT_MS = 45000;
 // measureVideoBitrate - so it is counted off the wire, and this is the
 // window it is counted over.
 //
-// Twenty seconds, up from eight. Eight was not wrong so much as too
-// short to be repeatable: measured six times on one channel it returned
-// 3.3, 4.5, 6.5, 7.1, 4.3 and 4.9 Mbps. That is not the stream changing,
-// it is a variable-bitrate encoder being asked what it weighs over a
-// window narrow enough for one crowd shot or one static studio segment
-// to dominate the answer. Sport swings hard between the two. A longer
-// window averages across enough of both for the number to settle, and
-// the sample is reported alongside it so a reading taken over less can
-// be recognised as one.
-const PROBE_SAMPLE_SECONDS = 20;
+// Sixty seconds, and the road here is worth recording. Eight was wildly
+// unrepeatable: one channel returned 3.3, 4.5, 6.5, 7.1, 4.3 and 4.9
+// Mbps across six checks. Twenty settled it a great deal but not
+// enough - re-measuring a set of twenty channels at twenty seconds
+// moved individual readings by 20 to 40%, and moved one from 1.6 Mbps
+// to 5.9, which is the difference between a channel this app calls Bad
+// and one it calls Excellent. That was never the stream changing. It is
+// a variable-bitrate encoder being asked what it weighs over a window
+// short enough for the answer to depend on which plays it caught.
+//
+// Sixty is cheap in practice because it is sixty seconds of MEDIA, not
+// of waiting: an IPTV provider serving .ts typically bursts, and
+// measured against a real one an 18 second sample cost about 2 seconds
+// of wall clock. A provider that paces its output in real time will
+// take the full minute, which is what PROBE_TIMEOUT_MS above allows for.
+//
+// Overridable, because the right answer depends on a provider's
+// behaviour and nobody should need a rebuild to try a different one.
+const PROBE_SAMPLE_SECONDS = Math.max(
+  5,
+  Math.min(300, Number(process.env.PROBE_SAMPLE_SECONDS) || 60)
+);
 
 // Discarded from the front of every sample. The opening of a live
 // connection is the least typical part of it: the first keyframe lands
@@ -51,10 +67,12 @@ const PROBE_SAMPLE_SECONDS = 20;
 // it, so a window that starts on one reads high.
 const BITRATE_WARMUP_SECONDS = 2;
 
-// Below this, the numbers still get reported but are flagged as taken
-// over too little to trust - a stream that yielded three seconds before
-// stalling has been measured, just not well.
-const MIN_CONFIDENT_SAMPLE_SECONDS = 6;
+// Below this the numbers are still reported but flagged as taken over
+// too little to trust. Proportional rather than fixed, so it keeps
+// meaning the same thing if the window above is changed: a stream that
+// gave up less than half of what was asked for has been measured, just
+// not well.
+const MIN_CONFIDENT_SAMPLE_SECONDS = Math.max(5, PROBE_SAMPLE_SECONDS * 0.5);
 
 // Minimum gap between two probes that actually contact the provider.
 // Enforced here rather than trusting the caller, because the cost of
@@ -489,10 +507,18 @@ function measureVideoBitrate(packets, videoIndex, fps) {
   if (seconds.length > 2) seconds.pop();
   const rates = seconds.map(k => buckets.get(k) * 8);
 
+  // Reported as the spread between the 10th and 90th percentile second,
+  // not between the largest and smallest. Max over min is the most
+  // outlier-sensitive statistic available: one second containing a
+  // scene-change keyframe against one static second reads as a 6x swing
+  // on a stream nobody would call unsteady, which is alarming without
+  // being informative. Percentiles describe the body of the sample.
   let variation = null;
-  if (rates.length >= 3) {
-    const low = rates.reduce((m, r) => Math.min(m, r), Infinity);
-    const high = rates.reduce((m, r) => Math.max(m, r), 0);
+  if (rates.length >= 5) {
+    const sorted = [...rates].sort((a, b) => a - b);
+    const at = (q) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.round(q * (sorted.length - 1))))];
+    const low = at(0.10);
+    const high = at(0.90);
     if (low > 0) variation = Math.round((high / low) * 10) / 10;
   }
 
