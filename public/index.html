@@ -2647,7 +2647,13 @@
     // Roughly what one probe costs end to end: the deliberate gap between
     // probes plus the time ffprobe itself takes to pull enough of the
     // stream to read a frame.
-    const PROBE_SECONDS_EACH = 7;
+    // Roughly what one channel costs end to end: the probe's own sample
+    // window plus the gap left between probes. Quoted in the confirm
+    // dialog and counted down while it runs, so it has to track
+    // PROBE_SAMPLE_SECONDS in probe.js - it was left at 7 when the sample
+    // went to 20 and the dialog then promised a two minute job that took
+    // eight.
+    const PROBE_SECONDS_EACH = 25;
 
     // Checks every channel across every network, in one pass.
     //
@@ -2665,9 +2671,14 @@
       for (const network of networkRegistry) {
         for (const link of readNetworkLinks(network.key)) {
           const prior = probeResults[link.url];
-          // Skip channels already measured in this session; a full
-          // re-check is available per network.
-          if (prior && !prior.error) continue;
+          // Skip only what was measured in THIS session. A persisted
+          // result is a label restored from the account, possibly from
+          // weeks ago and - for anything saved before bitrate was
+          // measured at all - carrying no bitrate to rank on. Treating
+          // those as done made "Check All Quality" report that everything
+          // had already been checked and do nothing, which is precisely
+          // the case the button exists for.
+          if (prior && !prior.error && !prior.persisted) continue;
           targets.push({ key: network.key, label: network.label, link });
         }
       }

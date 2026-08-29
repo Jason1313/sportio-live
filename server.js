@@ -2989,6 +2989,25 @@ app.post('/api/networks/probe', async (req, res) => {
   // probeStream. Still subject to the same server-side throttle, so it
   // cannot be used to bypass the rate limiting.
   const result = await probe.probeStream(url, { force: req.body.force === true });
+
+  // Logged because there is otherwise no way to tell a real measurement
+  // from a cache hit, or a full sample from a truncated one - "it went as
+  // fast as before" is a reasonable thing to wonder and was impossible to
+  // answer. Only the stream id, never the URL, which carries the
+  // provider password.
+  const streamId = networks.streamIdFromUrl(url);
+  if (result.cached) {
+    console.log(`[Probe] #${streamId} served from cache (${result.label || result.error})`);
+  } else if (result.ok) {
+    console.log(
+      `[Probe] #${streamId} ${result.label}` +
+      ` - sampled ${result.sampleSeconds != null ? result.sampleSeconds : '?'}s of media` +
+      (result.bitrateVariation ? `, swinging ${result.bitrateVariation}x` : '') +
+      (result.bitrateConfident === false ? ' (SHORT SAMPLE)' : ''));
+  } else {
+    console.log(`[Probe] #${streamId} failed: ${result.error}`);
+  }
+
   return res.json({ success: true, url, ...result });
 });
 
