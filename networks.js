@@ -241,23 +241,12 @@ const MAX_LINKS_PER_NETWORK = 10;
 // A cap on GUESSES, specifically. Auto-fill deliberately stops well
 // short of MAX_LINKS_PER_NETWORK: the extra slots exist so specific feeds
 // can be added by hand - a particular affiliate, a 1080p60 variant found
-// by probing - not so the picker can fill ten guesses. Filling all ten
-// automatically would also silently defeat COMBINE_AT_OR_BELOW below,
-// since no network would ever sit at three or fewer links.
+// by probing - not so the picker can fill ten guesses.
 //
 // An instance default is not a guess and this ceiling does not apply to
 // it - the operator picked those by hand, which is the very thing the
 // spare slots were being reserved for. See suggestChannelsForNetwork.
 const MAX_SUGGESTIONS = 5;
-
-// At or below this many links, a 'replace' sport ALSO shows tier results
-// (after the links). The reasoning is coverage: a network with one or two
-// channels configured is probably not covering every situation - a
-// blacked-out affiliate, a regional split - and the search results are
-// worth having as a backstop. Once there are four or more, the list is
-// deliberate enough to stand on its own, and mixing in guesses would just
-// bury the good entries.
-const COMBINE_AT_OR_BELOW = 3;
 
 // A saved link identifies a channel by its stream URL, because that is
 // the only genuinely unique identifier a playlist offers. tvg-id is NOT
@@ -830,8 +819,7 @@ function needsTiers({ sportKey, networkKey, linkCount }) {
   const policy = getLinkPolicy(sportKey);
   if (policy !== 'replace') return true;      // tiers-only and combine both use them
   if (!networkKey) return true;               // streaming-only game
-  if (!linkCount) return true;                // no links: tiers are the fallback
-  return linkCount <= COMBINE_AT_OR_BELOW;    // short list: tiers as backstop
+  return !linkCount;                          // any configured link replaces them
 }
 
 // Decides the final ordered stream list for one game.
@@ -890,13 +878,17 @@ function buildStreamList({ sportKey, networkKey, linkStreams, autoStreams, tierS
     };
   }
 
-  // A short list gets the tier results appended as a backstop - see
-  // COMBINE_AT_OR_BELOW. Links still rank first either way; the only
-  // question is whether anything follows them.
-  if (links.length <= COMBINE_AT_OR_BELOW) {
-    return { streams: dedupeByUrl([...links, ...auto, ...tiers]), mode: 'links-plus-tiers', note: '' };
-  }
-
+  // Any configured link at all replaces the tiers.
+  //
+  // A short list used to get them appended as a backstop, on the reasoning
+  // that one or two channels probably do not cover every situation. In
+  // practice it meant opening a card with three hand-picked, quality-
+  // checked channels and finding them followed by a list of guesses
+  // inferred from EPG text - which is not what someone who curated three
+  // channels asked to see. Choosing any channel for a network is a
+  // statement about what should play for it; the way to widen the net is
+  // the search in the watch portal, which is deliberate rather than
+  // automatic.
   return { streams: dedupeByUrl([...links, ...auto]), mode: 'links-only', note: '' };
 }
 
@@ -1476,7 +1468,6 @@ module.exports = {
   streamIdFromUrl,
   validateSavedChannels,
   resolveSavedChannels,
-  COMBINE_AT_OR_BELOW,
   needsTiers,
   isDeadChannel,
   getEventNetworkForSport,
