@@ -1243,6 +1243,186 @@ const mmaPosterHandler = async (req, res) => {
   res.send(svg);
 };
 
+// ---------------------------------------------------------------------
+// Rendered art cache
+// ---------------------------------------------------------------------
+//
+// A poster is a 140KB SVG template carried through several rewriting
+// passes with two base64 logos spliced into it, and about 250KB comes
+// out the other end - roughly a megabyte of short-lived strings per
+// card. A full college football slate is 77 of them, which is the whole
+// of what is left of the memory spike when the watch page opens.
+//
+// None of that work depends on anything but the request URL. Every
+// input - the teams, their colours, the kickoff, the timezone - arrives
+// as a path or query parameter, so the URL names the output exactly.
+// That makes the art cacheable as a plain file keyed by the URL, and a
+// hit costs one read and no rendering at all.
+//
+// Unlike the team logos, this set is not bounded: it grows with games
+// per week, week after week, so it needs a ceiling and a way to come
+// back under it. Hence the budget and the sweep below.
+const RENDER_CACHE_DIR = path.join(DATA_DIR, 'render-cache');
+const RENDER_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const RENDER_CACHE_BUDGET_BYTES =
+  Math.max(16, Number(process.env.SPORTIO_RENDER_CACHE_MB) || 256) * 1024 * 1024;
+// Swept back to well under the ceiling rather than just under it, so a
+// busy slate is not re-sweeping on every render once it first fills up.
+const RENDER_CACHE_LOW_WATER = 0.8;
+
+// key -> { size, bornAt, usedAt, maxAge }. Held in memory because the
+// sweep needs every entry's size and age at once, and statting the whole
+// directory to find that out would be the expensive part of a cheap
+// operation.
+const renderIndex = new Map();
+let renderCacheBytes = 0;
+
+// The cache lifetime the route asked for travels in the filename, so a
+// restart can rebuild the index from the directory alone - the logo art
+// is good for a day where a game poster is good for an hour, and a
+// served copy has to keep saying so.
+function renderCacheFile(key, maxAge) {
+  return path.join(RENDER_CACHE_DIR, `${key}.${maxAge}.svg`);
+}
+
+function parseRenderCacheName(name) {
+  const m = /^([0-9a-f]{40})\.(\d+)\.svg$/.exec(name);
+  return m ? { key: m[1], maxAge: Number(m[2]) } : null;
+}
+
+function forgetRender(key) {
+  const entry = renderIndex.get(key);
+  if (!entry) return;
+  renderIndex.delete(key);
+  renderCacheBytes -= entry.size;
+  try {
+    fs.rmSync(renderCacheFile(key, entry.maxAge), { force: true });
+  } catch (err) {
+    // Already gone, or held open by something else. The index no longer
+    // points at it either way, which is what matters.
+  }
+}
+
+// Expired entries first, then least recently used, until the cache is
+// back under the low-water mark.
+function sweepRenderCache() {
+  for (const [key, entry] of renderIndex) {
+    if ((Date.now() - entry.bornAt) > RENDER_CACHE_TTL_MS) forgetRender(key);
+  }
+  if (renderCacheBytes <= RENDER_CACHE_BUDGET_BYTES) return;
+
+  const target = RENDER_CACHE_BUDGET_BYTES * RENDER_CACHE_LOW_WATER;
+  const byAge = [...renderIndex.entries()].sort((a, b) => a[1].usedAt - b[1].usedAt);
+  let dropped = 0;
+  for (const [key] of byAge) {
+    if (renderCacheBytes <= target) break;
+    forgetRender(key);
+    dropped++;
+  }
+  console.log(`[Render cache] Over budget - dropped ${dropped} of the least recently used,` +
+    ` now holding ${(renderCacheBytes / 1048576).toFixed(0)} MB.`);
+}
+
+function storeRender(key, maxAge, body) {
+  try {
+    fs.mkdirSync(RENDER_CACHE_DIR, { recursive: true });
+    const target = renderCacheFile(key, maxAge);
+    // Temp name and rename, so a reader never picks up half an SVG.
+    const tmp = `${target}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, body);
+    fs.renameSync(tmp, target);
+
+    forgetRender(key);
+    const size = Buffer.byteLength(body);
+    renderIndex.set(key, { size, bornAt: Date.now(), usedAt: Date.now(), maxAge });
+    renderCacheBytes += size;
+    sweepRenderCache();
+  } catch (err) {
+    console.error(`[Render cache] Could not store a render: ${err.message}`);
+  }
+}
+
+// Rebuilt from the directory rather than from a saved index, so a
+// half-written index or a manually deleted file cannot leave the two
+// disagreeing. mtime stands in for both ages: it is when the file was
+// written, and after a restart nothing better is known about when it was
+// last wanted.
+function loadRenderCacheIndex() {
+  try {
+    fs.mkdirSync(RENDER_CACHE_DIR, { recursive: true });
+    for (const name of fs.readdirSync(RENDER_CACHE_DIR)) {
+      const parsed = parseRenderCacheName(name);
+      if (!parsed) {
+        // A leftover .tmp from a process that died mid-write.
+        if (name.endsWith('.tmp')) fs.rmSync(path.join(RENDER_CACHE_DIR, name), { force: true });
+        continue;
+      }
+      const stat = fs.statSync(path.join(RENDER_CACHE_DIR, name));
+      renderIndex.set(parsed.key, {
+        size: stat.size, bornAt: stat.mtimeMs, usedAt: stat.mtimeMs, maxAge: parsed.maxAge
+      });
+      renderCacheBytes += stat.size;
+    }
+    // Swept before it is reported, so the count is what is actually
+    // being kept rather than what was found lying there.
+    sweepRenderCache();
+    if (renderIndex.size > 0) {
+      console.log(`[Render cache] Holding ${renderIndex.size} rendered images,` +
+        ` ${(renderCacheBytes / 1048576).toFixed(0)} MB.`);
+    }
+  } catch (err) {
+    console.error(`[Render cache] Could not read ${RENDER_CACHE_DIR}: ${err.message}`);
+  }
+}
+
+loadRenderCacheIndex();
+
+// Serves a stored render, or lets the route build one and keeps it.
+//
+// Mounted on the art prefixes rather than wired into each route: there
+// are eleven of them, they all answer with an SVG built purely from the
+// URL, and a rule that holds for all of them belongs in one place.
+function cacheRenderedSvg(req, res, next) {
+  const key = crypto.createHash('sha1').update(req.originalUrl).digest('hex');
+  const entry = renderIndex.get(key);
+
+  if (entry && (Date.now() - entry.bornAt) <= RENDER_CACHE_TTL_MS) {
+    try {
+      const body = fs.readFileSync(renderCacheFile(key, entry.maxAge));
+      entry.usedAt = Date.now();
+      // charset included to match exactly what Express sends when the
+      // route builds the same SVG as a string. A team name can carry an
+      // accent, and a cached response must not describe itself
+      // differently from a freshly rendered one.
+      res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
+      res.setHeader('Cache-Control', `public, max-age=${entry.maxAge}`);
+      return res.send(body);
+    } catch (err) {
+      // The file went missing under us. Fall through and rebuild it.
+      forgetRender(key);
+    }
+  }
+
+  const send = res.send.bind(res);
+  res.send = (body) => {
+    const result = send(body);
+    // Only a successful SVG, and only one built as a string - the hit
+    // path above answers with a Buffer, and re-storing what was just
+    // read would be pure churn.
+    const type = String(res.getHeader('Content-Type') || '');
+    if (res.statusCode === 200 && typeof body === 'string' && type.includes('svg')) {
+      const maxAge = /max-age=(\d+)/.exec(String(res.getHeader('Cache-Control') || ''));
+      // Stored after the response has gone out, so nothing waits on the
+      // disk write.
+      storeRender(key, maxAge ? Number(maxAge[1]) : 3600, body);
+    }
+    return result;
+  };
+  next();
+}
+
+app.use(['/poster', '/landscape', '/logo', '/network'], cacheRenderedSvg);
+
 // Registered BEFORE the generic team-based poster route below. The bare
 // path has the same segment count (/poster/X/Y/Z.svg) and Express matches
 // in registration order, so the more specific one has to come first or it
