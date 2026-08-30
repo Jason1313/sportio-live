@@ -1885,19 +1885,26 @@ function seasonWeekQuery(sportKey, year, seasonType, week) {
   return `dates=${year}&seasontype=${seasonType}&week=${week}${getNcaaScoreboardParams(sportKey)}`;
 }
 
-// Every event in a round, across all the ESPN weeks it spans, deduplicated
-// by event id - a merged round asks for two overlapping lists on purpose,
-// so the same game arriving twice is expected rather than a fault.
-async function fetchSeasonWeekEvents(sportKey, year, seasonType, weeks) {
-  const key = `${sportKey}:${year}:${seasonType}:${weeks.join(',')}`;
+// Every event a set of scoreboard queries returns, deduplicated by event
+// id - a merged round asks for two overlapping lists on purpose, so the
+// same game arriving twice is expected rather than a fault.
+//
+// Keyed on the queries themselves rather than on what the caller was
+// trying to work out. That is what makes the cache shared: resolving
+// which round to show and then building that round's games ask ESPN the
+// identical questions, and used to each download and parse the answer
+// separately. A college football week is a large payload, so every
+// visit to the watch page was paying for it twice.
+async function fetchScoreboardEvents(sportKey, queries) {
+  const key = `${sportKey}:${queries.join('|')}`;
   const cached = weekEventsCache.get(key);
   if (cached && (Date.now() - cached.fetchedAt) < WEEK_EVENTS_CACHE_MS) return cached.events;
 
   const endpoint = ESPN_ENDPOINTS[sportKey];
   if (!endpoint) return [];
   try {
-    const responses = await Promise.all(weeks.map(week => axios.get(
-      `${endpoint}?${seasonWeekQuery(sportKey, year, seasonType, week)}`,
+    const responses = await Promise.all(queries.map(query => axios.get(
+      `${endpoint}?${query}`,
       { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }, timeout: 15000 }
     )));
     const seen = new Set();
@@ -1912,9 +1919,16 @@ async function fetchSeasonWeekEvents(sportKey, year, seasonType, weeks) {
     weekEventsCache.set(key, { fetchedAt: Date.now(), events });
     return events;
   } catch (err) {
-    console.error(`[ESPN] Failed to fetch ${sportKey} type ${seasonType} week(s) ${weeks.join(',')}:`, err.message);
+    console.error(`[ESPN] Failed to fetch ${sportKey} (${queries.join(' | ')}):`, err.message);
+    // Stale beats empty. An outage should not empty the catalog of a
+    // league whose schedule we are still holding.
     return cached ? cached.events : [];
   }
+}
+
+async function fetchSeasonWeekEvents(sportKey, year, seasonType, weeks) {
+  return fetchScoreboardEvents(
+    sportKey, weeks.map(week => seasonWeekQuery(sportKey, year, seasonType, week)));
 }
 
 // Where in the round list to begin looking.
@@ -2003,26 +2017,12 @@ async function fetchSeasonWeekGames(sport, hostUrl, userTimeZone) {
 // where the college P4 filter runs - it needs each team's conference id,
 // and that only exists on the raw ESPN event.
 async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York', options = {}) {
-  const endpoint = ESPN_ENDPOINTS[sport.toUpperCase()];
-  if (!endpoint) return [];
+  if (!ESPN_ENDPOINTS[sport.toUpperCase()]) return [];
 
   try {
     const queries = options.queries
       || [`dates=${getLocalDateString(userTimeZone)}${getNcaaScoreboardParams(sport)}`];
-    const responses = await Promise.all(queries.map(query => axios.get(`${endpoint}?${query}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-      timeout: 15000
-    })));
-
-    const seen = new Set();
-    const allEvents = [];
-    for (const res of responses) {
-      for (const event of res.data?.events || []) {
-        if (seen.has(event.id)) continue;
-        seen.add(event.id);
-        allEvents.push(event);
-      }
-    }
+    const allEvents = await fetchScoreboardEvents(sport.toUpperCase(), queries);
     const events = options.eventFilter ? allEvents.filter(options.eventFilter) : allEvents;
 
     // Callers that fetch a whole round sort the result themselves; this
@@ -2472,7 +2472,7 @@ async function fetchTodayMmaEvents(hostUrl, userTimeZone = 'America/New_York') {
 //
 // A new sport added here needs a deliberate answer to which of the three
 // it is. Do not assume.
-async function fetchGamesForSport(sport, hostUrl, userTimeZone = 'America/New_York') {
+async function buildGamesForSport(sport, hostUrl, userTimeZone) {
   if (sport === 'UFC') {
     return fetchTodayMmaEvents(hostUrl, userTimeZone);
   }
@@ -2480,6 +2480,49 @@ async function fetchGamesForSport(sport, hostUrl, userTimeZone = 'America/New_Yo
     return fetchSeasonWeekGames(sport, hostUrl, userTimeZone);
   }
   return fetchTodayGames(sport, hostUrl, userTimeZone);
+}
+
+// The finished list, cached, because opening the watch page asks every
+// configured league for one at once and then asks again the moment a
+// league tab is picked. Rebuilding it meant turning ninety-nine raw ESPN
+// events back into cards each time - the largest thing the server does
+// on that page, and pure repetition.
+//
+// Cached under a placeholder host, with the real one substituted on the
+// way out. A game's poster, background and logo are absolute URLs and
+// are the only things in it the host affects, so keying the cache by
+// host would have split it per access route - the tailnet name and the
+// LAN address holding separate copies of the same schedule - and let
+// anyone widen it at will, since the host is just a request header.
+const GAMES_HOST_TOKEN = 'https://host.invalid';
+const gamesCache = new Map();
+const GAMES_CACHE_MS = 10 * 60 * 1000;
+
+function withHost(url, hostUrl) {
+  return typeof url === 'string' ? url.replace(GAMES_HOST_TOKEN, hostUrl) : url;
+}
+
+async function fetchGamesForSport(sport, hostUrl, userTimeZone = 'America/New_York') {
+  const key = `${sport.toUpperCase()}|${userTimeZone}`;
+  let entry = gamesCache.get(key);
+
+  if (!entry || (Date.now() - entry.builtAt) > GAMES_CACHE_MS) {
+    entry = {
+      builtAt: Date.now(),
+      games: await buildGamesForSport(sport, GAMES_HOST_TOKEN, userTimeZone)
+    };
+    gamesCache.set(key, entry);
+  }
+
+  // Copied rather than handed out directly. Callers are free to sort or
+  // annotate what they get back, and the cached list has to survive
+  // that untouched for the next reader.
+  return entry.games.map(game => ({
+    ...game,
+    poster: withHost(game.poster, hostUrl),
+    background: withHost(game.background, hostUrl),
+    logo: withHost(game.logo, hostUrl)
+  }));
 }
 
 async function fetchXtreamCategories(user) {
@@ -4397,6 +4440,63 @@ function providersInUse() {
     .filter(Boolean))];
 }
 
+// Which leagues anyone actually watches, and in which timezone. Both
+// matter: the timezone is part of the day-at-a-time scoreboard query, so
+// two accounts in different zones are asking ESPN different questions.
+function sportsInUse() {
+  const pairs = new Map();
+  for (const user of Object.values(userConfigs)) {
+    const timeZone = user.timeZone || 'America/New_York';
+    for (const sport of user.selectedSports || []) {
+      pairs.set(`${sport}:${timeZone}`, { sport, timeZone });
+    }
+  }
+  return [...pairs.values()];
+}
+
+// Opening the watch page asks for every configured league at once, and
+// each of those catalogs used to go out to ESPN and parse a full
+// scoreboard payload before it could answer. That is the work behind the
+// memory spike on first load: transient, collected a few minutes later,
+// but paid again on the next visit.
+//
+// So it is done here instead, on a timer, and a visit finds the answer
+// already in hand. The interval is deliberately shorter than the cache
+// lifetime - an entry that expired between warms would put the fetch
+// back on the visitor's request, which is the thing being avoided.
+const GAME_CACHE_WARM_MS = 5 * 60 * 1000;
+
+async function warmGameCaches() {
+  const pairs = sportsInUse();
+  if (pairs.length === 0) return;
+
+  // Sequential on purpose. There is no deadline here, and doing them all
+  // at once would recreate in the background exactly the spike this is
+  // meant to take off the request path.
+  let warmed = 0;
+  for (const { sport, timeZone } of pairs) {
+    try {
+      // Through the same entry point every catalog request uses, which
+      // is what guarantees it warms exactly what they will ask for. The
+      // host passed here does not matter: the cache holds the
+      // placeholder and each request substitutes its own.
+      await fetchGamesForSport(sport, GAMES_HOST_TOKEN, timeZone);
+      warmed++;
+    } catch (err) {
+      console.error(`[Games] Could not warm ${sport} (${timeZone}): ${err.message}`);
+    }
+  }
+  console.log(`[Games] Warmed ${warmed}/${pairs.length} league schedules.`);
+}
+
+function scheduleGameCacheWarm() {
+  setInterval(() => { warmGameCaches(); }, GAME_CACHE_WARM_MS).unref();
+  // Not at the moment of boot: the first request in is usually the
+  // dashboard loading a playlist, and there is no reason to make it
+  // queue behind a round of ESPN fetches.
+  setTimeout(() => { warmGameCaches(); }, 15 * 1000).unref();
+}
+
 function scheduleStreamcheckRefresh() {
   const nextRun = m3u.computeNextScheduledRun(
     EVERY_DAY, [STREAMCHECK_REFRESH_TIME], STREAMCHECK_REFRESH_TZ);
@@ -4443,3 +4543,4 @@ function scheduleStreamcheckRefresh() {
 }
 
 scheduleStreamcheckRefresh();
+scheduleGameCacheWarm();
