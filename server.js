@@ -752,7 +752,85 @@ function getSportDisplayName(sportKey) {
   return SPORT_DISPLAY_NAMES[upper] || upper;
 }
 
+// Every image this app draws is a static ESPN asset - a team mark, a
+// league mark, a fighter headshot, a flag - and none of them change
+// more than once in a decade. They were nonetheless refetched on every
+// poster render, so a single college football slate meant a couple of
+// hundred round trips to espncdn before one image reached the screen.
+//
+// Cached to disk under the data directory, which is the bind-mounted
+// volume, so the cache survives a container restart rather than being
+// paid for again on every deploy. Stored as the finished data URI
+// rather than as raw bytes: that is what every caller wants, so a hit
+// costs one file read and no re-encoding. It is a third larger on disk
+// than the PNG, which for a few hundred team marks is a few megabytes -
+// and the set is bounded by the number of teams that exist, so there is
+// nothing here to evict.
+const IMAGE_CACHE_DIR = path.join(DATA_DIR, 'image-cache');
+const IMAGE_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+// Misses expire far sooner than hits. A 404 today can be a logo ESPN
+// has not published yet, and remembering it for a month would leave the
+// team blank long after the mark went up.
+const IMAGE_MISS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// Serving an expired copy is a stopgap, not an answer, so it is held
+// for minutes rather than for the month a fresh one gets.
+const IMAGE_STALE_MEMO_MS = 5 * 60 * 1000;
+
+const imageMemo = new Map();
+
+function imageCachePath(url, suffix) {
+  return path.join(IMAGE_CACHE_DIR, crypto.createHash('sha1').update(url).digest('hex') + suffix);
+}
+
+// The cached data URI, or null when nothing on disk is younger than
+// maxAgeMs. Pass Infinity to take whatever is there at any age.
+function readCachedImage(url, maxAgeMs) {
+  try {
+    const file = imageCachePath(url, '.datauri');
+    if (Date.now() - fs.statSync(file).mtimeMs > maxAgeMs) return null;
+    return fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    return null;
+  }
+}
+
+function hasCachedMiss(url) {
+  try {
+    return (Date.now() - fs.statSync(imageCachePath(url, '.miss')).mtimeMs) <= IMAGE_MISS_TTL_MS;
+  } catch (err) {
+    return false;
+  }
+}
+
+function writeImageCacheFile(url, suffix, body) {
+  try {
+    fs.mkdirSync(IMAGE_CACHE_DIR, { recursive: true });
+    const target = imageCachePath(url, suffix);
+    // Written under a temporary name and renamed into place. A torn
+    // write would otherwise leave a truncated data URI behind, and a
+    // truncated data URI is a broken image that looks cached and
+    // correct for the next thirty days.
+    const tmp = `${target}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, body);
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    console.error(`[ImageCache] Could not cache ${url}: ${err.message}`);
+  }
+}
+
+function rememberImage(url, value, ttlMs = IMAGE_CACHE_TTL_MS) {
+  imageMemo.set(url, { value, expires: Date.now() + ttlMs });
+  return value;
+}
+
 async function getBase64Image(url) {
+  const memo = imageMemo.get(url);
+  if (memo && memo.expires > Date.now()) return memo.value;
+
+  const cached = readCachedImage(url, IMAGE_CACHE_TTL_MS);
+  if (cached !== null) return rememberImage(url, cached);
+  if (hasCachedMiss(url)) return rememberImage(url, null, IMAGE_MISS_TTL_MS);
+
   try {
     const response = await axios.get(url, {
       responseType: 'arraybuffer',
@@ -765,11 +843,46 @@ async function getBase64Image(url) {
     });
     const contentType = response.headers['content-type'] || 'image/png';
     const base64 = Buffer.from(response.data, 'binary').toString('base64');
-    return `data:${contentType};base64,${base64}`;
+    const dataUri = `data:${contentType};base64,${base64}`;
+    writeImageCacheFile(url, '.datauri', dataUri);
+    return rememberImage(url, dataUri);
   } catch (err) {
+    // A mark we already hold beats a mark we cannot reach: an expired
+    // copy is served rather than dropping the team's logo off the
+    // poster because espncdn had a bad minute.
+    const stale = readCachedImage(url, Infinity);
+    if (stale !== null) return rememberImage(url, stale, IMAGE_STALE_MEMO_MS);
+
+    // Only a refusal is remembered. A timeout or a 5xx says nothing
+    // about whether the image exists, and writing a miss for one would
+    // blank the team for a week over a moment's trouble.
+    const status = err.response && err.response.status;
+    if (status >= 400 && status < 500) writeImageCacheFile(url, '.miss', '');
+
     console.error(`[ImageLoader] Failed to fetch image: ${url}. Error: ${err.message}`);
     return null;
   }
+}
+
+// ESPN publishes a scoreboard-cropped variant of each team mark beside
+// the standard one, keyed by abbreviation rather than by id, and it is
+// tried first because it is what ESPN's own scoreboard uses.
+//
+// The ncaa bucket has no scoreboard variant at all - measured, and both
+// the abbreviation and the id 404 under it - while college football
+// alone puts around 120 teams on screen at once. Asking for one there
+// was a guaranteed-failed request per team per slate, which is what
+// filled the log with fetch failures for images that then loaded fine
+// from the standard URL a moment later.
+const NO_SCOREBOARD_LOGO_BUCKETS = new Set(['ncaa']);
+
+function teamLogoUrls(league, abbr, id) {
+  const urls = [];
+  if (abbr && !NO_SCOREBOARD_LOGO_BUCKETS.has(league)) {
+    urls.push(`https://a.espncdn.com/i/teamlogos/${league}/500/scoreboard/${abbr}.png`);
+  }
+  if (id) urls.push(`https://a.espncdn.com/i/teamlogos/${league}/500/${id}.png`);
+  return urls;
 }
 
 // Tries each URL in order, returning the first one that successfully loads.
@@ -1166,16 +1279,9 @@ app.get('/poster/:sport/:homeId/:awayId.svg', async (req, res) => {
   const homeAbbr = (req.query.homeAbbr || '').toLowerCase();
   const awayAbbr = (req.query.awayAbbr || '').toLowerCase();
 
-  // Scoreboard-optimized logo first, full standard logo as fallback if the
-  // scoreboard variant isn't available.
-  const homeScoreboardUrl = homeAbbr ? `https://a.espncdn.com/i/teamlogos/${league}/500/scoreboard/${homeAbbr}.png` : '';
-  const awayScoreboardUrl = awayAbbr ? `https://a.espncdn.com/i/teamlogos/${league}/500/scoreboard/${awayAbbr}.png` : '';
-  const homeStandardUrl = `https://a.espncdn.com/i/teamlogos/${league}/500/${homeId}.png`;
-  const awayStandardUrl = `https://a.espncdn.com/i/teamlogos/${league}/500/${awayId}.png`;
-
   const [homeLogoData, awayLogoData] = await Promise.all([
-    getBase64ImageWithFallback([homeScoreboardUrl, homeStandardUrl]),
-    getBase64ImageWithFallback([awayScoreboardUrl, awayStandardUrl])
+    getBase64ImageWithFallback(teamLogoUrls(league, homeAbbr, homeId)),
+    getBase64ImageWithFallback(teamLogoUrls(league, awayAbbr, awayId))
   ]);
 
   const template = getPosterTemplateInline();
@@ -1412,15 +1518,10 @@ app.get('/landscape/:sport/:homeId/:awayId.svg', async (req, res) => {
   const homeAbbr = (req.query.homeAbbr || '').toLowerCase();
   const awayAbbr = (req.query.awayAbbr || '').toLowerCase();
 
-  // Same scoreboard-first, standard-logo-fallback pattern as the poster.
-  const homeScoreboardUrl = homeAbbr ? `https://a.espncdn.com/i/teamlogos/${league}/500/scoreboard/${homeAbbr}.png` : '';
-  const awayScoreboardUrl = awayAbbr ? `https://a.espncdn.com/i/teamlogos/${league}/500/scoreboard/${awayAbbr}.png` : '';
-  const homeStandardUrl = `https://a.espncdn.com/i/teamlogos/${league}/500/${homeId}.png`;
-  const awayStandardUrl = `https://a.espncdn.com/i/teamlogos/${league}/500/${awayId}.png`;
-
+  // Same scoreboard-first, standard-logo-fallback chain as the poster.
   const [homeLogoData, awayLogoData] = await Promise.all([
-    getBase64ImageWithFallback([homeScoreboardUrl, homeStandardUrl]),
-    getBase64ImageWithFallback([awayScoreboardUrl, awayStandardUrl])
+    getBase64ImageWithFallback(teamLogoUrls(league, homeAbbr, homeId)),
+    getBase64ImageWithFallback(teamLogoUrls(league, awayAbbr, awayId))
   ]);
 
   const overlayInline = getBackgroundOverlayInline();
