@@ -1553,6 +1553,7 @@
       // from the live stream list for Xtream - so there is nothing left
       // for the page to gate on.
       block.classList.remove('hidden');
+      const justOpenedPanels = openNetworkPanelsOnce();
 
       if (networkRegistry.length === 0) {
         try {
@@ -1611,6 +1612,42 @@
       autoFillNetworkSuggestions();
       seedProbeResultsFromSavedLinks();
       renderNetworkLinks();
+
+      // The published-data panel was drawn before the request above ran,
+      // so on a first sign-in it will have reported holding nothing while
+      // that very request was loading the provider's table. Ask it again
+      // now that the answer has settled.
+      if (justOpenedPanels) loadStreamcheckProviders();
+    }
+
+    // The three settings panels start open, once per signed-in account.
+    //
+    // Opened from here rather than from the markup because the section
+    // they live in is itself hidden until an account loads, and opened
+    // before the suggestions are fetched rather than after so that a
+    // playlist still warming up - which returns early below - does not
+    // cost the user the settings panels as well.
+    //
+    // Once per ACCOUNT, not once per render: this function runs again
+    // every time the dashboard is shown, and a panel somebody closed
+    // should stay closed while they work rather than springing back the
+    // next time they save a setting. Keyed by uuid so signing in as a
+    // different account opens them again.
+    let panelsOpenedFor = null;
+
+    function openNetworkPanelsOnce() {
+      if (!activeUser || panelsOpenedFor === activeUser.uuid) return false;
+      panelsOpenedFor = activeUser.uuid;
+
+      for (const id of ['streamcheck-panel', 'network-categories-panel', 'network-defaults-panel']) {
+        const panel = document.getElementById(id);
+        if (panel) panel.classList.remove('hidden');
+      }
+
+      loadStreamcheckProviders();
+      loadCategoryPicker();
+      refreshDefaultPresets();
+      return true;
     }
 
     // Restores quality badges for links already measured in a previous
