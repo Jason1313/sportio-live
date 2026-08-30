@@ -4268,3 +4268,77 @@ function getActiveM3uSources() {
 }
 
 m3u.startM3uScheduler(getActiveM3uSources, () => m3uSettings);
+
+// ---------------------------------------------------------------------
+// Published quality data: a daily check
+// ---------------------------------------------------------------------
+//
+// Asks once a day whether each provider in use has been swept since the
+// copy in memory, and re-pulls only the ones where it has. The asking is
+// about 7KB and the pulling about 20MB, so on most days this downloads
+// nothing at all - the sweeps are weekly and the check is daily
+// deliberately, because the point is to notice the day one lands rather
+// than to poll for it.
+//
+// Seven in the morning by default, in New York, which is after the
+// sweeps have landed and before anybody is looking for a game. Both the
+// hour and the zone are overridable, so moving it does not need a
+// rebuild.
+const STREAMCHECK_REFRESH_TIME = process.env.STREAMCHECK_REFRESH_TIME || '07:00';
+const STREAMCHECK_REFRESH_TZ = process.env.STREAMCHECK_REFRESH_TZ || 'America/New_York';
+const EVERY_DAY = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+
+// Only providers an account actually names. Nothing is fetched for the
+// other fifteen on that dashboard.
+function providersInUse() {
+  return [...new Set(Object.values(userConfigs)
+    .map(u => u.streamcheckProvider)
+    .filter(Boolean))];
+}
+
+function scheduleStreamcheckRefresh() {
+  const nextRun = m3u.computeNextScheduledRun(
+    EVERY_DAY, [STREAMCHECK_REFRESH_TIME], STREAMCHECK_REFRESH_TZ);
+
+  if (!nextRun) {
+    console.error('[Streamcheck scheduler] Could not work out the next run - check' +
+      ` STREAMCHECK_REFRESH_TIME ("${STREAMCHECK_REFRESH_TIME}") and STREAMCHECK_REFRESH_TZ` +
+      ` ("${STREAMCHECK_REFRESH_TZ}"). Trying again in an hour.`);
+    setTimeout(scheduleStreamcheckRefresh, 60 * 60 * 1000);
+    return;
+  }
+
+  const delay = nextRun.getTime() - Date.now();
+  console.log(`[Streamcheck scheduler] Next check at ${nextRun.toISOString()}` +
+    ` (${STREAMCHECK_REFRESH_TIME} ${STREAMCHECK_REFRESH_TZ}, in ${(delay / 3600000).toFixed(1)} hours)`);
+
+  setTimeout(async () => {
+    const providers = providersInUse();
+    if (providers.length === 0) {
+      console.log('[Streamcheck scheduler] No account names a provider - nothing to check.');
+    } else {
+      try {
+        for (const result of await streamcheck.refreshProviders(providers)) {
+          if (!result.ok) {
+            console.error(`[Streamcheck scheduler] ${result.provider}: could not be reached, keeping what is held.`);
+          } else if (result.firstLoad) {
+            console.log(`[Streamcheck scheduler] ${result.provider}: loaded ${result.channels} channels for run ${result.runDate}.`);
+          } else if (result.updated) {
+            console.log(`[Streamcheck scheduler] ${result.provider}: new run ${result.runDate}` +
+              ` (was ${result.previousRun}), ${result.channels} channels.`);
+          } else {
+            console.log(`[Streamcheck scheduler] ${result.provider}: still on run ${result.runDate}, nothing downloaded.`);
+          }
+        }
+      } catch (err) {
+        console.error('[Streamcheck scheduler] Check failed:', err.message);
+      }
+    }
+    // Rescheduled from here rather than on an interval, so the run stays
+    // pinned to the wall clock across a DST change instead of drifting
+    // an hour twice a year.
+    scheduleStreamcheckRefresh();
+  }, delay);
+}
+
+scheduleStreamcheckRefresh();

@@ -193,13 +193,16 @@ async function listProviders() {
 // fetch happens about weekly however often this is called, and an
 // instance nobody is using fetches nothing at all, because none of this
 // runs on a timer - it is driven by lookups.
-async function ensureProvider(provider) {
+async function ensureProvider(provider, options = {}) {
   if (!provider) return null;
 
   const existing = cache.get(provider);
   const now = Date.now();
 
-  if (existing && now - existing.checkedAt < FRESHNESS_CHECK_MS) return existing;
+  // `force` skips the interval and asks straight away. The scheduled
+  // daily check uses it: the whole point of running at a fixed hour is
+  // that it does not care when the last lookup happened to be.
+  if (!options.force && existing && now - existing.checkedAt < FRESHNESS_CHECK_MS) return existing;
 
   const pending = inFlight.get(provider);
   if (pending) return pending;
@@ -252,6 +255,39 @@ async function ensureProvider(provider) {
   return job;
 }
 
+// Asks each provider whether it has been swept since the copy in memory,
+// and pulls the table again only for those where it has.
+//
+// The asking is cheap and the pulling is not - a summary is about 7KB
+// against 20MB for a table - which is what makes a daily check
+// affordable when the sweeps themselves are weekly. Most days this
+// downloads nothing and simply confirms there is nothing to download.
+//
+// Providers are done one at a time rather than in parallel: this is
+// somebody else's public dashboard, and a handful of 20MB queries fired
+// at once is not a reasonable way to treat it.
+async function refreshProviders(providers) {
+  const results = [];
+  for (const provider of [...new Set(providers)].filter(Boolean)) {
+    const before = cache.get(provider);
+    const previousRun = before ? before.runDate : null;
+    const previousCount = before ? before.byId.size : 0;
+
+    const entry = await ensureProvider(provider, { force: true });
+    results.push({
+      provider,
+      ok: !!entry,
+      previousRun,
+      runDate: entry ? entry.runDate : null,
+      channels: entry ? entry.byId.size : 0,
+      updated: !!entry && entry.runDate !== previousRun,
+      firstLoad: !before && !!entry,
+      previousCount,
+    });
+  }
+  return results;
+}
+
 // One channel, or null when the provider is unknown, unreachable, or
 // simply does not list that id.
 async function lookup(provider, streamId) {
@@ -295,6 +331,7 @@ function clearCache() {
 module.exports = {
   listProviders,
   ensureProvider,
+  refreshProviders,
   lookup,
   lookupCached,
   isLoaded,
