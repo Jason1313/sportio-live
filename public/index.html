@@ -236,6 +236,10 @@
             <button id="network-check-all-10-btn" onclick="checkQualityForAllNetworks({ passes: 10 })"
                     title="Check every channel 10 times, round-robin, and average all the readings together"
                     class="text-xs font-bold text-[#e6e6e6]/45 hover:text-[#5aa8d1] transition">&times;10</button>
+            <button id="streamcheck-btn" onclick="toggleStreamcheckPanel()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
+              <i class="fa-solid fa-database"></i>
+              Quality data
+            </button>
             <button id="network-categories-btn" onclick="toggleCategoriesPanel()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
               <i class="fa-solid fa-filter"></i>
               Categories
@@ -259,7 +263,29 @@
           <br class="mb-1">
           These channels are for <span class="text-[#e6e6e6]/80 font-semibold">UFC cards only</span>. Dana White's Contender Series and PFL are found by their own automatic searches instead, because the UFC channels do not carry those shows. Everything else on the ESPN MMA schedule - RIZIN, LFA, UAE Warriors, Road to UFC - still gets a card, but no automatic search: there is no term that would be right across every promotion, and a wrong guess fills the list with channels showing another sport. Open the event in the watch portal and search your channels by hand for those.
         </p>
-        <!-- Which playlist categories any search may look in. Saved on the
+        <!-- Published measurements. streamcheck.pro sweeps a set of IPTV
+           providers and publishes what it finds; matching an account to
+           its provider lets every channel arrive already measured. Stream
+           ids are not unique between providers, so the wrong choice here
+           would describe a different service's channels. -->
+      <div id="streamcheck-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-4">
+        <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Published quality data</h4>
+        <p class="text-[11px] text-[#e6e6e6]/45 mb-3 leading-relaxed">
+          streamcheck.pro publishes resolution, frame rate, codec and bitrate for whole IPTV providers.
+          Naming yours means every channel shows its quality without being opened &mdash; and dead or
+          blackscreen channels are flagged before you ever try one. Quality checks then read from it
+          instead of measuring, and fall back to measuring for anything it does not list.
+        </p>
+        <div class="flex gap-2 mb-2">
+          <select id="streamcheck-provider" onchange="saveStreamcheckProvider()"
+                  class="flex-1 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
+            <option value="">Not using published data</option>
+          </select>
+        </div>
+        <p id="streamcheck-status" class="text-[11px] text-[#e6e6e6]/45 leading-relaxed"></p>
+      </div>
+
+      <!-- Which playlist categories any search may look in. Saved on the
            account, so it is chosen once and then applies everywhere -
            the suggestions and channel search here, and the search in the
            watch portal, which goes through the same endpoint. -->
@@ -2429,6 +2455,77 @@
     // Only ids travel - never a URL, which for M3U carries the provider
     // username and password in its path. A bare "429939" is not a
     // credential.
+    function toggleStreamcheckPanel() {
+      const panel = document.getElementById('streamcheck-panel');
+      if (!panel) return;
+      const opening = panel.classList.contains('hidden');
+      panel.classList.toggle('hidden', !opening);
+      if (opening) loadStreamcheckProviders();
+    }
+
+    async function loadStreamcheckProviders() {
+      const note = document.getElementById('streamcheck-status');
+      note.textContent = 'Loading providers...';
+      try {
+        const res = await fetch('/api/streamcheck/providers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          note.textContent = (data && data.error) || `Could not reach streamcheck.pro (the server answered ${res.status}).`;
+          return;
+        }
+
+        const select = document.getElementById('streamcheck-provider');
+        select.innerHTML = '<option value="">Not using published data</option>' +
+          (data.providers || []).map(p =>
+            `<option value="${escapeHtml(p)}" ${p === data.selected ? 'selected' : ''}>${escapeHtml(p)}</option>`).join('');
+
+        const held = (data.cached || []).find(c => c.provider === data.selected);
+        note.textContent = !data.selected
+          ? 'Pick the provider your playlist comes from. Its stream ids are what the lookup matches on.'
+          : held
+            ? `Holding ${held.channels.toLocaleString()} channels for ${held.provider}, from the sweep dated ${held.runDate}.`
+            : `${data.selected} selected. Its data loads on the next dashboard refresh.`;
+      } catch (err) {
+        note.textContent = `Could not reach the server: ${err.message}`;
+      }
+    }
+
+    async function saveStreamcheckProvider() {
+      const select = document.getElementById('streamcheck-provider');
+      const note = document.getElementById('streamcheck-status');
+      const streamcheckProvider = select.value;
+      note.textContent = streamcheckProvider
+        ? `Fetching ${streamcheckProvider}'s published data - this takes a few seconds the first time...`
+        : 'Turning published data off...';
+      try {
+        const res = await fetch('/api/user/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, streamcheckProvider })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          note.textContent = (data && data.error) || 'Could not save the provider.';
+          return;
+        }
+        activeUser.streamcheckProvider = streamcheckProvider;
+        showStatus(streamcheckProvider
+          ? `Using published quality data for ${streamcheckProvider}.`
+          : 'Published quality data turned off.');
+        // The suggestions on screen were built without it - and this is
+        // the request that loads the provider table, so the panel can
+        // report what arrived once it returns.
+        await loadNetworkLinks();
+        await loadStreamcheckProviders();
+      } catch (err) {
+        note.textContent = `Network error while saving: ${err.message}`;
+      }
+    }
+
     // Every category the provider offers, and the subset this account
     // searches. Held here while the panel is open; nothing is persisted
     // until Save is pressed, so a mis-click is undone by closing it.

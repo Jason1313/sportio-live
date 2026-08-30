@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const m3u = require('./m3u.js');
 const networks = require('./networks.js');
 const probe = require('./probe.js');
+const streamcheck = require('./streamcheck.js');
 
 // Xtream credentials are encrypted at rest in users.json using this key.
 // Must be a 64-character hex string (32 bytes) for AES-256-GCM. Generate one
@@ -2877,13 +2878,130 @@ app.post('/api/networks/categories', async (req, res) => {
   });
 });
 
+// Turns a published streamcheck record into the same shape a probe
+// produces, so everything downstream - the badge, the rating, the
+// persisted label, the Stremio title - cannot tell where a reading came
+// from and needs no branch for it.
+//
+// A dead or blackscreen channel has no bitrate to rate, but "it does not
+// work" is the most useful thing anyone can be told about a channel, so
+// it is reported in the same place a quality would have been.
+function qualityFromStreamcheck(record) {
+  if (!record) return null;
+
+  const bpp = probe.bitsPerPixel({
+    bitrate: record.bitrate, width: record.width, height: record.height, fps: record.fps,
+  });
+  const scored = bpp ? probe.scoreQuality({ height: record.height, fps: record.fps, bpp }) : null;
+
+  // A channel that does not work is reported as not working, whatever
+  // numbers came back with it. A blackscreen feed still carries a
+  // resolution and a trickle of bitrate, so it rates as merely poor when
+  // rated on those - "Blackscreen" is the fact worth having, and the
+  // format is kept beside it because it is still true.
+  if (record.status && record.status !== 'Alive') {
+    const format = record.height ? ` · ${record.height}p${record.fps || ''}` : '';
+    return {
+      ok: true,
+      source: 'streamcheck',
+      status: record.status,
+      height: record.height,
+      fps: record.fps,
+      codec: record.codec,
+      bitrate: record.bitrate,
+      bpp,
+      runDate: record.runDate,
+      score: 0,
+      tier: 'bad',
+      label: `${record.status}${format}`,
+    };
+  }
+
+  if (scored) {
+    return {
+      ok: true,
+      source: 'streamcheck',
+      status: record.status,
+      width: record.width,
+      height: record.height,
+      fps: record.fps,
+      codec: record.codec,
+      bitrate: record.bitrate,
+      bpp,
+      audioCodec: record.audioCodec,
+      audioBitrate: record.audioBitrate,
+      runDate: record.runDate,
+      score: scored.score,
+      tier: scored.tier,
+      tooSlow: scored.tooSlow,
+      label: probe.formatQualityLabel({
+        height: record.height, fps: record.fps, bpp, tier: scored.tier,
+      }),
+    };
+  }
+
+  return null;
+}
+
+// Stamps a published reading onto entries that carry a URL. Used on the
+// suggestions, the search results and the saved channels, which is what
+// "enrich the whole playlist" amounts to in practice - every list the
+// user looks at arrives already measured, with nothing probed.
+//
+// Only reads what is already in memory. The one place that pays to load
+// a provider is the suggestions endpoint below, so a search cannot
+// stall for twenty megabytes.
+function enrichWithStreamcheck(user, entries) {
+  const provider = user.streamcheckProvider;
+  if (!provider || !streamcheck.isLoaded(provider)) return entries;
+
+  return entries.map(entry => {
+    if (!entry || !entry.url) return entry;
+    const record = streamcheck.lookupCached(provider, networks.streamIdFromUrl(entry.url));
+    const quality = qualityFromStreamcheck(record);
+    if (!quality) return entry;
+    return {
+      ...entry,
+      probedQuality: quality.label,
+      probedScore: quality.score,
+      probedTier: quality.tier,
+      streamStatus: quality.status || null,
+    };
+  });
+}
+
+// The providers the dashboard can choose between, and what this instance
+// currently holds for each.
+app.post('/api/streamcheck/providers', async (req, res) => {
+  const auth = await authenticateForChannels(req, res);
+  if (!auth) return;
+
+  return res.json({
+    success: true,
+    providers: await streamcheck.listProviders(),
+    selected: auth.user.streamcheckProvider || '',
+    cached: streamcheck.describeCache(),
+  });
+});
+
 app.post('/api/networks/suggest', async (req, res) => {
   const auth = await authenticateForChannels(req, res);
   if (!auth) return;
 
+  // The one place that waits for a provider table to load. It is the
+  // dashboard's own first request, it happens at most once every few
+  // hours, and paying it here is what lets every other endpoint enrich
+  // from memory without stalling.
+  if (auth.user.streamcheckProvider) {
+    await streamcheck.ensureProvider(auth.user.streamcheckProvider);
+  }
+
   const suggestions = networks.suggestAllNetworks(channelsForSearch(auth.user, auth.source.channels), {
     defaults: mergedNetworkDefaults()
   });
+  for (const key of Object.keys(suggestions)) {
+    suggestions[key] = enrichWithStreamcheck(auth.user, suggestions[key]);
+  }
   return res.json({ success: true, suggestions, presets: describePresets() });
 });
 
@@ -2913,7 +3031,9 @@ app.post('/api/networks/search', async (req, res) => {
   const { channels, groups, truncated } = networks.searchChannels(
     query, channelsForSearch(auth.user, auth.source.channels), { limit: 50, excludeGroups }
   );
-  return res.json({ success: true, channels, groups, truncated });
+  return res.json({
+    success: true, channels: enrichWithStreamcheck(auth.user, channels), groups, truncated,
+  });
 });
 
 // The user's saved channels, resolved against the current playlist so a
@@ -2926,7 +3046,11 @@ app.post('/api/networks/saved', async (req, res) => {
   const { resolved, problems } = networks.resolveSavedChannels(
     auth.user.savedChannels, auth.source
   );
-  return res.json({ success: true, channels: resolved.map(withQualityTier), problems });
+  return res.json({
+    success: true,
+    channels: enrichWithStreamcheck(auth.user, resolved).map(withQualityTier),
+    problems,
+  });
 });
 
 // Reads and writes the instance-wide preferred tvg-ids.
@@ -3022,6 +3146,23 @@ app.post('/api/networks/probe', async (req, res) => {
   // force re-probes a stream whose cached result was a failure - see
   // probeStream. Still subject to the same server-side throttle, so it
   // cannot be used to bypass the rate limiting.
+  // A published measurement answers the same question without opening a
+  // connection, so it is preferred when there is one. It REPLACES rather
+  // than joining the running average: it is not another sample of this
+  // stream, it is somebody else's finished measurement of it, and
+  // averaging the two would mix two different kinds of claim.
+  if (auth.user.streamcheckProvider) {
+    const record = await streamcheck.lookup(
+      auth.user.streamcheckProvider, networks.streamIdFromUrl(url));
+    const quality = qualityFromStreamcheck(record);
+    if (quality) {
+      probe.resetProbeStats(url);
+      console.log(`[Probe] #${networks.streamIdFromUrl(url)} ${quality.label}` +
+        ` - published by streamcheck (${auth.user.streamcheckProvider}, run ${quality.runDate || 'unknown'})`);
+      return res.json({ success: true, url, cached: false, ...quality });
+    }
+  }
+
   const result = await probe.probeStream(url, {
     force: req.body.force === true,
     // Throws away everything measured of this stream before re-measuring.
@@ -3097,7 +3238,7 @@ app.post('/api/user/register', async (req, res) => {
   if (!ENCRYPTION_KEY_CONFIGURED) {
     return res.status(503).json({ error: 'Encryption key not configured yet. See the homepage for setup instructions.' });
   }
-  const { xtream, m3u, connectionType, selectedSports, password, timeZone, sportOrder, networkLinks, savedChannels, searchCategories } = req.body;
+  const { xtream, m3u, connectionType, selectedSports, password, timeZone, sportOrder, networkLinks, savedChannels, searchCategories, streamcheckProvider } = req.body;
   if (!password || typeof password !== 'string' || password.length === 0) {
     return res.status(400).json({ error: 'A password is required.' });
   }
@@ -3123,6 +3264,10 @@ app.post('/api/user/register', async (req, res) => {
     // Which playlist categories any search may look in. Empty means all
     // of them - see channelsForSearch.
     searchCategories: Array.isArray(searchCategories) ? searchCategories : [],
+    // Which provider on streamcheck.pro this account's stream ids belong
+    // to. Ids are not unique across providers, so without this a lookup
+    // would sometimes describe a different service's channel.
+    streamcheckProvider: typeof streamcheckProvider === 'string' ? streamcheckProvider : '',
     createdAt: new Date().toISOString()
   };
   saveUserConfigs();
@@ -3182,6 +3327,7 @@ app.post('/api/user/login', async (req, res) => {
     timeZone: user.timeZone || 'America/New_York',
     sportOrder: user.sportOrder || [],
     searchCategories: user.searchCategories || [],
+    streamcheckProvider: user.streamcheckProvider || '',
     networkLinks: tierNetworkLinks(user.networkLinks),
     savedChannels: (user.savedChannels || []).map(withQualityTier),
     manifestUrl: `/user/${uuid}/manifest.json` 
@@ -3189,7 +3335,7 @@ app.post('/api/user/login', async (req, res) => {
 });
 
 app.post('/api/user/update', async (req, res) => {
-  const { uuid, password, xtream, m3u, selectedSports, timeZone, sportOrder, networkLinks, savedChannels, searchCategories } = req.body;
+  const { uuid, password, xtream, m3u, selectedSports, timeZone, sportOrder, networkLinks, savedChannels, searchCategories, streamcheckProvider } = req.body;
   const ip = req.ip;
 
   if (isRateLimited(ip)) {
@@ -3207,6 +3353,9 @@ app.post('/api/user/update', async (req, res) => {
   if (xtream !== undefined) user.xtream = xtream;
   if (m3u !== undefined) user.m3u = m3u;
   if (selectedSports !== undefined) user.selectedSports = selectedSports;
+  if (streamcheckProvider !== undefined) {
+    user.streamcheckProvider = typeof streamcheckProvider === 'string' ? streamcheckProvider : '';
+  }
   if (searchCategories !== undefined) {
     user.searchCategories = Array.isArray(searchCategories)
       ? searchCategories.filter(c => typeof c === 'string' && c)
