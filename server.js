@@ -8,7 +8,7 @@ const path = require('path');
 const crypto = require('crypto');
 const m3u = require('./m3u.js');
 const networks = require('./networks.js');
-const probe = require('./probe.js');
+const quality = require('./quality.js');
 const streamcheck = require('./streamcheck.js');
 
 // Xtream credentials are encrypted at rest in users.json using this key.
@@ -2889,10 +2889,10 @@ app.post('/api/networks/categories', async (req, res) => {
 function qualityFromStreamcheck(record) {
   if (!record) return null;
 
-  const bpp = probe.bitsPerPixel({
+  const bpp = quality.bitsPerPixel({
     bitrate: record.bitrate, width: record.width, height: record.height, fps: record.fps,
   });
-  const scored = bpp ? probe.scoreQuality({ height: record.height, fps: record.fps, bpp }) : null;
+  const scored = bpp ? quality.scoreQuality({ height: record.height, fps: record.fps, bpp }) : null;
 
   // A channel that does not work is reported as not working, whatever
   // numbers came back with it. A blackscreen feed still carries a
@@ -2934,7 +2934,7 @@ function qualityFromStreamcheck(record) {
       score: scored.score,
       tier: scored.tier,
       tooSlow: scored.tooSlow,
-      label: probe.formatQualityLabel({
+      label: quality.formatQualityLabel({
         height: record.height, fps: record.fps, bpp, tier: scored.tier,
       }),
     };
@@ -2951,6 +2951,23 @@ function qualityFromStreamcheck(record) {
 // Only reads what is already in memory. The one place that pays to load
 // a provider is the suggestions endpoint below, so a search cannot
 // stall for twenty megabytes.
+// What a badge shows on hover: the verdict, the format it is a verdict
+// about, the number it was read off, and the bitrate behind that number.
+// Written here rather than in each page so the two cannot describe the
+// same reading differently.
+function describeQuality(quality) {
+  if (!quality) return '';
+  if (quality.status && quality.status !== 'Alive') {
+    return `${quality.status} - as of the ${quality.runDate || 'last'} sweep`;
+  }
+  const parts = [];
+  if (quality.tier) parts.push(quality.tier.charAt(0).toUpperCase() + quality.tier.slice(1));
+  if (quality.height) parts.push(`${quality.height}p${quality.fps || ''}`);
+  if (quality.bpp) parts.push(`${Number(quality.bpp).toFixed(3)} bpp`);
+  if (quality.bitrate) parts.push(`${(quality.bitrate / 1e6).toFixed(2)} Mbps video`);
+  return parts.join(' · ');
+}
+
 function enrichWithStreamcheck(user, entries) {
   const provider = user.streamcheckProvider;
   if (!provider || !streamcheck.isLoaded(provider)) return entries;
@@ -2965,6 +2982,7 @@ function enrichWithStreamcheck(user, entries) {
       probedQuality: quality.label,
       probedScore: quality.score,
       probedTier: quality.tier,
+      probedDetail: describeQuality(quality),
       streamStatus: quality.status || null,
     };
   });
@@ -2988,7 +3006,7 @@ function publishedQualityFor(user, urls) {
     if (!url || out[url]) continue;
     const quality = qualityFromStreamcheck(
       streamcheck.lookupCached(provider, networks.streamIdFromUrl(url)));
-    if (quality) out[url] = quality;
+    if (quality) out[url] = { ...quality, detail: describeQuality(quality) };
   }
   return out;
 }
@@ -3160,88 +3178,6 @@ app.post('/api/networks/defaults', async (req, res) => {
   return res.json({ success: true, presets: describePresets() });
 });
 
-// Probes ONE stream for its resolution and frame rate. One URL per
-// request, not a batch: a batch of eight at ~3s apart would hold an HTTP
-// request open for the better part of a minute, which reverse proxies cut
-// off by default, and it would give the page nothing to show until every
-// probe finished. Per-URL lets results fill in as they arrive.
-//
-// The URL must be one the user's own playlist actually contains. This is
-// the security boundary, not a convenience check: without it the endpoint
-// would fetch any URL a client named, turning the server into a proxy for
-// scanning whatever it can reach on its own network.
-app.post('/api/networks/probe', async (req, res) => {
-  const auth = await authenticateForChannels(req, res);
-  if (!auth) return;
-
-  const { url } = req.body;
-  if (!url || typeof url !== 'string') {
-    return res.status(400).json({ error: 'A stream URL is required.' });
-  }
-
-  const channel = auth.source.channels.find(c => c.streamUrl === url);
-  if (!channel) {
-    return res.status(400).json({ error: 'That stream is not in your playlist.' });
-  }
-
-  // force re-probes a stream whose cached result was a failure - see
-  // probeStream. Still subject to the same server-side throttle, so it
-  // cannot be used to bypass the rate limiting.
-  // A published measurement answers the same question without opening a
-  // connection, so it is preferred when there is one. It REPLACES rather
-  // than joining the running average: it is not another sample of this
-  // stream, it is somebody else's finished measurement of it, and
-  // averaging the two would mix two different kinds of claim.
-  if (auth.user.streamcheckProvider) {
-    const record = await streamcheck.lookup(
-      auth.user.streamcheckProvider, networks.streamIdFromUrl(url));
-    const quality = qualityFromStreamcheck(record);
-    if (quality) {
-      probe.resetProbeStats(url);
-      console.log(`[Probe] #${networks.streamIdFromUrl(url)} ${quality.label}` +
-        ` - published by streamcheck (${auth.user.streamcheckProvider}, run ${quality.runDate || 'unknown'})`);
-      return res.json({ success: true, url, cached: false, ...quality });
-    }
-  }
-
-  const result = await probe.probeStream(url, {
-    force: req.body.force === true,
-    // Throws away everything measured of this stream before re-measuring.
-    // Averaging is right until the provider re-encodes a channel, at
-    // which point the old samples are describing a stream that no longer
-    // exists.
-    reset: req.body.reset === true,
-  });
-
-  // Logged because there is otherwise no way to tell a real measurement
-  // from a cache hit, or a full sample from a truncated one - "it went as
-  // fast as before" is a reasonable thing to wonder and was impossible to
-  // answer. Only the stream id, never the URL, which carries the
-  // provider password.
-  const streamId = networks.streamIdFromUrl(url);
-  if (result.cached) {
-    console.log(`[Probe] #${streamId} served from cache (${result.label || result.error})`);
-  } else if (result.ok) {
-    // Says both numbers when they differ: what this check measured, and
-    // the average it has been folded into. Without that, a run that read
-    // low looks like the channel having changed.
-    const thisRun = result.lastBitrate ? `${(result.lastBitrate / 1e6).toFixed(1)}Mbps this check` : '';
-    const across = result.samples > 1
-      ? `avg of ${result.samples} checks over ${result.totalSampleSeconds}s`
-      : `sampled ${result.sampleSeconds != null ? result.sampleSeconds : '?'}s of media`;
-    console.log(
-      `[Probe] #${streamId} ${result.label}` +
-      ` - ${across}` +
-      (result.samples > 1 && thisRun ? `, ${thisRun}` : '') +
-      (result.bitrateVariation ? `, swinging ${result.bitrateVariation}x` : '') +
-      (result.bitrateConfident === false ? ' (SHORT SAMPLE)' : ''));
-  } else {
-    console.log(`[Probe] #${streamId} failed: ${result.error}`);
-  }
-
-  return res.json({ success: true, url, ...result });
-});
-
 // Resolves the user's SAVED links against the current playlist, so the
 // dashboard can show which ones still point at a live channel, which
 // silently moved and got healed, and which are gone. This is the only
@@ -3324,7 +3260,7 @@ app.post('/api/user/register', async (req, res) => {
 // moment ago, and no saved account had to gain a field for it.
 function withQualityTier(entry) {
   if (!entry || !entry.probedQuality) return entry;
-  const scored = probe.scoreQualityLabel(entry.probedQuality);
+  const scored = quality.scoreQualityLabel(entry.probedQuality);
   return scored ? { ...entry, probedScore: scored.score, probedTier: scored.tier } : entry;
 }
 
@@ -3712,18 +3648,34 @@ const NETWORKS_CATALOG_ID = 'networks';
 // all there is - without it, quality labels would silently vanish from
 // Stremio until the user happened to re-check every channel.
 //
-// Never probes. This runs on every stream request, and opening a
-// connection to the provider just to decorate a title would compete with
-// the playback the user is about to start.
-function qualityLabelForLink(link) {
-  return probe.getCachedProbeLabel(link.url) || link.probedQuality || '';
+// Never opens a connection. This runs on every stream request and only
+// ever reads what is already in memory.
+function qualityLabelForLink(user, link) {
+  // The published reading first, then whatever was last stored on the
+  // link. The stored one is written from the same source, so this is
+  // really "the freshest copy" rather than two competing opinions - it
+  // matters after a restart, when the provider table has not been
+  // pulled yet and the stored label is all there is.
+  const published = publishedLabelFor(user, link.url);
+  return published || link.probedQuality || '';
+}
+
+// One channel's published label, from whatever is already in memory.
+// Never loads a provider table: this runs on every stream request, and
+// a catalog click is not the place to wait twenty megabytes.
+function publishedLabelFor(user, url) {
+  if (!user || !user.streamcheckProvider || !url) return '';
+  const record = streamcheck.lookupCached(
+    user.streamcheckProvider, networks.streamIdFromUrl(url));
+  const reading = qualityFromStreamcheck(record);
+  return reading ? reading.label : '';
 }
 
 // "📡 FOX · 1080p60  📁 TV Guide (USA)". The channel's own name stays in
 // the stream's `name`, which is where the market ("[Birmingham]") shows.
-function buildLinkTitle(networkKey, link) {
-  const quality = qualityLabelForLink(link);
-  const networkPart = `📡 ${networks.getNetworkLabel(networkKey)}${quality ? ` · ${quality}` : ''}`;
+function buildLinkTitle(user, networkKey, link) {
+  const label = qualityLabelForLink(user, link);
+  const networkPart = `📡 ${networks.getNetworkLabel(networkKey)}${label ? ` · ${label}` : ''}`;
   return link.group ? `${networkPart}  📁 ${link.group}` : networkPart;
 }
 
@@ -3737,9 +3689,9 @@ function buildLinkTitle(networkKey, link) {
 // stored reading to fall back on, because it was never saved anywhere to
 // store one against. It fills in once the channel is checked in the watch
 // portal.
-function buildAutoSearchTitle(channel) {
-  const quality = probe.getCachedProbeLabel(channel.url) || '';
-  const searchPart = `🔎 Auto${quality ? ` · ${quality}` : ''}`;
+function buildAutoSearchTitle(user, channel) {
+  const label = publishedLabelFor(user, channel.url);
+  const searchPart = `🔎 Auto${label ? ` · ${label}` : ''}`;
   return channel.group ? `${searchPart}  📁 ${channel.group}` : searchPart;
 }
 
@@ -4131,7 +4083,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
 
     const netStreams = resolved.map(link => ({
       name: link.name,
-      title: buildLinkTitle(networkKey, link),
+      title: buildLinkTitle(user, networkKey, link),
       url: link.url
     }));
 
@@ -4226,7 +4178,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     // game. Same list, same order, everywhere.
     linkStreams = resolved.map(link => ({
       name: link.name,
-      title: buildLinkTitle(networkKey, link),
+      title: buildLinkTitle(user, networkKey, link),
       url: link.url
     }));
   }
@@ -4246,7 +4198,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     const autoChannels = await fetchAutoSearchChannels(user, autoSearch, m3uSource);
     autoStreams = autoChannels.map(channel => ({
       name: channel.name,
-      title: buildAutoSearchTitle(channel),
+      title: buildAutoSearchTitle(user, channel),
       url: channel.url
     }));
   }

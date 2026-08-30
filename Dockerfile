@@ -1,11 +1,9 @@
 FROM node:24-alpine
 
-# ffprobe (part of ffmpeg) reads the resolution and frame rate of a live
-# stream. Providers list several different feeds of a channel under one
-# identical name - same name, same group, same tvg-id - so opening the
-# stream is the only way to tell 1080p60 from 720p30. Used only when the
-# user explicitly asks for it from the channel picker, never in bulk.
-RUN apk add --no-cache ffmpeg
+# No ffmpeg. Stream quality used to be measured here with ffprobe, which
+# meant carrying the whole of ffmpeg to read two numbers off a video
+# stream. It now comes from published sweeps instead - see streamcheck.js
+# - so the image no longer needs it.
 
 WORKDIR /usr/src/app
 

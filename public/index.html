@@ -229,13 +229,6 @@
         <div class="flex items-center justify-between gap-3 mb-2 mt-8 flex-wrap">
           <h3 class="font-bold text-sm text-[#e6e6e6]/75">Network Links</h3>
           <div class="flex items-center gap-4">
-            <button id="network-check-all-btn" onclick="checkQualityForAllNetworks()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
-              <i class="fa-solid fa-gauge-high"></i>
-              Check All Quality
-            </button>
-            <button id="network-check-all-10-btn" onclick="checkQualityForAllNetworks({ passes: 10 })"
-                    title="Check every channel 10 times, round-robin, and average all the readings together"
-                    class="text-xs font-bold text-[#e6e6e6]/45 hover:text-[#5aa8d1] transition">&times;10</button>
             <button id="streamcheck-btn" onclick="toggleStreamcheckPanel()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
               <i class="fa-solid fa-database"></i>
               Quality data
@@ -1662,7 +1655,7 @@
         score: quality.score,
         source: 'streamcheck',
         persisted: true,
-        detail: probeDetailText({ ...quality, ok: true }),
+        detail: quality.detail || '',
       };
     }
 
@@ -1672,7 +1665,7 @@
         if (entry && entry.url && entry.probedQuality) {
           absorbPublishedQuality(entry.url, {
             label: entry.probedQuality, tier: entry.probedTier, score: entry.probedScore,
-            status: entry.streamStatus,
+            detail: entry.probedDetail, status: entry.streamStatus,
           });
         }
       }
@@ -1893,36 +1886,10 @@
            </button>`
         : `<span class="text-[11px] text-[#e6e6e6]/35 italic">No automatic matches - use search below</span>`;
 
-      // Same labelling rules as the search button: report only outstanding
-      // work, so it never implies it will re-check what is already known.
-      const pending = links.filter(l => !probeResults[l.url]).length;
-      const failedCount = links.filter(l => probeResults[l.url] && probeResults[l.url].error).length;
-      const outstanding = pending + failedCount;
-      // Never a dead end. Once everything has a reading the button offers
-      // to take them again rather than going disabled - a saved
-      // resolution can be months old, and there was previously no way to
-      // ask for a fresh one.
-      const allChecked = outstanding === 0;
-      const label = allChecked
-        ? `Re-check all (${links.length})`
-        : (pending === 0 ? `Retry ${failedCount} failed` : `Check quality (${outstanding})`);
-      const call = allChecked
-        ? `probeSavedLinks('${key}', { force: true })`
-        : `probeSavedLinks('${key}')`;
-      const savedProbeBtn = links.length === 0 ? '' : `
-        <button id="network-saved-probe-btn-${key}" onclick="${call}" ${probeInProgress ? 'disabled' : ''}
-                class="text-[11px] font-bold transition ${probeInProgress ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd]'}">
-          <i class="fa-solid fa-gauge-high mr-1"></i>${label}
-        </button>
-        <button onclick="probeSavedLinks('${key}', { force: true, passes: DEEP_CHECK_PASSES })" ${probeInProgress ? 'disabled' : ''}
-                title="Check these ${links.length} channels 10 times each and average the readings"
-                class="text-[11px] font-bold transition ${probeInProgress ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#e6e6e6]/45 hover:text-[#5aa8d1]'}">&times;10</button>`;
-
       return `
         <div class="flex items-center justify-between gap-3 px-1 pt-1">
           ${suggestBtn}
           <span class="flex items-center gap-3 shrink-0">
-            ${savedProbeBtn}
             ${links.length > 0 ? `<button onclick="clearNetworkLinks('${key}')" class="text-[11px] font-bold text-[#e56a6a]/70 hover:text-[#e56a6a] transition">Clear all</button>` : ''}
           </span>
         </div>`;
@@ -1976,7 +1943,6 @@
                      class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
               <div id="network-groups-${key}">${buildSearchGroupChipsHtml(key)}</div>
               <div id="network-results-${key}" class="mt-1 max-h-48 overflow-y-auto">${resultRows}</div>
-              <div id="network-probe-row-${key}" class="mt-1">${buildSearchProbeButtonHtml(key)}</div>
             </div>
             <div class="flex gap-2 pt-1">
               <input type="text" id="network-paste-${key}"
@@ -2104,54 +2070,16 @@
     }
 
     // --- Stream quality probing ---
-    //
-    // Deliberately explicit and capped. Each probe opens a real connection
-    // to the provider's streaming endpoint, and providers cap concurrent
-    // connections - often at one or two - so an automatic or bulk probe
-    // could interrupt whatever you're currently watching, or trip a ban
-    // heuristic. Hence: never on typing, never on more than PROBE_MAX_RESULTS
-    // channels, and always one at a time with a gap between.
-    const PROBE_MAX_RESULTS = 20;
-    const PROBE_DELAY_MS = 5000;
-
-    // A repeat check runs down the whole list and then starts again, rather
-    // than taking one channel ten times over.
-    //
-    // Ten consecutive samples of one stream cover three unbroken minutes of
-    // the same broadcast - that is one long look, not ten independent ones,
-    // and it would settle on whatever those particular minutes contained.
-    // Going round the list puts the length of the list between a channel and
-    // its next sample, so each pass catches different play. Which is the
-    // whole point of averaging: the samples have to be of different moments.
-    const DEEP_CHECK_PASSES = 10;
-
-    function passOrder(targets, passes) {
-      const runs = [];
-      for (let pass = 0; pass < passes; pass++) {
-        for (const target of targets) runs.push({ target, pass });
-      }
-      return runs;
-    }
-
 
     // url -> { label, error }. Memory only, so it dies with the page. A
     // provider can re-encode a channel at any time and a stale badge that
     // outlived the session would look authoritative while being wrong.
     let probeResults = {};
-    let probeInProgress = false;
 
     // key -> Set of URLs ticked for checking. Lets a specific few channels
     // be probed out of a large result set, which matters because each
     // probe competes with your own playback for a provider connection
     // slot - checking 3 of 18 is 3 connections, not 18.
-    let probeSelection = {};
-
-    function toggleProbeSelection(key, url) {
-      if (!probeSelection[key]) probeSelection[key] = new Set();
-      const set = probeSelection[key];
-      if (set.has(url)) set.delete(url); else set.add(url);
-      renderNetworkSearchResults(key);
-    }
 
     // A badge is wrapped in a element tagged with the URL it describes, so
     // a probe result can be pushed to every place that URL is shown
@@ -2208,47 +2136,6 @@
       return QUALITY_TIER_CLASSES[tier] || DEFAULT_QUALITY_CLASSES;
     }
 
-    function probeDetailText(data) {
-      if (!data || !data.ok) return '';
-      const bits = [];
-      if (data.width && data.height) bits.push(`${data.width}x${data.height}`);
-      if (data.anamorphic && data.sampleAspectRatio) {
-        bits.push(`anamorphic ${data.sampleAspectRatio} - fewer real pixels than the height suggests`);
-      }
-      if (data.interlaced) bits.push('interlaced');
-      const codecPart = [data.codec, data.profile].filter(Boolean).join(' ');
-      if (codecPart) bits.push(codecPart);
-      if (data.pixFmt) bits.push(data.pixFmt);
-      if (data.hdr) bits.push('HDR');
-      if (data.audioChannels) {
-        bits.push(`audio ${data.audioLayout || data.audioChannels + 'ch'}${data.audioCodec ? ' ' + data.audioCodec : ''}`);
-      }
-      if (data.bitrate) {
-        const over = data.sampleSeconds ? ` over ${data.sampleSeconds}s` : '';
-        bits.push(`${(data.bitrate / 1e6).toFixed(2)} Mbps measured${over}`);
-      }
-      // A stream that swings three to one across the sample has not
-      // been mismeasured - it varies, and two checks of it will
-      // disagree however long they run. Better said than hidden.
-      if (data.bitrateVariation && data.bitrateVariation >= 2) {
-        bits.push(`bitrate swings ${data.bitrateVariation}x second to second`);
-      }
-      // How settled the number is. A single 20 second sample of a
-      // variable-bitrate sports feed is noisy; each further check folds
-      // into the average and tightens it.
-      // The one verdict the bpp on the badge does not explain by
-      // itself: a rich stream can still be Bad for its frame rate.
-      if (data.tooSlow) bits.unshift('rated Bad on frame rate - under 50fps');
-      if (data.samples > 1) {
-        bits.unshift(`average of ${data.samples} checks over ${data.totalSampleSeconds}s`);
-        if (data.lastBitrate) bits.push(`this check read ${(data.lastBitrate / 1e6).toFixed(2)} Mbps`);
-      }
-      if (data.bitrateConfident === false) {
-        bits.push('short sample - re-check for a firmer number');
-      }
-      return bits.join(' · ');
-    }
-
     function probeBadgeInner(key, url, interactive, fallbackLabel) {
       const probed = probeResults[url];
       if (!probed) {
@@ -2259,149 +2146,15 @@
       if (probed.checking) {
         return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#3b8fc4]/25 text-[#5aa8d1]"><i class="fa-solid fa-spinner fa-spin"></i></span>`;
       }
-      // EVERY result is clickable to re-check, not just failures. A
-      // successful reading goes stale too - the provider can re-encode a
-      // channel at any time - and once a badge showed a resolution there
-      // was previously no way to ask again. onclick stops propagation so
-      // re-checking doesn't also add the channel to the network, which is
-      // what the surrounding button does.
-      // Shift for a reset. Deliberately the modifier rather than a second
-      // control: adding a sample is the ordinary action and resetting is
-      // the rare one, and a list of ten channels does not need ten more
-      // buttons on it. The tooltip says so, since a modifier nobody is
-      // told about is a modifier nobody uses.
-      const retry = `event.stopPropagation(); retryOneProbe('${key}', '${escapeHtml(url)}', event.shiftKey)`;
-
+      // Not clickable. Quality is published rather than measured here,
+      // so there is nothing for a click to trigger and a control that
+      // did nothing would be worse than no control.
       if (probed.error) {
-        return `<span onclick="${retry}"
-                      class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#c0392b]/25 text-[#e56a6a] hover:bg-[#c0392b]/40 cursor-pointer"
-                      title="${escapeHtml(probed.error)} - click to re-check">failed &#8635;</span>`;
+        return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#c0392b]/25 text-[#e56a6a]"
+                      title="${escapeHtml(probed.error)}">unavailable</span>`;
       }
-      return `<span onclick="${retry}"
-                    class="text-[10px] font-bold px-1.5 py-0.5 rounded ${tierClasses(probed.tier)} hover:brightness-125 cursor-pointer"
-                    title="${escapeHtml(probed.detail ? probed.detail + ' | ' : '')}${probed.persisted ? 'Saved from an earlier check' : 'Measured just now'} - click to add another sample to the average, shift-click to start over">${escapeHtml(probed.label)}${sampleCountHtml(probed)}</span>`;
-    }
-
-    // How many checks are behind the reading, on the badge rather than
-    // only in the tooltip. Session state, not part of the label - the
-    // label is persisted onto the account and travels into Stremio's
-    // stream titles, where a count of this session's checks would mean
-    // nothing at all.
-    function sampleCountHtml(probed) {
-      if (!probed || !(probed.samples > 1)) return '';
-      return `<span class="opacity-55 ml-1 font-normal">&times;${probed.samples}</span>`;
-    }
-
-    // A repeat check is a genuinely long errand - ten passes over twenty
-    // channels is measured in tens of minutes - so it says how long
-    // before starting rather than appearing to hang.
-    function confirmDeepCheck(count, passes) {
-      const estimate = formatDuration(count * passes * PROBE_SECONDS_EACH);
-      return confirm(
-        `Check ${count} channel${count === 1 ? '' : 's'} ${passes} times each, ` +
-        `averaging every reading together.
-
-` +
-        `That is ${count * passes} checks and takes around ${estimate}, depending on how ` +
-        `quickly your provider serves.
-
-` +
-        `The list is worked through in order and then started again, so each pass samples ` +
-        `a different moment of each stream rather than one long stretch of the same one.
-
-` +
-        `Start now?`);
-    }
-
-    async function probeSearchResults(key, options = {}) {
-      if (probeInProgress) {
-        showStatus('A quality check is already running.', true);
-        return;
-      }
-      const all = networkSearchResults[key] || [];
-      if (all.length === 0) return;
-
-      // Ticked channels only, when any are ticked. That's the point of the
-      // checkboxes: a broad search can be left broad, and only the two or
-      // three candidates worth comparing get probed. With nothing ticked
-      // it falls back to the whole result set, which is where the cap
-      // matters.
-      const selected = probeSelection[key] || new Set();
-      const results = selected.size > 0 ? all.filter(c => selected.has(c.url)) : all;
-
-      if (results.length > PROBE_MAX_RESULTS) {
-        showStatus(`${results.length} channels matched - tick the ones you want, or narrow your search to ${PROBE_MAX_RESULTS} or fewer.`, true);
-        return;
-      }
-
-      // What gets probed depends on how explicit the request was.
-      //
-      // An EXPLICIT target - channels the user ticked, or a click when
-      // everything is already checked - re-checks everything in it,
-      // forcing past cached results. That is the only reading of "check
-      // these" that makes sense, and without it a channel could never be
-      // measured a second time.
-      //
-      // Otherwise the default is the cheap one: skip anything that already
-      // returned a resolution, and re-probe only failures. That keeps a
-      // routine click from opening connections it doesn't need.
-      const explicit = selected.size > 0 || !!options.force;
-      const toProbe = explicit ? results : results.filter(c => {
-        const prior = probeResults[c.url];
-        return !prior || prior.error;
-      });
-
-      if (toProbe.length === 0) {
-        showStatus('All of these have already been checked - tick them, or use Re-check all.');
-        return;
-      }
-
-      const passes = Math.max(1, options.passes || 1);
-      if (passes > 1 && !confirmDeepCheck(toProbe.length, passes)) return;
-
-      probeInProgress = true;
-      const button = document.getElementById(`network-probe-btn-${key}`);
-      const runs = passOrder(toProbe, passes);
-
-      try {
-        for (let i = 0; i < runs.length; i++) {
-          const channel = runs[i].target;
-          const isRetry = !!probeResults[channel.url];
-          if (button) {
-            button.disabled = true;
-            button.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-1.5"></i>${
-              passes > 1 ? `Pass ${runs[i].pass + 1}/${passes} &middot; ` : ''}Checking ${
-              (i % toProbe.length) + 1} of ${toProbe.length}...`;
-          }
-
-          const wasCached = await probeOneChannel(channel.url, isRetry);
-          renderNetworkSearchResults(key);
-
-          // A cached answer contacted nothing, so there's nothing to be
-          // polite about - only pause between probes that actually hit
-          // the provider.
-          if (!wasCached && i < runs.length - 1) {
-            await new Promise(r => setTimeout(r, PROBE_DELAY_MS));
-          }
-        }
-        const failures = toProbe.filter(c => probeResults[c.url] && probeResults[c.url].error).length;
-        showStatus(failures > 0
-          ? `Checked ${toProbe.length}. ${failures} failed - click a red badge to retry just that one.`
-          : `Checked ${toProbe.length} channel${toProbe.length === 1 ? '' : 's'}.`);
-      } finally {
-        probeInProgress = false;
-        renderNetworkSearchResults(key);
-      }
-    }
-
-    // Formats a duration as "3m 30s" / "45s". Used for the time estimate
-    // before a long run of probes, because "147 seconds" is not something
-    // anyone converts in their head while deciding whether to wait.
-    function formatDuration(totalSeconds) {
-      const secs = Math.max(0, Math.round(totalSeconds));
-      const mins = Math.floor(secs / 60);
-      const rem = secs % 60;
-      return mins > 0 ? `${mins}m ${rem}s` : `${rem}s`;
+      return `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded ${tierClasses(probed.tier)}"
+                    title="${escapeHtml(probed.detail || '')}">${escapeHtml(probed.label)}</span>`;
     }
 
     // Roughly what one probe costs end to end: the deliberate gap between
@@ -2418,101 +2171,6 @@
     // came in around 12s end to end including the gap between probes.
     // The countdown stops using this as soon as it has timed a channel
     // itself - see checkQualityForAllNetworks.
-    const PROBE_SECONDS_EACH = 12;
-
-    // Checks every channel across every network, in one pass.
-    //
-    // Warns first with a time estimate, because this is minutes rather
-    // than seconds and each probe opens a connection to the provider -
-    // starting it unaware is how you end up wondering why your own
-    // playback just dropped.
-    async function checkQualityForAllNetworks(options = {}) {
-      if (probeInProgress) {
-        showStatus('A quality check is already running.', true);
-        return;
-      }
-
-      const targets = [];
-      for (const network of networkRegistry) {
-        for (const link of readNetworkLinks(network.key)) {
-          const prior = probeResults[link.url];
-          // Skip only what was measured in THIS session. A persisted
-          // result is a label restored from the account, possibly from
-          // weeks ago and - for anything saved before bitrate was
-          // measured at all - carrying no bitrate to rank on. Treating
-          // those as done made "Check All Quality" report that everything
-          // had already been checked and do nothing, which is precisely
-          // the case the button exists for.
-          if (prior && !prior.error && !prior.persisted) continue;
-          targets.push({ key: network.key, label: network.label, link });
-        }
-      }
-
-      if (targets.length === 0) {
-        showStatus('Every configured channel has already been checked.');
-        return;
-      }
-
-      const passes = Math.max(1, options.passes || 1);
-      const estimate = formatDuration(targets.length * passes * PROBE_SECONDS_EACH);
-      const ok = confirm(
-        `Check the quality of ${targets.length} channel${targets.length === 1 ? '' : 's'}` +
-        `${passes > 1 ? `, ${passes} times each` : ''} across ` +
-        `${new Set(targets.map(t => t.key)).size} network${new Set(targets.map(t => t.key)).size === 1 ? '' : 's'}.\n\n` +
-        `This takes around ${estimate}, depending on how quickly your provider serves - ` +
-        `each channel is sampled for a fixed span of video, which a fast provider delivers in ` +
-        `a fraction of the time it represents.
-
-` +
-        `Channels are checked one at a time on purpose - ` +
-        `each one opens a connection to your provider, and doing them at once risks ` +
-        `interrupting anything you are currently watching.\n\nStart now?`
-      );
-      if (!ok) return;
-
-      probeInProgress = true;
-      const startedAt = Date.now();
-      const button = document.getElementById('network-check-all-btn');
-      const touched = new Set();
-      const runs = passOrder(targets, passes);
-
-      try {
-        for (let i = 0; i < runs.length; i++) {
-          const target = runs[i].target;
-          touched.add(target.key);
-          // Measured, not assumed, from the second channel onwards. The
-          // constant above is a guess about someone else's server; by
-          // here there is a real number for this one.
-          const secondsEach = i > 0 ? (Date.now() - startedAt) / i / 1000 : PROBE_SECONDS_EACH;
-          const remaining = formatDuration(Math.round((runs.length - i) * secondsEach));
-          if (button) {
-            button.disabled = true;
-            button.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${
-              passes > 1 ? `pass ${runs[i].pass + 1}/${passes} &middot; ` : ''}${
-              (i % targets.length) + 1}/${targets.length} &middot; ~${remaining} left`;
-          }
-
-          const wasCached = await probeOneChannel(target.link.url, !!probeResults[target.link.url]);
-          refreshNetworkLinksRegion(target.key);
-
-          if (!wasCached && i < runs.length - 1) {
-            await new Promise(r => setTimeout(r, PROBE_DELAY_MS));
-          }
-        }
-
-        const failed = targets.filter(t => probeResults[t.link.url] && probeResults[t.link.url].error).length;
-        showStatus(failed > 0
-          ? `Checked ${targets.length}. ${failed} failed - click a red badge to retry one.`
-          : `Checked all ${targets.length} channels.`);
-      } finally {
-        probeInProgress = false;
-        if (button) {
-          button.disabled = false;
-          button.innerHTML = '<i class="fa-solid fa-gauge-high"></i> Check All Quality';
-        }
-        touched.forEach(key => refreshNetworkLinksRegion(key));
-      }
-    }
 
     // Pins the currently configured channels as the instance's default
     // suggestions, identified by stream id.
@@ -2852,148 +2510,6 @@
       }
     }
 
-    // Records a measured quality onto any saved link with this URL, so it
-    // can be shown in Stremio.
-    //
-    // The server's probe cache is memory-only and expires, so without
-    // storing it on the link the quality label would disappear from
-    // Stremio the next time the container restarted. Marking the dashboard
-    // dirty is what tells the user the new reading needs saving to take
-    // effect - a probe is now a change to their data, not just a display.
-    //
-    // Only successes are recorded. A failure says the stream was
-    // unreachable at that moment, which is not a fact worth persisting.
-    function applyProbeToSavedLinks(url) {
-      const result = probeResults[url];
-      if (!result || result.error || !result.label) return;
-
-      let changed = false;
-      for (const links of Object.values((activeUser && activeUser.networkLinks) || {})) {
-        if (!Array.isArray(links)) continue;
-        for (const link of links) {
-          if (link.url === url && link.probedQuality !== result.label) {
-            link.probedQuality = result.label;
-            changed = true;
-          }
-        }
-      }
-      if (changed) markDashboardDirty();
-    }
-
-    // Probes one URL and stores the outcome. Returns whether the answer
-    // came from cache, which is what decides if the caller needs to pause
-    // before the next one.
-    async function probeOneChannel(url, force, reset) {
-      try {
-        const res = await fetch('/api/networks/probe', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, url, force: !!force, reset: !!reset })
-        });
-        const data = await res.json();
-        probeResults[url] = data.ok
-          ? { label: data.label, fps: data.fps, height: data.height, detail: probeDetailText(data),
-              tier: data.tier, score: data.score, samples: data.samples }
-          : { error: data.error || 'probe failed' };
-        refreshProbeBadges(url);
-        applyProbeToSavedLinks(url);
-        return !!data.cached;
-      } catch (err) {
-        probeResults[url] = { error: 'Network error' };
-        refreshProbeBadges(url);
-        return false;
-      }
-    }
-
-    // Checks the quality of the links already SAVED to a network, rather
-    // than of search results. Different starting point, same rules: skip
-    // anything that already returned a resolution, force-retry the
-    // failures, one at a time with a gap between.
-    //
-    // No result cap is needed here the way it is for search - a network
-    // holds at most MAX_LINKS_PER_NETWORK links, which is already below
-    // PROBE_MAX_RESULTS.
-    async function probeSavedLinks(key, options = {}) {
-      if (probeInProgress) {
-        showStatus('A quality check is already running.', true);
-        return;
-      }
-      const links = readNetworkLinks(key);
-      if (links.length === 0) return;
-
-      // force re-checks everything, which is what the button offers once
-      // nothing is outstanding - see buildNetworkActionsHtml.
-      const toProbe = options.force ? links : links.filter(l => {
-        const prior = probeResults[l.url];
-        return !prior || prior.error;
-      });
-      if (toProbe.length === 0) {
-        showStatus('All of these have already been checked.');
-        return;
-      }
-
-      const passes = Math.max(1, options.passes || 1);
-      if (passes > 1 && !confirmDeepCheck(toProbe.length, passes)) return;
-
-      probeInProgress = true;
-      const button = document.getElementById(`network-saved-probe-btn-${key}`);
-      const runs = passOrder(toProbe, passes);
-
-      try {
-        for (let i = 0; i < runs.length; i++) {
-          const link = runs[i].target;
-          const isRetry = !!probeResults[link.url];
-          if (button) {
-            button.disabled = true;
-            button.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-1.5"></i>${
-              passes > 1 ? `Pass ${runs[i].pass + 1}/${passes} &middot; ` : ''}Checking ${
-              (i % toProbe.length) + 1} of ${toProbe.length}...`;
-          }
-
-          // Badges update themselves via refreshProbeBadges, so nothing
-          // needs re-rendering mid-loop - which keeps the search box and
-          // its results untouched while this runs.
-          const wasCached = await probeOneChannel(link.url, isRetry);
-
-          if (!wasCached && i < runs.length - 1) {
-            await new Promise(r => setTimeout(r, PROBE_DELAY_MS));
-          }
-        }
-        const failures = toProbe.filter(l => probeResults[l.url] && probeResults[l.url].error).length;
-        showStatus(failures > 0
-          ? `Checked ${toProbe.length}. ${failures} failed - click a red badge to retry just that one.`
-          : `Checked ${toProbe.length} saved channel${toProbe.length === 1 ? '' : 's'}.`);
-      } finally {
-        probeInProgress = false;
-        refreshNetworkLinksRegion(key);
-      }
-    }
-
-    // Retry a single channel, from clicking its failed badge. Useful when
-    // one stream failed because a connection slot was busy and re-running
-    // the whole batch would be wasteful.
-    // `reset` throws away the running average before re-measuring, for
-    // when a provider has re-encoded a channel and the samples behind the
-    // average are describing a stream that no longer exists.
-    async function retryOneProbe(key, url, reset) {
-      if (probeInProgress) {
-        showStatus('A quality check is already running.', true);
-        return;
-      }
-      probeInProgress = true;
-      probeResults[url] = { checking: true };
-      refreshProbeBadges(url);
-      renderNetworkSearchResults(key);
-      try {
-        await probeOneChannel(url, true, reset);
-      } finally {
-        probeInProgress = false;
-        renderNetworkSearchResults(key);
-        const result = probeResults[url];
-        showStatus(result && result.error ? `Still failing: ${result.error}` : `Now reading ${result.label}.`, !!(result && result.error));
-      }
-    }
-
     // Adds a stream URL typed or pasted in directly, for when the exact
     // feed is already known and finding it in a list of identically-named
     // channels would be the slow way round.
@@ -3113,13 +2629,9 @@
       // two independent targets: the checkbox marks a channel for quality
       // checking, the rest of the row adds it to the network. Nesting a
       // checkbox inside a button would make every tick also add the link.
-      const selected = probeSelection[key] || new Set();
+
       const rows = results.map((c, i) => `
             <div class="flex items-center gap-2 px-2 py-1.5 hover:bg-[#3b4d58] rounded transition">
-              <input type="checkbox" ${selected.has(c.url) ? 'checked' : ''}
-                     onchange="toggleProbeSelection('${key}', '${escapeHtml(c.url)}')"
-                     title="Select for quality check"
-                     class="shrink-0 accent-[#3b8fc4] cursor-pointer">
               <button onclick="addNetworkLink('${key}', ${i})" class="flex-1 min-w-0 text-left flex items-center gap-2">
                 <i class="fa-solid fa-plus text-[10px] text-[#5aa8d1] shrink-0"></i>
                 <span class="flex-1 min-w-0">
@@ -3172,51 +2684,6 @@
       searchNetworkChannels(key);
     }
 
-    // The search-side quality button, rendered OUTSIDE the results list.
-    //
-    // It used to be the last row inside the scrolling box, so on a long
-    // result set it scrolled out of sight - the control for acting on the
-    // list was hidden by the list itself.
-    function buildSearchProbeButtonHtml(key) {
-      const all = networkSearchResults[key] || [];
-      if (all.length === 0) return '';
-
-      const selected = probeSelection[key] || new Set();
-      const target = selected.size > 0 ? all.filter(c => selected.has(c.url)) : all;
-
-      if (target.length > PROBE_MAX_RESULTS) {
-        return `<div class="text-[10px] text-[#e6e6e6]/40 italic px-3 py-1.5 text-center">${target.length} to check - tick the ones you want, or narrow to ${PROBE_MAX_RESULTS} or fewer.</div>`;
-      }
-
-      const pending = target.filter(c => !probeResults[c.url]).length;
-      const failedCount = target.filter(c => probeResults[c.url] && probeResults[c.url].error).length;
-      const outstanding = pending + failedCount;
-
-      // A ticked selection always means "check these", even if they all
-      // already have a reading - that is the whole point of ticking them.
-      let label, call;
-      if (selected.size > 0) {
-        label = `Check ${selected.size} selected`;
-        call = `probeSearchResults('${key}')`;
-      } else if (outstanding === 0) {
-        label = `Re-check all (${target.length})`;
-        call = `probeSearchResults('${key}', { force: true })`;
-      } else {
-        label = pending === 0 ? `Retry ${failedCount} failed` : `Check quality (${outstanding})`;
-        call = `probeSearchResults('${key}')`;
-      }
-
-      return `<div class="flex items-center gap-1">
-                <button id="network-probe-btn-${key}" onclick="${call}" ${probeInProgress ? 'disabled' : ''}
-                        class="flex-1 text-[11px] font-bold py-1.5 rounded transition ${probeInProgress ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#5aa8d1] hover:text-[#6bb5dd] hover:bg-[#3b4d58]'}">
-                  <i class="fa-solid fa-gauge-high mr-1.5"></i>${label}
-                </button>
-                <button onclick="probeSearchResults('${key}', { force: true, passes: DEEP_CHECK_PASSES })" ${probeInProgress ? 'disabled' : ''}
-                        title="Check 10 times each, round-robin, and average the readings"
-                        class="text-[11px] font-bold py-1.5 px-2 rounded transition shrink-0 ${probeInProgress ? 'text-[#e6e6e6]/30 cursor-not-allowed' : 'text-[#e6e6e6]/45 hover:text-[#5aa8d1] hover:bg-[#3b4d58]'}">&times;10</button>
-              </div>`;
-    }
-
     function renderNetworkSearchResults(key) {
       const box = document.getElementById(`network-results-${key}`);
       if (box) {
@@ -3228,8 +2695,6 @@
       // list they sit around.
       const chips = document.getElementById(`network-groups-${key}`);
       if (chips) chips.innerHTML = buildSearchGroupChipsHtml(key);
-      const row = document.getElementById(`network-probe-row-${key}`);
-      if (row) row.innerHTML = buildSearchProbeButtonHtml(key);
     }
 
     // Persists category folder selections. Returns true/false so callers
