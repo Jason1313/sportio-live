@@ -334,12 +334,13 @@
 
 <!-- Main browsing area -->
 <main id="browse" class="hidden max-w-[1600px] mx-auto px-5 py-6">
-  <!-- Saved channels: search the playlist directly for one-off events
-       that have no network of their own. -->
+  <!-- A plain search of the whole playlist, for one-off events that
+       have no network of their own. Results play straight from the
+       list; saving one is an optional shortcut for next time. -->
   <section id="saved-panel" class="hidden mb-8">
     <p class="text-xs text-[#e6e6e6]/55 mb-3 leading-relaxed max-w-3xl">
       Search your playlist for anything - a one-off event, a channel that only exists while it is on.
-      Tick a few and check their quality before you commit, then save them here for next time.
+      Hit a result to play it. Save the ones you will want again; there is no need to save just to watch.
     </p>
     <div class="flex gap-2 max-w-2xl mb-2">
       <input id="saved-search" type="text" oninput="onSavedSearchInput()"
@@ -347,8 +348,9 @@
              class="flex-1 bg-[#1f2b36] border border-white/15 rounded-lg px-3 py-2 text-sm focus:border-[#3b8fc4] focus:outline-none">
     </div>
     <div id="saved-groups" class="max-w-2xl"></div>
-    <div id="saved-results" class="max-w-2xl max-h-64 overflow-y-auto mt-1"></div>
+    <div id="saved-results" class="max-w-2xl max-h-[28rem] overflow-y-auto mt-1"></div>
     <h3 class="font-bold text-sm text-[#e6e6e6]/75 mt-6 mb-2">Saved</h3>
+    <p class="text-xs text-[#e6e6e6]/40 mb-2">Channels you kept, so you do not have to search for them again.</p>
     <div id="saved-list" class="max-w-2xl space-y-1.5"></div>
   </section>
 
@@ -972,7 +974,7 @@
     // Home first, then the curated list, then the individual leagues.
     catalogs = [
       { id: HOME_CATALOG_ID, name: 'Home' },
-      { id: SAVED_CATALOG_ID, name: 'My Channels' },
+      { id: SAVED_CATALOG_ID, name: 'Search Channels' },
       ...catalogs
     ];
 
@@ -1552,22 +1554,30 @@
          }).join('')}
        </div>`;
 
+    // Every result plays where it stands. Saving is what you do to a
+    // channel you want back tomorrow, not a step on the way to watching
+    // it tonight - which is what it used to be, since the only playable
+    // rows on this panel were the saved ones.
     const savedUrls = new Set(savedChannels.map(c => c.url));
     resultsBox.innerHTML = savedResults.length === 0 ? '' : savedResults.map(c => `
-      <div class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-white/5 transition">
-        <span class="flex-1 min-w-0">
-          <span class="flex items-center gap-2">
-            <span class="text-xs truncate">${escapeHtml(c.name)}</span>
-            ${probeBadge(c.url)}
+      <div class="stream-row flex items-center gap-2 px-2 py-1.5 rounded hover:bg-white/5 transition">
+        <a href="${escapeHtml(playLink(c.url, c.name))}" onclick="notePlaying()" class="flex-1 min-w-0 flex items-center gap-3">
+          <i class="fa-solid fa-play text-[10px] text-[#5aa8d1] shrink-0"></i>
+          <span class="flex-1 min-w-0">
+            <span class="flex items-center gap-2">
+              <span class="text-xs truncate">${escapeHtml(c.name)}</span>
+              ${probeBadge(c.url)}
+            </span>
+            <span class="block text-[10px] text-[#e6e6e6]/45 truncate">
+              <span class="font-mono text-[#5aa8d1]/70">#${escapeHtml(streamIdFromUrl(c.url))}</span>
+              &middot; ${escapeHtml((c.groups || []).join(' | '))}
+            </span>
           </span>
-          <span class="block text-[10px] text-[#e6e6e6]/45 truncate">
-            <span class="font-mono text-[#5aa8d1]/70">#${escapeHtml(streamIdFromUrl(c.url))}</span>
-            &middot; ${escapeHtml((c.groups || []).join(' | '))}
-          </span>
-        </span>
+        </a>
+        ${copyRowButton(c.url)}
         ${savedUrls.has(c.url)
           ? '<span class="text-[10px] text-[#7fc98a] shrink-0">saved</span>'
-          : `<button onclick="addSavedChannel('${escapeHtml(c.url)}')"
+          : `<button onclick="addSavedChannel('${escapeHtml(c.url)}')" title="Keep this one for next time"
                      class="text-[10px] font-bold text-[#5aa8d1] hover:text-[#6bb5dd] shrink-0">Save</button>`}
       </div>`).join('');
 
@@ -1617,7 +1627,7 @@
     const box = document.getElementById('saved-list');
     if (!box) return;
     if (savedChannels.length === 0) {
-      box.innerHTML = '<p class="text-xs text-[#e6e6e6]/40 italic">Nothing saved yet. Search above to add a channel.</p>';
+      box.innerHTML = '<p class="text-xs text-[#e6e6e6]/40 italic">Nothing saved yet. Search above and hit Save on anything worth keeping.</p>';
       return;
     }
     box.innerHTML = savedChannels.map(c => `
