@@ -1258,6 +1258,47 @@ const RENDER_CACHE_LOW_WATER = 0.8;
 const renderIndex = new Map();
 let renderCacheBytes = 0;
 
+// What the cache is keyed on, besides the URL.
+//
+// A URL says what to draw but nothing about the code that drew it, so
+// when the art changed every entry already on disk became a picture of
+// the old design that kept being served for its full seven days. That is
+// exactly what happened when the football posters were redrawn: the
+// cards nobody had loaded since came out new, and every one already held
+// stayed old - which reads as the change half-working rather than as a
+// stale cache.
+//
+// So the key carries a fingerprint of everything that decides what a
+// render looks like: the drawing code and the template art. Deploy a
+// change to any of it and the whole cache moves to a new generation,
+// with the previous one falling out under the sweep. Computed rather
+// than declared, because a version constant is only correct while
+// somebody remembers to bump it.
+const RENDER_FINGERPRINT = (() => {
+  const hash = crypto.createHash('sha1');
+  const inputs = [__filename, path.join(__dirname, 'posters.js')];
+  for (const dir of ['posters', 'background']) {
+    const full = path.join(__dirname, 'assets', dir);
+    try {
+      for (const name of fs.readdirSync(full).sort()) {
+        if (name.endsWith('.svg')) inputs.push(path.join(full, name));
+      }
+    } catch (err) {
+      // No such directory on this install; nothing to fingerprint.
+    }
+  }
+  for (const file of inputs) {
+    try {
+      hash.update(fs.readFileSync(file));
+    } catch (err) {
+      // Unreadable counts as its own state - the name still goes in, so
+      // a file appearing or disappearing changes the generation.
+      hash.update(file);
+    }
+  }
+  return hash.digest('hex').slice(0, 12);
+})();
+
 // The cache lifetime the route asked for travels in the filename, so a
 // restart can rebuild the index from the directory alone - the logo art
 // is good for a day where a game poster is good for an hour, and a
@@ -1349,7 +1390,7 @@ function loadRenderCacheIndex() {
     sweepRenderCache();
     if (renderIndex.size > 0) {
       console.log(`[Render cache] Holding ${renderIndex.size} rendered images,` +
-        ` ${(renderCacheBytes / 1048576).toFixed(0)} MB.`);
+        ` ${(renderCacheBytes / 1048576).toFixed(0)} MB (generation ${RENDER_FINGERPRINT}).`);
     }
   } catch (err) {
     console.error(`[Render cache] Could not read ${RENDER_CACHE_DIR}: ${err.message}`);
@@ -1364,7 +1405,8 @@ loadRenderCacheIndex();
 // are eleven of them, they all answer with an SVG built purely from the
 // URL, and a rule that holds for all of them belongs in one place.
 function cacheRenderedSvg(req, res, next) {
-  const key = crypto.createHash('sha1').update(req.originalUrl).digest('hex');
+  const key = crypto.createHash('sha1')
+    .update(`${RENDER_FINGERPRINT} ${req.originalUrl}`).digest('hex');
   const entry = renderIndex.get(key);
 
   if (entry && (Date.now() - entry.bornAt) <= RENDER_CACHE_TTL_MS) {

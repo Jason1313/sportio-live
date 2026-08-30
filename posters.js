@@ -91,35 +91,13 @@ function splitColors(awayColor, homeColor, homeAltColor) {
 
 // ------------------------------------------------------------------- art
 const W = 600, H = 900;
-const BAR_HALF = 28;            // the rule across the join, either side of centre
-const BAR_TOP = H / 2 - BAR_HALF;
-const BAR_BOTTOM = H / 2 + BAR_HALF;
-const BAR_FILL = '#111a23';
-const CHIP = { size: 332, radius: 30, awayCy: 214, homeCy: 686 };
+const MID = H / 2;
+// A hairline of white across the join. Two halves that came out close to
+// each other still read as two with a line between them, and it costs
+// nothing on the pairs that were never in doubt.
+const SEAM = 4;
+const CHIP = { size: 340, radius: 34, awayCy: 225, homeCy: 675 };
 const LOGO = 264;
-
-// "AT" drawn as geometry rather than set in a typeface.
-//
-// A poster is loaded as an image, so it can never reach a web font, and
-// the system fallback differs on every platform it lands on - which for
-// two letters centred in a rule is a difference worth removing. Monoline
-// strokes, which is what the label wants at this size anyway.
-function atMark(cx, cy, height, color) {
-  const stroke = Math.max(2, height * 0.17);
-  const aWidth = height * 0.8;
-  const tWidth = height * 0.72;
-  const gap = height * 0.5;
-  const left = cx - (aWidth + gap + tWidth) / 2;
-  const tLeft = left + aWidth + gap;
-  const top = cy - height / 2;
-  const bottom = cy + height / 2;
-
-  return `<g stroke="${color}" stroke-width="${stroke}" fill="none" stroke-linecap="square">` +
-    `<path d="M${left} ${bottom}L${left + aWidth / 2} ${top}L${left + aWidth} ${bottom}"/>` +
-    `<path d="M${left + aWidth * 0.21} ${bottom - height * 0.3}H${left + aWidth * 0.79}"/>` +
-    `<path d="M${tLeft} ${top}H${tLeft + tWidth}"/>` +
-    `<path d="M${tLeft + tWidth / 2} ${top}V${bottom}"/></g>`;
-}
 
 const escapeXml = (str) => String(str == null ? '' : str)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -161,8 +139,8 @@ function chip(cy, logoData, name, color) {
     ` rx="${CHIP.radius}" fill="#ffffff" filter="url(#chip-drop)"/>${art}`;
 }
 
-// The poster. Away above the rule, home below, which is the order the
-// matchup is written in everywhere else in the app.
+// The poster. Away on top, home below, which is the order the matchup is
+// written in everywhere else in the app.
 function buildMatchupPoster({
   awayLogoData, homeLogoData, awayName, homeName,
   awayColor, homeColor, homeAltColor,
@@ -179,11 +157,10 @@ function buildMatchupPoster({
         '<stop offset="1" stop-color="#000000" stop-opacity="0.32"/>' +
       '</radialGradient>' +
     '</defs>' +
-    `<rect width="${W}" height="${BAR_TOP}" fill="${away}"/>` +
-    `<rect y="${BAR_BOTTOM}" width="${W}" height="${H - BAR_BOTTOM}" fill="${home}"/>` +
-    `<rect y="${BAR_TOP}" width="${W}" height="${BAR_HALF * 2}" fill="${BAR_FILL}"/>` +
+    `<rect width="${W}" height="${MID}" fill="${away}"/>` +
+    `<rect y="${MID}" width="${W}" height="${MID}" fill="${home}"/>` +
+    `<rect y="${MID - SEAM / 2}" width="${W}" height="${SEAM}" fill="#ffffff" opacity="0.85"/>` +
     `<rect width="${W}" height="${H}" fill="url(#edge-shade)"/>` +
-    atMark(W / 2, H / 2, 22, '#ffffff') +
     chip(CHIP.awayCy, awayLogoData, awayName, away) +
     chip(CHIP.homeCy, homeLogoData, homeName, home) +
     '</svg>';
