@@ -21,15 +21,24 @@
        the date below sits on the same line across the whole grid and every
        card ends at the same height. The full name is on the poster itself
        and in the stream panel, so clipping a third line loses nothing. */
-    .card-title {
+    /* `body` prefix, not a bare class: the element also carries
+       Tailwind's `block`, and the CDN's stylesheet is injected after
+       this one, so at equal specificity `display: block` won and the
+       clamp never took effect. Two-line names happened to fit on a wide
+       screen, which is why it went unnoticed; on a phone the titles ran
+       to four lines and pushed each card's time to a different height. */
+    body .card-title {
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-      overflow: hidden; min-height: 2.2rem;
+      overflow: hidden; min-height: 2.5rem;
     }
 
     /* Set here rather than inline on the element so the mobile query
        below can actually win - an inline style beats any stylesheet
-       rule, however specific. The value is the one that was inline. */
-    #grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+       rule, however specific.
+       Widened from 160px along with the card text: at 14px a matchup
+       name was clipping mid-word on the second line, and fewer, more
+       readable cards per row is the trade being made deliberately. */
+    #grid { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
 
     /* The copy-address button on a stream row. A phone-only control -
        see the mobile block - but declared out here so the default for
@@ -99,10 +108,11 @@
       #gate { margin-top: 2.5rem; padding: 0 1rem; }
       #setup { margin-top: 1.25rem; padding: 0 0.875rem 3rem; }
 
-      /* Three posters across. A 2:3 poster at half of a 390px screen is
-         taller than the viewport is wide, so two-up showed barely one
-         row per screenful. */
-      #grid { grid-template-columns: repeat(auto-fill, minmax(102px, 1fr)); gap: 0.625rem; }
+      /* Two posters across. Three fitted more on screen, but at a third
+         of a phone's width a card is ~110px, and a matchup name clamped
+         to two lines of that is a few words and an ellipsis. Readability
+         won: the names and kickoff times are the point of the card. */
+      #grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.75rem; }
       /* Lift-on-hover is a pointer idiom. On a touch screen it only ever
          fires as a flicker after the tap has already been registered. */
       body .card:hover, body .card:focus { transform: none; box-shadow: none; }
@@ -1030,8 +1040,8 @@
         <img class="poster w-full rounded-lg border border-white/10 bg-[#1f2b36] object-cover" loading="lazy"
              style="aspect-ratio: 2 / 3"
              src="${escapeHtml(m.poster || '')}" alt="">
-        ${m.league ? `<span class="block text-[10px] uppercase tracking-wider text-[#5aa8d1] mt-2">${escapeHtml(m.league)}</span>` : ''}
-        <span class="card-title block text-xs ${m.league ? 'mt-0.5' : 'mt-2'} leading-snug">${escapeHtml(m.name || '')}</span>
+        ${m.league ? `<span class="block text-[11px] uppercase tracking-wider text-[#5aa8d1] mt-2">${escapeHtml(m.league)}</span>` : ''}
+        <span class="card-title block text-sm ${m.league ? 'mt-0.5' : 'mt-2'} leading-snug">${escapeHtml(m.name || '')}</span>
         ${whenBadge(m)}
         ${scoreBadge(m)}
       </button>`).join('');
@@ -1049,7 +1059,7 @@
     if (!when) return '';
     const today = meta.isToday !== false;
     const text = today ? `Today &middot; ${escapeHtml(when)}` : escapeHtml(when);
-    return `<span class="block text-[10px] mt-0.5 ${today ? 'text-[#7fc98a] font-semibold' : 'text-[#e6e6e6]/45'}">${text}</span>`;
+    return `<span class="block text-xs mt-1 ${today ? 'text-[#7fc98a] font-semibold' : 'text-[#e6e6e6]/60'}">${text}</span>`;
   }
 
   // The final score, under the date. Only ever present once a game is
@@ -1064,8 +1074,8 @@
   function scoreBadge(meta) {
     const score = meta && meta.finalScore;
     if (!score) return '';
-    return `<span class="block text-[10px] mt-0.5 text-[#e6e6e6]/70 font-semibold">
-              <span class="text-[#e6e6e6]/35 uppercase tracking-wider font-bold">Final</span>
+    return `<span class="block text-xs mt-1 text-[#e6e6e6]/80 font-semibold">
+              <span class="text-[#e6e6e6]/45 uppercase tracking-wider font-bold">Final</span>
               ${escapeHtml(score)}
             </span>`;
   }
