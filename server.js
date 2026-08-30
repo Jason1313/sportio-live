@@ -10,6 +10,7 @@ const m3u = require('./m3u.js');
 const networks = require('./networks.js');
 const quality = require('./quality.js');
 const streamcheck = require('./streamcheck.js');
+const posters = require('./posters.js');
 
 // Xtream credentials are encrypted at rest in users.json using this key.
 // Must be a 64-character hex string (32 bytes) for AES-256-GCM. Generate one
@@ -1437,6 +1438,12 @@ function getPosterTemplateInline() {
   return getInlineSvgOverlay(filePath, 'poster-template');
 }
 
+// Football only, for now. The new art was designed against NFL and
+// college marks and checked against the pairs those two leagues break
+// on; the other sports keep the template until their own marks have been
+// looked at the same way.
+const DRAWN_POSTER_SPORTS = new Set(['NFL', 'NCAAFB']);
+
 app.get('/poster/:sport/:homeId/:awayId.svg', async (req, res) => {
   const { sport, homeId, awayId } = req.params;
   const gameUtcDate = req.query.date || null;
@@ -1463,6 +1470,21 @@ app.get('/poster/:sport/:homeId/:awayId.svg', async (req, res) => {
     getBase64ImageWithFallback(teamLogoUrls(league, homeAbbr, homeId)),
     getBase64ImageWithFallback(teamLogoUrls(league, awayAbbr, awayId))
   ]);
+
+  if (DRAWN_POSTER_SPORTS.has(sportKey)) {
+    // The raw query values, not the resolved homeColor/awayColor above:
+    // that pair has already collapsed primary and alternate into one
+    // colour, and the art needs them apart - the alternate is what a
+    // clash between the two teams is resolved with.
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    return res.send(posters.buildMatchupPoster({
+      awayLogoData, homeLogoData, awayName, homeName,
+      awayColor: req.query.awayColor || req.query.awayAltColor || theme.primary,
+      homeColor: req.query.homeColor || req.query.homeAltColor || theme.secondary,
+      homeAltColor: req.query.homeAltColor || '',
+    }));
+  }
 
   const template = getPosterTemplateInline();
 
