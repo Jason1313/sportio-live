@@ -1619,6 +1619,15 @@
 
       networkSuggestions = (suggestRes.body && suggestRes.body.suggestions) || {};
       networkStatus = (statusRes.body && statusRes.body.status) || {};
+
+      // Published readings, applied before anything is drawn: the ones
+      // riding on the suggestions, and the ones for channels already
+      // configured, which arrive keyed by URL because they are not part
+      // of any list this response carries.
+      for (const list of Object.values(networkSuggestions)) absorbPublishedEntries(list);
+      const linkQuality = (suggestRes.body && suggestRes.body.linkQuality) || {};
+      for (const [url, quality] of Object.entries(linkQuality)) absorbPublishedQuality(url, quality);
+      applyPublishedToSavedLinks(linkQuality);
       autoFillNetworkSuggestions();
       seedProbeResultsFromSavedLinks();
       renderNetworkLinks();
@@ -1632,6 +1641,62 @@
     //
     // Marked `persisted` so the UI can tell a stored reading from one taken
     // just now; it does NOT mark the dashboard dirty, since nothing changed.
+    // Takes a published reading and puts it where the badges look.
+    //
+    // It does not overwrite something measured by hand in this session:
+    // somebody who just ran a check is watching for its answer, and
+    // replacing it a moment later with a figure from a sweep days old
+    // would look like the check had been ignored. Anything else - a
+    // label restored from the account, or an earlier published reading -
+    // is replaced, because the published one is the newer statement of
+    // the same fact.
+    function absorbPublishedQuality(url, quality) {
+      if (!url || !quality || !quality.label) return;
+      const existing = probeResults[url];
+      const measuredThisSession = existing && !existing.persisted && existing.source !== 'streamcheck';
+      if (measuredThisSession) return;
+
+      probeResults[url] = {
+        label: quality.label,
+        tier: quality.tier,
+        score: quality.score,
+        source: 'streamcheck',
+        persisted: true,
+        detail: probeDetailText({ ...quality, ok: true }),
+      };
+    }
+
+    // Every entry a response carried that already knows its own quality.
+    function absorbPublishedEntries(entries) {
+      for (const entry of entries || []) {
+        if (entry && entry.url && entry.probedQuality) {
+          absorbPublishedQuality(entry.url, {
+            label: entry.probedQuality, tier: entry.probedTier, score: entry.probedScore,
+            status: entry.streamStatus,
+          });
+        }
+      }
+    }
+
+    // Writes the published label onto the saved links themselves, so it
+    // survives a reload and reaches the stream titles Stremio shows -
+    // both of those read the stored quality, not this page's memory.
+    function applyPublishedToSavedLinks(linkQuality) {
+      let changed = false;
+      for (const links of Object.values((activeUser && activeUser.networkLinks) || {})) {
+        if (!Array.isArray(links)) continue;
+        for (const link of links) {
+          const quality = linkQuality[link.url];
+          if (!quality || link.probedQuality === quality.label) continue;
+          link.probedQuality = quality.label;
+          link.probedScore = quality.score;
+          link.probedTier = quality.tier;
+          changed = true;
+        }
+      }
+      if (changed) markDashboardDirty();
+    }
+
     function seedProbeResultsFromSavedLinks() {
       for (const links of Object.values((activeUser && activeUser.networkLinks) || {})) {
         if (!Array.isArray(links)) continue;
@@ -3019,6 +3084,10 @@
         });
         const data = await res.json();
         networkSearchResults[key] = (data && data.channels) || [];
+        // Search hits arrive already measured when a provider is set, so
+        // their badges are filled in before the list is drawn rather
+        // than waiting for someone to check each one.
+        absorbPublishedEntries(networkSearchResults[key]);
         networkSearchGroups[key] = (data && data.groups) || [];
       } catch (err) {
         networkSearchResults[key] = [];

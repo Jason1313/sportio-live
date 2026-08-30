@@ -2970,6 +2970,40 @@ function enrichWithStreamcheck(user, entries) {
   });
 }
 
+// Published quality for channels the account has ALREADY chosen.
+//
+// The enrichment above rides on entries the server is about to return -
+// suggestions, search hits, saved channels. Configured network links are
+// not in any of those: they came back with the account at login, before
+// a provider table was necessarily loaded, and they are what the
+// dashboard actually draws. Without this, picking a provider appeared to
+// do nothing until a channel was checked by hand, because every badge on
+// screen was drawn from a link that nobody had enriched.
+function publishedQualityFor(user, urls) {
+  const provider = user.streamcheckProvider;
+  if (!provider || !streamcheck.isLoaded(provider)) return {};
+
+  const out = {};
+  for (const url of urls) {
+    if (!url || out[url]) continue;
+    const quality = qualityFromStreamcheck(
+      streamcheck.lookupCached(provider, networks.streamIdFromUrl(url)));
+    if (quality) out[url] = quality;
+  }
+  return out;
+}
+
+function configuredUrlsFor(user) {
+  const urls = [];
+  for (const links of Object.values(user.networkLinks || {})) {
+    if (Array.isArray(links)) for (const link of links) if (link && link.url) urls.push(link.url);
+  }
+  for (const channel of user.savedChannels || []) {
+    if (channel && channel.url) urls.push(channel.url);
+  }
+  return urls;
+}
+
 // The providers the dashboard can choose between, and what this instance
 // currently holds for each.
 app.post('/api/streamcheck/providers', async (req, res) => {
@@ -3002,7 +3036,14 @@ app.post('/api/networks/suggest', async (req, res) => {
   for (const key of Object.keys(suggestions)) {
     suggestions[key] = enrichWithStreamcheck(auth.user, suggestions[key]);
   }
-  return res.json({ success: true, suggestions, presets: describePresets() });
+  return res.json({
+    success: true,
+    suggestions,
+    presets: describePresets(),
+    // Everything already configured, measured. Keyed by URL because that
+    // is what the dashboard draws its badges against.
+    linkQuality: publishedQualityFor(auth.user, configuredUrlsFor(auth.user)),
+  });
 });
 
 // Free-text search over the whole playlist, for overriding a suggestion
