@@ -477,19 +477,17 @@ function saveAdminConfig(config) {
 
 let adminConfig = loadAdminConfig();
 
+// The three leagues this app covers. Basketball, hockey, baseball and
+// soccer were all supported once and were removed rather than left
+// dormant: they cost nothing to run, since every catalog, refresh and
+// warm is driven by what an account actually selects, but they were
+// four sports' worth of tables and branches nobody read. Restoring one
+// means restoring its entry in each table in this file - the endpoints
+// here, the logo bucket, the theme, and the display name - which the
+// git history has in one commit.
 const ESPN_ENDPOINTS = {
-  NBA: 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard',
   NFL: 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard',
-  MLB: 'https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard',
-  NHL: 'https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard',
-  WNBA: 'https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard',
-  NCAAMB: 'https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard',
-  NCAAWB: 'https://site.api.espn.com/apis/site/v2/sports/basketball/womens-college-basketball/scoreboard',
   NCAAFB: 'https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard',
-  EPL: 'https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard',
-  MLS: 'https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard',
-  LALIGA: 'https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard',
-  WORLDCUP: 'https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard',
   UFC: 'https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard',
   // Not a browsable catalog of its own - see MMA_LEAGUES. Listed here so
   // getRealLeagueLogoUrl('PFL') can find the league's artwork, which it
@@ -572,7 +570,7 @@ const ESPN_CORE_EVENT_ENDPOINTS = {
 //     &groups=80          -> 46 events
 // So NCAAFB was showing ~11% of the slate. Any NCAA sport added here needs
 // its own verified group id; do not assume 50 generalizes.
-const NCAA_GROUP_IDS = { NCAAMB: 50, NCAAWB: 50, NCAAFB: 80 };
+const NCAA_GROUP_IDS = { NCAAFB: 80 };
 const NCAA_SPORTS = new Set(Object.keys(NCAA_GROUP_IDS));
 
 // The '&groups=N&limit=500' suffix for a sport, or '' if it needs none.
@@ -582,18 +580,8 @@ function getNcaaScoreboardParams(sportKey) {
 }
 
 const ESPN_LEAGUES = {
-  NBA: 'nba',
   NFL: 'nfl',
-  MLB: 'mlb',
-  NHL: 'nhl',
-  WNBA: 'wnba',
-  NCAAMB: 'mens-college-basketball',
-  NCAAWB: 'womens-college-basketball',
   NCAAFB: 'college-football',
-  EPL: 'eng.1',
-  MLS: 'usa.1',
-  LALIGA: 'esp.1',
-  WORLDCUP: 'fifa.world',
   UFC: 'ufc',
   PFL: 'pfl',
   OTHER: 'other'
@@ -712,34 +700,26 @@ function getBackgroundOverlayInline() {
 // teams under the literal folder 'soccer' regardless of which league they
 // play in - so eng.1/usa.1/esp.1/fifa.world all need this override.
 const TEAM_LOGO_BUCKET_OVERRIDES = {
-  EPL: 'soccer',
-  MLS: 'soccer',
-  LALIGA: 'soccer',
-  WORLDCUP: 'soccer',
-  // Confirmed live for both football and men's basketball - ESPN buckets
-  // ALL NCAA team logos under the literal folder 'ncaa', not each sport's
-  // own league slug (e.g. NOT 'college-football' or
-  // 'mens-college-basketball', which is what the fallback would have
-  // used without this override).
-  NCAAFB: 'ncaa',
-  NCAAMB: 'ncaa',
-  NCAAWB: 'ncaa'
+  // Confirmed live - ESPN buckets ALL NCAA team logos under the literal
+  // folder 'ncaa', not each sport's own league slug (NOT
+  // 'college-football', which is what the fallback would otherwise use).
+  NCAAFB: 'ncaa'
 };
 
+// The trailing fallback is the key itself, which is what ESPN's own
+// paths use for most leagues. It only comes up for a sport this app no
+// longer knows, where the logo is going to 404 whatever is guessed - the
+// point is to guess something shaped like a bucket rather than to name
+// a league that has been removed.
 function getTeamLogoBucket(sportKey) {
-  return TEAM_LOGO_BUCKET_OVERRIDES[sportKey] || ESPN_LEAGUES[sportKey] || 'mlb';
+  return TEAM_LOGO_BUCKET_OVERRIDES[sportKey] || ESPN_LEAGUES[sportKey]
+    || String(sportKey || '').toLowerCase();
 }
 
 // Friendly names for sports whose internal key isn't already a clean label.
-// Anything not listed here just displays as its own key (e.g. NBA, MLB).
+// Anything not listed here just displays as its own key (e.g. NFL).
 const SPORT_DISPLAY_NAMES = {
-  NCAAMB: 'College Basketball (Mens)',
-  NCAAWB: 'College Basketball (Womens)',
   NCAAFB: 'College Football',
-  EPL: 'Premier League',
-  MLS: 'MLS',
-  LALIGA: 'La Liga',
-  WORLDCUP: 'FIFA World Cup',
   // The internal key stays UFC on purpose. It is what every saved account
   // already has in networkLinks and sportOrder, and what
   // existing catalog ids are built from - renaming it would migrate all
@@ -1452,7 +1432,7 @@ app.get('/poster/:sport/:homeId/:awayId.svg', async (req, res) => {
   const awayName = req.query.away || 'Away';
   const sportKey = sport.toUpperCase();
   const league = getTeamLogoBucket(sportKey);
-  const theme = SPORT_THEMES[sportKey] || SPORT_THEMES.MLB;
+  const theme = SPORT_THEMES[sportKey] || DEFAULT_THEME;
 
   // Using each team's primary color - alternate color was tried and
   // reverted. Falls back to alternate, then the sport's generic theme
@@ -1540,37 +1520,22 @@ app.get('/poster/:sport/:homeId/:awayId.svg', async (req, res) => {
 });
 
 const SPORT_THEMES = {
-  NBA: { primary: '#1D428A', secondary: '#C8102E' },
-  WNBA: { primary: '#FF6900', secondary: '#1D1160' },
   NFL: { primary: '#013369', secondary: '#D50A0A' },
-  MLB: { primary: '#0C2340', secondary: '#BA0C2F' },
-  NHL: { primary: '#000000', secondary: '#41B6E6' },
-  NCAAMB: { primary: '#041E42', secondary: '#C8102E' },
-  NCAAWB: { primary: '#041E42', secondary: '#C8102E' },
   NCAAFB: { primary: '#013369', secondary: '#D50A0A' },
-  EPL: { primary: '#3D195B', secondary: '#00FF85' },
-  MLS: { primary: '#0B1F41', secondary: '#EE3524' },
-  LALIGA: { primary: '#EE8707', secondary: '#000000' },
-  WORLDCUP: { primary: '#326295', secondary: '#C8A951' },
   UFC: { primary: '#000000', secondary: '#D20A0A' },
   PFL: { primary: '#0A0A0A', secondary: '#E4002B' },
   OTHER: { primary: '#1A1A1A', secondary: '#B31217' }
 };
 
+// Used when a sport has no theme of its own, which since the other
+// leagues were removed means a stale saved selection. Neutral on
+// purpose: it used to fall through to baseball's navy and red, which
+// dressed an unknown sport in a specific league's colours.
+const DEFAULT_THEME = { primary: '#1E293B', secondary: '#64748B' };
+
 // Primary accent used for the subtle poster background gradient per sport.
 function getSportMotif(sportKey, accentColor) {
   switch (sportKey) {
-    case 'NBA':
-    case 'WNBA':
-    case 'NCAAMB':
-    case 'NCAAWB':
-      return `
-        <g transform="translate(1500,540)" opacity="0.16" stroke="${accentColor}" stroke-width="6" fill="none">
-          <circle r="380" />
-          <path d="M -380,0 A 380,380 0 0,1 380,0" />
-          <path d="M -380,0 A 380,380 0 0,0 380,0" />
-          <line x1="0" y1="-380" x2="0" y2="380" />
-        </g>`;
     case 'NFL':
     case 'NCAAFB':
       return `
@@ -1581,21 +1546,6 @@ function getSportMotif(sportKey, accentColor) {
           <line x1="-420" y1="150" x2="420" y2="150" />
           <line x1="-420" y1="300" x2="420" y2="300" />
         </g>`;
-    case 'MLB':
-      return `
-        <g transform="translate(1500,540)" opacity="0.18" stroke="${accentColor}" stroke-width="6" fill="none">
-          <circle r="380" />
-          <path d="M -260,-280 A 380,380 0 0,1 -260,280" stroke-dasharray="14 10" />
-          <path d="M 260,-280 A 380,380 0 0,0 260,280" stroke-dasharray="14 10" />
-        </g>`;
-    case 'NHL':
-      return `
-        <g transform="translate(1500,540)" opacity="0.18" stroke="${accentColor}" stroke-width="6" fill="none">
-          <circle r="380" />
-          <circle r="60" fill="${accentColor}" opacity="0.5" stroke="none" />
-          <line x1="-460" y1="0" x2="-260" y2="0" stroke-width="14" />
-          <line x1="260" y1="0" x2="460" y2="0" stroke-width="14" />
-        </g>`;
     default:
       return '';
   }
@@ -1603,7 +1553,7 @@ function getSportMotif(sportKey, accentColor) {
 
 app.get('/landscape/:sport.svg', (req, res) => {
   const sportKey = req.params.sport.toUpperCase();
-  const theme = SPORT_THEMES[sportKey] || SPORT_THEMES.MLB;
+  const theme = SPORT_THEMES[sportKey] || DEFAULT_THEME;
   const motif = getSportMotif(sportKey, theme.secondary);
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" width="1920" height="1080">
@@ -1711,7 +1661,7 @@ app.get('/landscape/:sport/:homeId/:awayId.svg', async (req, res) => {
   const { sport, homeId, awayId } = req.params;
   const sportKey = sport.toUpperCase();
   const league = getTeamLogoBucket(sportKey);
-  const theme = SPORT_THEMES[sportKey] || SPORT_THEMES.MLB;
+  const theme = SPORT_THEMES[sportKey] || DEFAULT_THEME;
 
   const homeName = req.query.home || 'Home';
   const awayName = req.query.away || 'Away';
@@ -1757,12 +1707,12 @@ app.get('/landscape/:sport/:homeId/:awayId.svg', async (req, res) => {
 });
 
 // League logos don't follow one consistent CDN URL pattern the way team
-// logos mostly do - MLB's real logo lives at
-// teamlogos/leagues/500/mlb.png, but EPL's real logo lives at
-// leaguelogos/soccer/500/23.png, a completely different base path AND a
-// numeric id rather than the league slug. Confirmed live - directly
-// contradicted what this route used to assume, which is why soccer and
-// NCAA sports were silently getting no logo at all. Rather than hunting
+// logos mostly do. Measured back when this app carried more leagues:
+// baseball's real logo lived at teamlogos/leagues/500/mlb.png, while the
+// Premier League's lived at leaguelogos/soccer/500/23.png - a completely
+// different base path AND a numeric id rather than the league slug. That
+// directly contradicted what this route used to assume, which is why
+// soccer and NCAA sports were silently getting no logo. Rather than hunting
 // down and hardcoding the correct pattern per sport (fragile, and would
 // need redoing for every sport we ever add), the real logo URL is
 // extracted directly from the same live scoreboard data fetchTodayGames
@@ -2654,8 +2604,11 @@ async function fetchTodayMmaEvents(hostUrl, userTimeZone = 'America/New_York') {
 // What that range should be differs by sport, and the distinction is
 // about the sport, not about convenience. There are three answers:
 //
-//   Daily leagues (NBA, MLB, NHL) - the user's current local day and
-//   nothing else. "What is on today" is the entire question.
+//   Daily leagues - the user's current local day and nothing else.
+//   "What is on today" is the entire question. No league this app
+//   carries is one today, but the path stays: it is also what an
+//   unrecognised sport falls into, where it finds no endpoint and
+//   answers with an empty list rather than throwing.
 //
 //   Season-week leagues (NFL, college football) - one whole ESPN round,
 //   the current one, preseason included where the league has one. A
@@ -4162,7 +4115,16 @@ app.get('/user/:uuid/manifest.json', (req, res) => {
   // the proxy had become a trap: an account could choose a league and
   // still not see it. GLOBAL was never a browsable catalog and is not a
   // league, so it cannot appear here at all now.
-  const activeSports = (user.selectedSports || []).filter(sport => sport && sport !== 'GLOBAL');
+  //
+  // Filtered against what this build actually covers, too. An account
+  // saved before basketball, hockey, baseball and soccer were removed
+  // still lists them, and without this each one becomes a tab that can
+  // only ever say "nothing scheduled" - the selection is stale, not the
+  // schedule. The stored list is left alone rather than rewritten, so
+  // restoring a league brings that account's tab back with it.
+  const activeSports = (user.selectedSports || [])
+    .filter(sport => sport && sport !== 'GLOBAL')
+    .filter(sport => ESPN_ENDPOINTS[String(sport).toUpperCase()]);
 
   // Catalog order reflects the user's own drag-and-drop ordering of the
   // league sections. Anything not yet given an
@@ -4219,7 +4181,7 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
 
   // The networks catalog is not a sport and carries no date, so it has to
   // be handled before the sb_{sport}_{date} parsing below - which would
-  // otherwise find no sport in it and silently fall back to MLB.
+  // otherwise find no sport in it and silently fall back to the default.
   if (req.params.id === NETWORKS_CATALOG_ID) {
     const metas = getConfiguredNetworks(user).map(network => ({
       id: `net:${network.key}`,
@@ -4238,9 +4200,9 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
   // underscores, so splitting on "_" and taking the second segment
   // reliably extracts the sport for every league - no need to maintain a
   // hardcoded, easily-incomplete list of substring checks here, which is
-  // exactly what caused several leagues to silently fall back to MLB
-  // before this fix.
-  const sport = (req.params.id.split('_')[1] || 'mlb').toUpperCase();
+  // exactly what caused several leagues to silently draw another sport's
+  // art before this fix.
+  const sport = (req.params.id.split('_')[1] || 'nfl').toUpperCase();
 
   const userTz = user.timeZone || 'America/New_York';
   const games = await fetchGamesForSport(sport, hostUrl, userTz);

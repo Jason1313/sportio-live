@@ -465,38 +465,19 @@
   </div>
 
   <script>
-    // The leagues offered in the UI. Deliberately narrower than what the
-    // server still supports: every other league's endpoints, artwork and
-    // matching logic remain intact in server.js, so an account that
-    // already had them configured keeps working rather than silently
-    // losing catalogs. Removing them here just stops new ones being
-    // added. Widening this array is all it takes to bring one back.
+    // The leagues this app covers. This list used to be narrower than
+    // the server's, which still carried basketball, hockey, baseball and
+    // soccer; those have been removed there too, so the two now agree.
     const SPORTS = ['NFL', 'NCAAFB', 'UFC'];
     const SPORT_LABELS = {
       GLOBAL: 'Global',
-      NCAAMB: 'College Basketball (Mens)',
-      NCAAWB: 'College Basketball (Womens)',
       NCAAFB: 'College Football',
-      EPL: 'Premier League',
-      MLS: 'MLS',
-      LALIGA: 'La Liga',
-      WORLDCUP: 'FIFA World Cup',
       UFC: 'MMA'
     };
     const SPORT_ICONS = {
       GLOBAL: 'fa-globe',
-      MLB: 'fa-baseball',
-      NBA: 'fa-basketball',
       NFL: 'fa-football',
-      NHL: 'fa-hockey-puck',
-      WNBA: 'fa-basketball',
-      NCAAMB: 'fa-basketball',
-      NCAAWB: 'fa-basketball',
       NCAAFB: 'fa-football',
-      EPL: 'fa-futbol',
-      MLS: 'fa-futbol',
-      LALIGA: 'fa-futbol',
-      WORLDCUP: 'fa-futbol',
       UFC: 'fa-hand-fist'
     };
     let activeUser = null;
