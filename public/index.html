@@ -247,15 +247,6 @@
             </button>
           </div>
         </div>
-        <p class="text-xs text-[#e6e6e6]/55 mb-3 leading-relaxed">
-          When ESPN says an NFL or college football game is on one of these networks, Sportio shows your channels for that network <span class="text-[#e6e6e6]/80 font-semibold">instead of</span> searching. Networks left empty fall back to category search, so nothing is ever missing entirely.
-          <br class="mb-1">
-          <span class="text-[#c9992e]">NFL RedZone is not attached to a game</span> - it carries all of them at once, so ESPN never names it as anyone's broadcaster. Its channels appear as a permanent card at the top of the NFL row in the watch portal and in Stremio, every week, whether or not anything is on. Fill it in here and it plays; leave it empty and the card says so.
-          <br class="mb-1">
-          <span class="text-[#c9992e]">MMA works differently</span> - the UFC channels below are shown <span class="text-[#e6e6e6]/80 font-semibold">in addition to</span> search results, listed first. Up to 5 per section, tried in the order you set. Below them, Sportio adds any channel it finds by searching your Paramount+ PPV group for "UFC" - that is where providers put each card, under a name that changes every event, so there is nothing to configure for it here.
-          <br class="mb-1">
-          These channels are for <span class="text-[#e6e6e6]/80 font-semibold">UFC cards only</span>. Dana White's Contender Series and PFL are found by their own automatic searches instead, because the UFC channels do not carry those shows. Everything else on the ESPN MMA schedule - RIZIN, LFA, UAE Warriors, Road to UFC - still gets a card, but no automatic search: there is no term that would be right across every promotion, and a wrong guess fills the list with channels showing another sport. Open the event in the watch portal and search your channels by hand for those.
-        </p>
         <!-- Published measurements. streamcheck.pro sweeps a set of IPTV
            providers and publishes what it finds; matching an account to
            its provider lets every channel arrive already measured. Stream
@@ -836,10 +827,6 @@
 
         if (data.success) {
           wizardM3u = { playlistUrl, epgUrl };
-          // Same {category_id, category_name} shape Xtream categories use,
-          // so the entire downstream Category Search UI works unchanged -
-          // a group-title string serves as both the id and the display
-          // name here, since M3U has no separate numeric-id concept.
           wizardGoToPassword();
         } else {
           // Indicate which URL was the problem where the backend could
@@ -1856,12 +1843,12 @@
       const links = readNetworkLinks(key);
       const problems = ((networkStatus[key] || {}).problems) || [];
 
-      // The empty state has to describe the right policy. An event bucket
-      // (UFC) ADDS its channels on top of category search, while a real
-      // network REPLACES it.
+      // An event bucket (UFC) has a standing search behind it that can
+      // still turn something up; a network has nothing behind it at all,
+      // so an empty one means an empty card.
       const emptyText = network.kind === 'event'
-        ? 'No channels set - only the automatic search and category search results will show.'
-        : 'No channels set - games on this network will use category search.';
+        ? 'No channels set - only the automatic search will show.'
+        : 'No channels set - games on this network will have nothing to play.';
 
       const rows = links.length > 0
         ? links.map((link, i) => buildNetworkLinkRow(key, link, i, links.length)).join('')
