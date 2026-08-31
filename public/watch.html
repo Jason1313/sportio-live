@@ -32,6 +32,31 @@
       overflow: hidden; min-height: 2.5rem;
     }
 
+    /* A finished event, stood down so a row reads as what is still to
+       come. The poster carries most of it - the colour drains out and it
+       drops back - while the final score is deliberately left at full
+       strength, so on a card nobody needs to watch any more the score is
+       the brightest thing on it.
+
+       `body` prefix throughout: these fight Tailwind utility classes on
+       the same elements, and the CDN's stylesheet is injected after this
+       one, so an equal-specificity rule here loses.
+
+       Hover and keyboard focus bring the card back. It is past, not
+       disabled - the streams behind it still open. */
+    body .card .poster { transition: opacity .14s ease, filter .14s ease; }
+    body .card.finished .poster { opacity: 0.4; filter: saturate(0.45); }
+    body .card.finished .card-title { opacity: 0.55; }
+    body .card.finished .card-league { opacity: 0.45; }
+    body .card.finished:hover .poster,
+    body .card.finished:focus .poster { opacity: 0.88; filter: saturate(0.9); }
+    body .card.finished:hover .card-title,
+    body .card.finished:focus .card-title { opacity: 1; }
+
+    @media (prefers-reduced-motion: reduce) {
+      body .card .poster { transition: none; }
+    }
+
     /* Set here rather than inline on the element so the mobile query
        below can actually win - an inline style beats any stylesheet
        rule, however specific.
@@ -116,6 +141,10 @@
       /* Lift-on-hover is a pointer idiom. On a touch screen it only ever
          fires as a flicker after the tap has already been registered. */
       body .card:hover, body .card:focus { transform: none; box-shadow: none; }
+      /* And for the same reason, a finished card stays stood down when
+         tapped rather than brightening on the way to opening. */
+      body .card.finished:hover .poster { opacity: 0.4; filter: saturate(0.45); }
+      body .card.finished:hover .card-title { opacity: 0.55; }
 
       /* ---- Stream picker: a bottom sheet -------------------------------
          As a centred box with a fixed max-height on the list, a long
@@ -1035,12 +1064,18 @@
   }
 
   function renderGameGrid(metas) {
+    // Finished events are dimmed. Keyed off the same metaPhase the sort
+    // uses, not off finalScore: a game ESPN never posted a score for is
+    // still over, and it would otherwise be the one card in the row
+    // still presenting itself as something to watch.
+    const now = Date.now();
     document.getElementById('grid').innerHTML = metas.map(m => `
-      <button class="card text-left" onclick="openStreams('${encodeURIComponent(m.id)}')">
+      <button class="card text-left${metaPhase(m, now) === 2 ? ' finished' : ''}"
+              onclick="openStreams('${encodeURIComponent(m.id)}')">
         <img class="poster w-full rounded-lg border border-white/10 bg-[#1f2b36] object-cover" loading="lazy"
              style="aspect-ratio: 2 / 3"
              src="${escapeHtml(m.poster || '')}" alt="">
-        ${m.league ? `<span class="block text-[11px] uppercase tracking-wider text-[#5aa8d1] mt-2">${escapeHtml(m.league)}</span>` : ''}
+        ${m.league ? `<span class="card-league block text-[11px] uppercase tracking-wider text-[#5aa8d1] mt-2">${escapeHtml(m.league)}</span>` : ''}
         <span class="card-title block text-sm ${m.league ? 'mt-0.5' : 'mt-2'} leading-snug">${escapeHtml(m.name || '')}</span>
         ${whenBadge(m)}
         ${scoreBadge(m)}
