@@ -305,6 +305,16 @@ function isLoaded(provider) {
   return !!(provider && cache.get(provider));
 }
 
+// Every record held for a provider, keyed by stream id, or null when
+// nothing is loaded. Read-only by contract - callers summarise it, and
+// the map handed back is the live one rather than a copy because it runs
+// to tens of thousands of rows and cloning it to count them would cost
+// more than the counting.
+function snapshot(provider) {
+  const entry = provider ? cache.get(provider) : null;
+  return entry ? entry.byId : null;
+}
+
 function lookupCached(provider, streamId) {
   const entry = provider ? cache.get(provider) : null;
   if (!entry) return null;
@@ -334,6 +344,7 @@ module.exports = {
   refreshProviders,
   lookup,
   lookupCached,
+  snapshot,
   isLoaded,
   describeCache,
   clearCache,

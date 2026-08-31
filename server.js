@@ -3198,12 +3198,102 @@ app.get('/api/networks', (req, res) => {
 // everything has made a mistake, not expressed a preference, and a
 // search that silently returns nothing forever is a bad way to find that
 // out.
+// How a published reading is named as a format, e.g. "1080p60". The one
+// spelling shared by the filter, the counts the picker shows and the
+// labels on the badges, so a format can never be offered under one name
+// and matched under another.
+function formatKey(record) {
+  if (!record || !record.height || !record.fps) return null;
+  return `${record.height}p${Math.round(record.fps)}`;
+}
+
+const QUALITY_TIERS = ['great', 'good', 'okay', 'bad'];
+
+function readQualityFilter(user) {
+  const raw = (user && user.qualityFilter) || {};
+  const list = (v) => (Array.isArray(v) ? v.filter(x => typeof x === 'string' && x) : []);
+  const minBpp = Number(raw.minBpp);
+  return {
+    statuses: list(raw.statuses),
+    tiers: list(raw.tiers).filter(t => QUALITY_TIERS.includes(t)),
+    formats: list(raw.formats),
+    minBpp: Number.isFinite(minBpp) && minBpp > 0 ? minBpp : 0,
+    requireData: raw.requireData === true,
+  };
+}
+
+// The published-quality filter as a predicate, or null when there is
+// nothing to apply - so the ordinary case does no work at all rather
+// than walking the playlist to keep every channel in it.
+//
+// An empty list means "no restriction on this", not "allow nothing".
+// The two readings only differ when every box is unticked, and of the
+// two, the one that cannot silently empty an account's playlist is the
+// one worth having.
+//
+// Nothing is filtered while the provider's table is not loaded either.
+// The alternative is judging every channel on an absence of data and
+// hiding the lot, which looks exactly like the playlist having broken.
+function publishedQualityFilter(user) {
+  const f = readQualityFilter(user);
+  const active = f.statuses.length || f.tiers.length || f.formats.length
+    || f.minBpp || f.requireData;
+  if (!active) return null;
+
+  const provider = user.streamcheckProvider;
+  if (!provider || !streamcheck.isLoaded(provider)) return null;
+
+  const statuses = new Set(f.statuses);
+  const tiers = new Set(f.tiers);
+  const formats = new Set(f.formats);
+  // Scoring a record is the expensive half, so it is only reached when
+  // a facet actually needs it. Hiding dead links - the common case -
+  // costs a map lookup and a string compare.
+  const needsScore = tiers.size > 0 || f.minBpp > 0;
+
+  return (channel) => {
+    // streamUrl on a catalog channel, url on an entry that has already
+    // been through makeLinkEntry. This runs over both, and reading only
+    // one of them fails silently: every channel comes back unjudged and
+    // the filter looks like it is off.
+    const url = channel && (channel.streamUrl || channel.url);
+    if (!url) return !f.requireData;
+    const record = streamcheck.lookupCached(provider, networks.streamIdFromUrl(url));
+    if (!record) return !f.requireData;
+
+    if (statuses.size && !statuses.has(record.status || '')) return false;
+
+    if (formats.size) {
+      const key = formatKey(record);
+      // A reading with no resolution or frame rate in it cannot match a
+      // format, so it does not - the same answer as any other mismatch.
+      if (!key || !formats.has(key)) return false;
+    }
+
+    if (!needsScore) return true;
+
+    const measured = qualityFromStreamcheck(record);
+    if (!measured) return !f.requireData;
+    if (tiers.size && !tiers.has(measured.tier)) return false;
+    if (f.minBpp && !(measured.bpp >= f.minBpp)) return false;
+    return true;
+  };
+}
+
 function channelsForSearch(user, channels) {
+  let result = channels;
+
   const selected = Array.isArray(user.searchCategories) ? user.searchCategories : [];
-  if (selected.length === 0) return channels;
-  const wanted = new Set(selected);
-  return channels.filter(channel =>
-    (channel.categories || []).some(category => wanted.has(category)));
+  if (selected.length > 0) {
+    const wanted = new Set(selected);
+    result = result.filter(channel =>
+      (channel.categories || []).some(category => wanted.has(category)));
+  }
+
+  const passesQuality = publishedQualityFilter(user);
+  if (passesQuality) result = result.filter(passesQuality);
+
+  return result;
 }
 
 // Every category the account can see, with how many channels each holds,
@@ -3216,6 +3306,77 @@ app.post('/api/networks/categories', async (req, res) => {
     success: true,
     categories: auth.source.categoryList || [],
     selected: Array.isArray(auth.user.searchCategories) ? auth.user.searchCategories : [],
+  });
+});
+
+// What the account can filter on, counted over its own channels rather
+// than over the provider's whole table - the useful question is "how
+// many of MY channels are 1080p60", not how many exist anywhere.
+//
+// Counted after the category filter, because that is the set searches
+// actually run on, and before the quality filter, because a picker that
+// only counted what the current filter already allows could never show
+// you what turning something back on would give you.
+app.post('/api/networks/quality-filter', async (req, res) => {
+  const auth = await authenticateForChannels(req, res);
+  if (!auth) return;
+
+  const user = auth.user;
+  const provider = user.streamcheckProvider || '';
+  const saved = readQualityFilter(user);
+
+  if (!provider || !streamcheck.isLoaded(provider)) {
+    return res.json({
+      success: true, provider, loaded: false, selected: saved,
+      statuses: [], formats: [], tiers: [], total: 0, unknown: 0,
+    });
+  }
+
+  const wanted = Array.isArray(user.searchCategories) ? new Set(user.searchCategories) : null;
+  const inCategories = (wanted && wanted.size)
+    ? auth.source.channels.filter(c => (c.categories || []).some(cat => wanted.has(cat)))
+    : auth.source.channels;
+
+  const statuses = new Map();
+  const formats = new Map();
+  const tiers = new Map();
+  let unknown = 0;
+  const bump = (map, key) => map.set(key, (map.get(key) || 0) + 1);
+
+  for (const channel of inCategories) {
+    const url = channel && (channel.streamUrl || channel.url);
+    const record = url
+      ? streamcheck.lookupCached(provider, networks.streamIdFromUrl(url))
+      : null;
+    if (!record) { unknown++; continue; }
+    bump(statuses, record.status || 'Unknown');
+    const key = formatKey(record);
+    if (key) bump(formats, key);
+    const measured = qualityFromStreamcheck(record);
+    if (measured) bump(tiers, measured.tier);
+  }
+
+  // Formats sort by resolution then frame rate, both descending, so the
+  // list reads best-first rather than by however many happen to exist.
+  const formatRank = (key) => {
+    const m = /^(\d+)p(\d+)$/.exec(key);
+    return m ? Number(m[1]) * 1000 + Number(m[2]) : 0;
+  };
+
+  return res.json({
+    success: true,
+    provider,
+    loaded: true,
+    total: inCategories.length,
+    unknown,
+    selected: saved,
+    statuses: [...statuses.entries()]
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count),
+    formats: [...formats.entries()]
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => formatRank(b.name) - formatRank(a.name)),
+    tiers: QUALITY_TIERS.map(name => ({ name, count: tiers.get(name) || 0 })),
   });
 });
 
@@ -3646,6 +3807,7 @@ app.post('/api/user/login', async (req, res) => {
     sportOrder: user.sportOrder || [],
     searchCategories: user.searchCategories || [],
     streamcheckProvider: user.streamcheckProvider || '',
+    qualityFilter: readQualityFilter(user),
     networkLinks: tierNetworkLinks(user.networkLinks),
     savedChannels: (user.savedChannels || []).map(withQualityTier),
     manifestUrl: `/user/${uuid}/manifest.json` 
@@ -3653,7 +3815,7 @@ app.post('/api/user/login', async (req, res) => {
 });
 
 app.post('/api/user/update', async (req, res) => {
-  const { uuid, password, xtream, m3u, selectedSports, timeZone, sportOrder, networkLinks, savedChannels, searchCategories, streamcheckProvider } = req.body;
+  const { uuid, password, xtream, m3u, selectedSports, timeZone, sportOrder, networkLinks, savedChannels, searchCategories, streamcheckProvider, qualityFilter } = req.body;
   const ip = req.ip;
 
   if (isRateLimited(ip)) {
@@ -3674,6 +3836,13 @@ app.post('/api/user/update', async (req, res) => {
   if (streamcheckProvider !== undefined) {
     user.streamcheckProvider = typeof streamcheckProvider === 'string' ? streamcheckProvider : '';
   }
+  if (qualityFilter !== undefined) {
+    // Normalised on the way in rather than trusted: this is read on
+    // every search, and a bad shape here would be a filter that throws
+    // per keystroke rather than one that simply matches nothing.
+    user.qualityFilter = readQualityFilter({ qualityFilter });
+  }
+
   if (searchCategories !== undefined) {
     user.searchCategories = Array.isArray(searchCategories)
       ? searchCategories.filter(c => typeof c === 'string' && c)
