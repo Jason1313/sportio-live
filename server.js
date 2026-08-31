@@ -11,6 +11,7 @@ const networks = require('./networks.js');
 const quality = require('./quality.js');
 const streamcheck = require('./streamcheck.js');
 const posters = require('./posters.js');
+const wrestling = require('./wrestling.js');
 
 // Xtream credentials are encrypted at rest in users.json using this key.
 // Must be a 64-character hex string (32 bytes) for AES-256-GCM. Generate one
@@ -579,6 +580,12 @@ function getNcaaScoreboardParams(sportKey) {
   return groupId ? `&groups=${groupId}&limit=500` : '';
 }
 
+// Wrestling is not an ESPN sport - they carry none at all - so it has no
+// entry in the tables above and cannot be recognised by looking for one.
+// Every gate that used to ask "does ESPN know this" asks this instead.
+const WRESTLING_SPORT = 'WRESTLING';
+const SUPPORTED_SPORTS = new Set([...Object.keys(ESPN_ENDPOINTS), WRESTLING_SPORT]);
+
 const ESPN_LEAGUES = {
   NFL: 'nfl',
   NCAAFB: 'college-football',
@@ -720,6 +727,7 @@ function getTeamLogoBucket(sportKey) {
 // Anything not listed here just displays as its own key (e.g. NFL).
 const SPORT_DISPLAY_NAMES = {
   NCAAFB: 'College Football',
+  WRESTLING: 'Wrestling',
   // The internal key stays UFC on purpose. It is what every saved account
   // already has in networkLinks and sportOrder, and what
   // existing catalog ids are built from - renaming it would migrate all
@@ -992,8 +1000,12 @@ function formatEventDate(utcDateStr, timeZone) {
 // "Sat, Oct 17 - 8:00 pm EDT", or just the time half when the event is
 // today. Today needs no date: it is the one case where "8:00 pm" is
 // unambiguous, and dropping it keeps the common case short.
-function formatEventWhen(utcDateStr, timeZone) {
+// dateOnly is for an event whose start time has not been published.
+// Its instant is midday as a placeholder, and printing that as "12:00 pm"
+// would state a time nobody announced.
+function formatEventWhen(utcDateStr, timeZone, { dateOnly = false } = {}) {
   if (!utcDateStr) return '';
+  if (dateOnly) return formatEventDate(utcDateStr, timeZone) || '';
   const time = formatTeamTime(utcDateStr, timeZone);
   if (isSameLocalDay(utcDateStr, timeZone)) return time || '';
   const date = formatEventDate(utcDateStr, timeZone);
@@ -1451,6 +1463,45 @@ app.use(['/poster', '/landscape', '/logo', '/network'], cacheRenderedSvg);
 // in registration order, so the more specific one has to come first or it
 // would never be reached. The league-scoped path has an extra segment and
 // cannot collide, but is kept here beside its twin.
+// The promotion's own artwork for a card, letterboxed onto the poster.
+// Only images from the promotion's CDN are fetched: the URL arrives in a
+// query parameter, and fetching whatever it names would make this route
+// a proxy for anything on the network.
+const RAF_IMAGE_HOSTS = new Set(['cdn.prod.website-files.com', 'www.realamericanfreestyle.com']);
+
+app.get('/poster/wrestling/:promotion.svg', async (req, res) => {
+  const theme = SPORT_THEMES[WRESTLING_SPORT];
+  let imageData = null;
+
+  const raw = req.query.image || '';
+  if (raw) {
+    try {
+      const url = new URL(raw);
+      if (url.protocol === 'https:' && RAF_IMAGE_HOSTS.has(url.hostname)) {
+        // The site links its artwork at full size - two megabytes for a
+        // card that is drawn 200px wide. Webflow keeps resized copies
+        // beside every image under a "-p-<width>" suffix, so a smaller
+        // one is asked for first and the original is only the fallback
+        // for art that has no generated variants.
+        const smaller = url.href.replace(/\.(png|jpe?g|webp)$/i, '-p-800.$1');
+        imageData = await getBase64ImageWithFallback([smaller, url.href]);
+      }
+    } catch (err) {
+      // Not a URL at all; the poster draws its wordmark instead.
+    }
+  }
+
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  return res.send(posters.buildEventPoster({
+    imageData,
+    code: req.query.code || '',
+    title: req.query.title || '',
+    place: req.query.place || '',
+    accent: theme.secondary,
+  }));
+});
+
 app.get('/poster/mma/:league.svg', mmaPosterHandler);
 app.get('/poster/mma/:league/:fighterAId/:fighterBId.svg', mmaPosterHandler);
 app.get('/poster/ufc/:fighterAId/:fighterBId.svg', mmaPosterHandler);
@@ -1563,6 +1614,7 @@ app.get('/poster/:sport/:homeId/:awayId.svg', async (req, res) => {
 
 const SPORT_THEMES = {
   NFL: { primary: '#013369', secondary: '#D50A0A' },
+  WRESTLING: { primary: '#0B1B2B', secondary: '#C8102E' },
   NCAAFB: { primary: '#013369', secondary: '#D50A0A' },
   UFC: { primary: '#000000', secondary: '#D20A0A' },
   PFL: { primary: '#0A0A0A', secondary: '#E4002B' },
@@ -2669,9 +2721,70 @@ async function fetchTodayMmaEvents(hostUrl, userTimeZone = 'America/New_York') {
 //
 // A new sport added here needs a deliberate answer to which of the three
 // it is. Do not assume.
+// One promotion's card is one event, the same shape MMA already uses:
+// there is no home and away, the headline fight is the name, and the
+// window looks months ahead because a card runs every few weeks.
+//
+// The poster is the promotion's own artwork for that card, which is
+// better than anything that could be drawn from a matchup with no team
+// marks behind it. buildWrestlingPoster falls back to a plain one when
+// a card has no art yet.
+async function fetchWrestlingEvents(hostUrl, userTimeZone) {
+  const events = await wrestling.getEvents();
+
+  return events.map(event => {
+    const iso = event.date.toISOString();
+    const art = new URLSearchParams({
+      title: event.title || '',
+      code: event.code || '',
+      place: event.location || '',
+      image: event.image || '',
+    }).toString();
+
+    const where = event.location ? ` - ${event.location}` : '';
+    const when = event.hasTime
+      ? formatEventWhen(iso, userTimeZone)
+      : formatEventWhen(iso, userTimeZone, { dateOnly: true });
+
+    return {
+      // Prefixed so a future promotion in this section cannot collide,
+      // but not doubled up when the card's own code already starts with
+      // it - "RAF MOSCOW" would otherwise become raf-raf-moscow.
+      id: 'raf-' + String(event.code || event.title || iso)
+        .replace(/^raf[\s-]*/i, '')
+        .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
+      name: event.code && !/^raf$/i.test(event.code)
+        ? `${event.code}: ${event.title}`
+        : event.title,
+      homeTeam: '', awayTeam: '', homeNick: '', awayNick: '', homeAbbr: '', awayAbbr: '',
+      // Every card is on Fox Nation and has been since the promotion
+      // launched, so there is no per-event broadcast to resolve - it is
+      // a fact about the promotion, not about the fixture.
+      broadcastNames: ['Fox Nation'],
+      nationalBroadcasts: ['Fox Nation'],
+      network: null,
+      poster: `${hostUrl}/poster/wrestling/raf.svg?${art}`,
+      background: `${hostUrl}/landscape/wrestling.svg`,
+      logo: `${hostUrl}/logo/wrestling.svg`,
+      description: `Real American Freestyle${where}. Streams on Fox Nation.`
+        + (event.hasTime ? '' : ' Start time not published yet.'),
+      status: 'Scheduled',
+      finalScore: '',
+      state: 'pre',
+      date: iso,
+      whenLabel: when,
+      isToday: isSameLocalDay(iso, userTimeZone),
+      conferences: [],
+    };
+  });
+}
+
 async function buildGamesForSport(sport, hostUrl, userTimeZone) {
   if (sport === 'UFC') {
     return fetchTodayMmaEvents(hostUrl, userTimeZone);
+  }
+  if (sport.toUpperCase() === WRESTLING_SPORT) {
+    return fetchWrestlingEvents(hostUrl, userTimeZone);
   }
   if (SEASON_WEEK_LEAGUES[sport.toUpperCase()]) {
     return fetchSeasonWeekGames(sport, hostUrl, userTimeZone);
@@ -4335,7 +4448,7 @@ app.get('/user/:uuid/manifest.json', (req, res) => {
   // restoring a league brings that account's tab back with it.
   const activeSports = (user.selectedSports || [])
     .filter(sport => sport && sport !== 'GLOBAL')
-    .filter(sport => ESPN_ENDPOINTS[String(sport).toUpperCase()]);
+    .filter(sport => SUPPORTED_SPORTS.has(String(sport).toUpperCase()));
 
   // Catalog order reflects the user's own drag-and-drop ordering of the
   // league sections. Anything not yet given an

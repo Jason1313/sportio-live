@@ -497,17 +497,21 @@
     // The leagues this app covers. This list used to be narrower than
     // the server's, which still carried basketball, hockey, baseball and
     // soccer; those have been removed there too, so the two now agree.
-    const SPORTS = ['NFL', 'NCAAFB', 'UFC'];
+    const SPORTS = ['NFL', 'NCAAFB', 'UFC', 'WRESTLING'];
     const SPORT_LABELS = {
       GLOBAL: 'Global',
       NCAAFB: 'College Football',
-      UFC: 'MMA'
+      UFC: 'MMA',
+      // Its own section rather than a corner of MMA, and named for the
+      // sport rather than the promotion so college duals can join it.
+      WRESTLING: 'Wrestling'
     };
     const SPORT_ICONS = {
       GLOBAL: 'fa-globe',
       NFL: 'fa-football',
       NCAAFB: 'fa-football',
-      UFC: 'fa-hand-fist'
+      UFC: 'fa-hand-fist',
+      WRESTLING: 'fa-medal'
     };
     let activeUser = null;
 

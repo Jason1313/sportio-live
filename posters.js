@@ -166,8 +166,68 @@ function buildMatchupPoster({
     '</svg>';
 }
 
+// ------------------------------------------------------------ wrestling
+//
+// A promotion's card has no two teams to split a poster between - it has
+// a headline fight and the artwork the promotion drew for it. So the art
+// is the poster, letterboxed onto a 2:3 field rather than cropped to it,
+// because these are 16:9 and square graphics with the names along the
+// bottom, and object-cover would cut exactly that off.
+//
+// The band behind it carries the promotion's colours so a card with no
+// artwork yet still looks like it belongs to the same section.
+function buildEventPoster({ imageData, code, title, place, accent = '#C8102E' }) {
+  const ground = '#0B1B2B';
+
+  // The artwork comes in whatever shape the promotion drew it - square
+  // for one card, 16:9 for the next - and a 2:3 poster cannot flatter
+  // both. Cropping to fill would cut off the fighters' names, which on
+  // these graphics run along the bottom.
+  //
+  // So it is drawn twice: once cropped to fill and blurred right down,
+  // which turns the empty space into something that belongs to the same
+  // picture, and once whole on top. Defined once and referenced twice,
+  // because the image is a data URI and repeating it would double the
+  // size of the poster for a copy nobody can read.
+  const art = imageData
+    ? '<defs>' +
+        `<image id="art" href="${imageData}" width="${W}" height="${H}"/>` +
+        '<filter id="art-blur" x="-15%" y="-15%" width="130%" height="130%">' +
+          '<feGaussianBlur stdDeviation="42"/>' +
+        '</filter>' +
+        `<clipPath id="art-frame"><rect width="${W}" height="${H}"/></clipPath>` +
+      '</defs>' +
+      `<g clip-path="url(#art-frame)">` +
+        `<use href="#art" preserveAspectRatio="xMidYMid slice" filter="url(#art-blur)" opacity="0.55"/>` +
+      '</g>' +
+      `<rect width="${W}" height="${H}" fill="${ground}" opacity="0.35"/>` +
+      `<use href="#art" y="60" height="${H - 180}" preserveAspectRatio="xMidYMid meet"/>`
+    : '';
+
+  const line = (text, y, size, weight, fill, spacing) => (text
+    ? `<text x="${W / 2}" y="${y}" text-anchor="middle"` +
+      ` font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"` +
+      ` font-size="${size}" font-weight="${weight}" letter-spacing="${spacing}" fill="${fill}">` +
+      `${escapeXml(text)}</text>`
+    : '');
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">` +
+    `<rect width="${W}" height="${H}" fill="${ground}"/>` +
+    `<rect y="0" width="${W}" height="8" fill="${accent}"/>` +
+    art +
+    // Only drawn when there is no artwork - otherwise the graphic
+    // already carries the fighters' names and this would sit on top of
+    // them saying the same thing twice.
+    (imageData ? '' : line(title, 430, 40, 800, '#ffffff', 0)) +
+    (imageData ? '' : line(place, 480, 24, 600, '#ffffff99', 0)) +
+    line(code || 'REAL AMERICAN FREESTYLE', 830, 26, 800, '#ffffff', 6) +
+    `<rect y="${H - 8}" width="${W}" height="8" fill="${accent}"/>` +
+    '</svg>';
+}
+
 module.exports = {
   buildMatchupPoster,
+  buildEventPoster,
   // Exported for the tests, which check the colour rules directly rather
   // than by reading them out of finished markup.
   splitColors, backdrop, colorGap, luminance, normalizeColor, darken, lighten,
