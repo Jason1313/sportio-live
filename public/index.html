@@ -233,6 +233,10 @@
               <i class="fa-solid fa-database"></i>
               Quality data
             </button>
+            <button id="quality-filter-btn" onclick="toggleQualityFilterPanel()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
+              <i class="fa-solid fa-filter"></i>
+              Link filters
+            </button>
             <button id="network-categories-btn" onclick="toggleCategoriesPanel()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
               <i class="fa-solid fa-filter"></i>
               Categories
@@ -292,6 +296,31 @@
           <button onclick="saveSearchCategories()" class="bg-[#3b8fc4] hover:bg-[#4fa3d8] font-bold py-2 px-4 rounded-lg text-xs transition shrink-0">
             Save categories
           </button>
+        </div>
+      </div>
+
+      <!-- Link filters. Everything here is judged on the published data
+           for the account's provider, so the panel is only useful once
+           that has synced - and says so plainly when it has not. -->
+      <div id="quality-filter-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-4">
+        <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Link filters</h4>
+        <p class="text-[11px] text-[#e6e6e6]/45 mb-3 leading-relaxed">
+          Drops channels from every search and every suggestion, here and in the watch portal, using
+          the published data for your provider. Counts are over your own channels, after the category
+          filter. Leaving a whole row ticked means it is not filtering on that at all &mdash; and
+          channels the sweep never covered are kept unless you say otherwise below.
+        </p>
+        <div id="quality-filter-body"></div>
+        <div class="flex items-center justify-between gap-3 mt-3">
+          <span id="quality-filter-summary" class="text-[11px] text-[#e6e6e6]/45"></span>
+          <span class="flex items-center gap-2 shrink-0">
+            <button onclick="clearQualityFilter()" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 font-bold py-2 px-3 rounded-lg text-[11px] transition">
+              Clear all
+            </button>
+            <button onclick="saveQualityFilter()" class="bg-[#3b8fc4] hover:bg-[#4fa3d8] font-bold py-2 px-4 rounded-lg text-xs transition">
+              Save filters
+            </button>
+          </span>
         </div>
       </div>
 
@@ -965,6 +994,7 @@
         if (data.success) {
           activeUser = { uuid, password, ...data };
           document.getElementById('active-uuid-display').textContent = uuid;
+          applyConnectionType();
           showView('dashboard');
 
           showStatus('Successfully authenticated!');
@@ -986,6 +1016,37 @@
     let editXtreamTestedCredentials = null;
 
     const UNSAVED_CHANGES_WARNING = 'You have unsaved category changes that will be lost if you continue. Continue anyway?';
+
+    // Shows the controls that belong to this account's connection type.
+    //
+    // Nothing was doing this. Both of these start hidden in the markup
+    // and nothing ever removed the class, so an M3U account had no way
+    // to edit its playlist URL and no Xtream account could reach the
+    // stream format control at all - which is the one control that fixes
+    // a provider whose HLS output does not work, the failure where the
+    // player opens and then simply never plays anything.
+    function applyConnectionType() {
+      const isM3u = activeUser && activeUser.connectionType === 'm3u';
+
+      const m3uBtn = document.getElementById('edit-m3u-trigger-btn');
+      const xtreamBtn = document.getElementById('edit-xtream-trigger-btn');
+      const formatBlock = document.getElementById('xtream-format-block');
+      if (!m3uBtn || !xtreamBtn || !formatBlock) return;
+
+      // `flex` rather than a bare unhide: these buttons lay their icon
+      // out beside their label, and the markup carries the flex classes
+      // that `hidden` is switching off.
+      m3uBtn.classList.toggle('hidden', !isM3u);
+      m3uBtn.classList.toggle('flex', isM3u);
+      xtreamBtn.classList.toggle('hidden', isM3u);
+      xtreamBtn.classList.toggle('flex', !isM3u);
+
+      formatBlock.classList.toggle('hidden', isM3u);
+      const select = document.getElementById('xtream-format-select');
+      if (select) {
+        select.value = (activeUser.xtream && activeUser.xtream.streamFormat) === 'ts' ? 'ts' : 'm3u8';
+      }
+    }
 
     // Reflects which settings panel (if any) is currently open onto its
     // trigger button's own styling - reads the actual DOM state of each
@@ -2251,6 +2312,203 @@
         await loadStreamcheckProviders();
       } catch (err) {
         note.textContent = `Network error while saving: ${err.message}`;
+      }
+    }
+
+    // ---- Link filters -------------------------------------------------
+    //
+    // Held here while the panel is open; nothing is persisted until Save
+    // is pressed, the same as the category picker beside it.
+    let qualityFilterOptions = null;
+    let qualityFilterDraft = { statuses: [], tiers: [], formats: [], minBpp: 0, requireData: false };
+
+    const TIER_LABELS = { great: 'Great', good: 'Good', okay: 'Okay', bad: 'Bad' };
+
+    function toggleQualityFilterPanel() {
+      const panel = document.getElementById('quality-filter-panel');
+      if (!panel) return;
+      const opening = panel.classList.contains('hidden');
+      panel.classList.toggle('hidden', !opening);
+      if (opening) loadQualityFilter();
+    }
+
+    async function loadQualityFilter() {
+      const body = document.getElementById('quality-filter-body');
+      body.innerHTML = '<p class="text-[11px] text-[#e6e6e6]/40 italic p-2">Reading the published data...</p>';
+
+      let data;
+      try {
+        const res = await fetch('/api/networks/quality-filter', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password })
+        });
+        data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          body.innerHTML = `<p class="text-[11px] text-[#e56a6a] p-2">${escapeHtml((data && data.error) || 'The server refused that request.')}</p>`;
+          return;
+        }
+      } catch (err) {
+        body.innerHTML = `<p class="text-[11px] text-[#e56a6a] p-2">Could not reach the server: ${escapeHtml(err.message)}</p>`;
+        return;
+      }
+
+      qualityFilterOptions = data;
+      const saved = data.selected || {};
+      qualityFilterDraft = {
+        statuses: [...(saved.statuses || [])],
+        tiers: [...(saved.tiers || [])],
+        formats: [...(saved.formats || [])],
+        minBpp: Number(saved.minBpp) || 0,
+        requireData: saved.requireData === true,
+      };
+      renderQualityFilter();
+    }
+
+    // A row of tick boxes, one per value, each carrying how many of the
+    // account's own channels it covers.
+    function filterRow(title, note, options, chosen, onToggle) {
+      if (options.length === 0) return '';
+      const boxes = options.map(o => {
+        const on = chosen.length === 0 || chosen.includes(o.name);
+        return `<label class="flex items-center gap-1.5 bg-[#2f3e47] border ${on ? 'border-[#3b8fc4]/60' : 'border-[#e6e6e6]/10'} rounded-lg px-2 py-1 cursor-pointer transition">
+                  <input type="checkbox" ${on ? 'checked' : ''} onchange="${onToggle}(${JSON.stringify(o.name).replace(/"/g, '&quot;')})"
+                         class="accent-[#3b8fc4]">
+                  <span class="text-[11px] ${on ? 'text-[#e6e6e6]' : 'text-[#e6e6e6]/45'}">${escapeHtml(o.label || o.name)}</span>
+                  <span class="text-[10px] text-[#e6e6e6]/35 font-mono">${o.count.toLocaleString()}</span>
+                </label>`;
+      }).join('');
+      return `<div class="mb-3">
+                <p class="text-[11px] font-bold text-[#e6e6e6]/65 mb-1">${escapeHtml(title)}
+                  <span class="font-normal text-[#e6e6e6]/35">&mdash; ${escapeHtml(note)}</span></p>
+                <div class="flex flex-wrap gap-1.5">${boxes}</div>
+              </div>`;
+    }
+
+    function renderQualityFilter() {
+      const body = document.getElementById('quality-filter-body');
+      const d = qualityFilterOptions;
+
+      if (!d.provider) {
+        body.innerHTML = '<p class="text-[11px] text-[#e6e6e6]/45 p-2 leading-relaxed">No provider is selected under Quality data, so there is nothing to filter on yet.</p>';
+        document.getElementById('quality-filter-summary').textContent = '';
+        return;
+      }
+      if (!d.loaded) {
+        body.innerHTML = `<p class="text-[11px] text-[#e6e6e6]/45 p-2 leading-relaxed">${escapeHtml(d.provider)}'s published data has not loaded yet. It arrives with the next dashboard refresh; reopen this panel then.</p>`;
+        document.getElementById('quality-filter-summary').textContent = '';
+        return;
+      }
+
+      body.innerHTML =
+        filterRow('Status', 'untick one to drop those channels', d.statuses,
+          qualityFilterDraft.statuses, 'toggleFilterStatus') +
+        filterRow('Rating', 'the verdict on the published reading',
+          d.tiers.map(t => ({ ...t, label: TIER_LABELS[t.name] || t.name })),
+          qualityFilterDraft.tiers, 'toggleFilterTier') +
+        filterRow('Resolution and frame rate', 'a channel with neither published cannot match one',
+          d.formats, qualityFilterDraft.formats, 'toggleFilterFormat') +
+        `<div class="flex flex-wrap items-center gap-4 mt-1">
+           <label class="flex items-center gap-2">
+             <span class="text-[11px] font-bold text-[#e6e6e6]/65">Minimum bpp</span>
+             <input type="number" id="filter-min-bpp" min="0" max="1" step="0.01" value="${qualityFilterDraft.minBpp || ''}"
+                    placeholder="none" oninput="setFilterMinBpp(this.value)"
+                    class="w-24 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-2 py-1 text-xs focus:border-[#3b8fc4] focus:outline-none">
+           </label>
+           <label class="flex items-center gap-2 cursor-pointer">
+             <input type="checkbox" ${qualityFilterDraft.requireData ? 'checked' : ''}
+                    onchange="setFilterRequireData(this.checked)" class="accent-[#3b8fc4]">
+             <span class="text-[11px] text-[#e6e6e6]/65">Also drop the ${d.unknown.toLocaleString()} channels with no published reading</span>
+           </label>
+         </div>`;
+
+      updateQualityFilterSummary();
+    }
+
+    // Live count of what the draft would keep, worked out from the same
+    // counts the boxes show. Approximate by construction - the facets
+    // overlap, so this is the narrowest single row rather than the exact
+    // intersection - and labelled as such rather than presented as fact.
+    function updateQualityFilterSummary() {
+      const d = qualityFilterOptions;
+      const el = document.getElementById('quality-filter-summary');
+      if (!d || !d.loaded) { el.textContent = ''; return; }
+
+      const kept = (options, chosen) => chosen.length === 0
+        ? null
+        : options.filter(o => chosen.includes(o.name)).reduce((sum, o) => sum + o.count, 0);
+
+      const limits = [
+        kept(d.statuses, qualityFilterDraft.statuses),
+        kept(d.tiers, qualityFilterDraft.tiers),
+        kept(d.formats, qualityFilterDraft.formats),
+      ].filter(v => v !== null);
+
+      if (limits.length === 0 && !qualityFilterDraft.minBpp && !qualityFilterDraft.requireData) {
+        el.textContent = `Not filtering. All ${d.total.toLocaleString()} channels searched.`;
+        return;
+      }
+      const ceiling = limits.length ? Math.min(...limits) : d.total;
+      el.textContent = `At most ${ceiling.toLocaleString()} of ${d.total.toLocaleString()} channels`
+        + (qualityFilterDraft.minBpp ? `, before the bpp floor` : '')
+        + '.';
+    }
+
+    // Ticking every box and ticking none mean the same thing - no
+    // restriction - so a row that has just had its last box ticked is
+    // stored as empty. That keeps "all ticked" from being saved as a
+    // list that would silently go stale when the provider's next sweep
+    // brings a format nobody has seen before.
+    function toggleFilterValue(facet, all, name) {
+      const current = qualityFilterDraft[facet];
+      const chosen = new Set(current.length === 0 ? all.map(o => o.name) : current);
+      if (chosen.has(name)) chosen.delete(name); else chosen.add(name);
+      qualityFilterDraft[facet] = chosen.size === all.length ? [] : [...chosen];
+      renderQualityFilter();
+    }
+    const toggleFilterStatus = (name) => toggleFilterValue('statuses', qualityFilterOptions.statuses, name);
+    const toggleFilterTier = (name) => toggleFilterValue('tiers', qualityFilterOptions.tiers, name);
+    const toggleFilterFormat = (name) => toggleFilterValue('formats', qualityFilterOptions.formats, name);
+
+    function setFilterMinBpp(value) {
+      const n = Number(value);
+      qualityFilterDraft.minBpp = Number.isFinite(n) && n > 0 ? n : 0;
+      updateQualityFilterSummary();
+    }
+
+    function setFilterRequireData(on) {
+      qualityFilterDraft.requireData = !!on;
+      updateQualityFilterSummary();
+    }
+
+    function clearQualityFilter() {
+      qualityFilterDraft = { statuses: [], tiers: [], formats: [], minBpp: 0, requireData: false };
+      renderQualityFilter();
+    }
+
+    async function saveQualityFilter() {
+      const filter = { ...qualityFilterDraft };
+      try {
+        const res = await fetch('/api/user/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uuid: activeUser.uuid, password: activeUser.password, qualityFilter: filter
+          })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          showStatus((data && data.error) || 'Could not save the filters.', true);
+          return;
+        }
+        activeUser.qualityFilter = filter;
+        const active = filter.statuses.length || filter.tiers.length || filter.formats.length
+          || filter.minBpp || filter.requireData;
+        showStatus(active ? 'Link filters saved.' : 'Link filters cleared - nothing is being dropped.');
+        // Every suggestion on screen was produced under the old filter.
+        loadNetworkLinks();
+      } catch (err) {
+        showStatus(`Could not reach the server: ${err.message}`, true);
       }
     }
 
