@@ -1463,42 +1463,17 @@ app.use(['/poster', '/landscape', '/logo', '/network'], cacheRenderedSvg);
 // in registration order, so the more specific one has to come first or it
 // would never be reached. The league-scoped path has an extra segment and
 // cannot collide, but is kept here beside its twin.
-// The promotion's own artwork for a card, letterboxed onto the poster.
-// Only images from the promotion's CDN are fetched: the URL arrives in a
-// query parameter, and fetching whatever it names would make this route
-// a proxy for anything on the network.
-const RAF_IMAGE_HOSTS = new Set(['cdn.prod.website-files.com', 'www.realamericanfreestyle.com']);
-
-app.get('/poster/wrestling/:promotion.svg', async (req, res) => {
-  const theme = SPORT_THEMES[WRESTLING_SPORT];
-  let imageData = null;
-
-  const raw = req.query.image || '';
-  if (raw) {
-    try {
-      const url = new URL(raw);
-      if (url.protocol === 'https:' && RAF_IMAGE_HOSTS.has(url.hostname)) {
-        // The site links its artwork at full size - two megabytes for a
-        // card that is drawn 200px wide. Webflow keeps resized copies
-        // beside every image under a "-p-<width>" suffix, so a smaller
-        // one is asked for first and the original is only the fallback
-        // for art that has no generated variants.
-        const smaller = url.href.replace(/\.(png|jpe?g|webp)$/i, '-p-800.$1');
-        imageData = await getBase64ImageWithFallback([smaller, url.href]);
-      }
-    } catch (err) {
-      // Not a URL at all; the poster draws its wordmark instead.
-    }
-  }
-
+// A promotion's card. Drawn from its name and number, with no artwork
+// fetched: the promotion's own graphics come in mixed shapes, none of
+// them 2:3, and a poster built around them was mostly letterboxing.
+app.get('/poster/wrestling/:promotion.svg', (req, res) => {
   res.setHeader('Content-Type', 'image/svg+xml');
   res.setHeader('Cache-Control', 'public, max-age=3600');
   return res.send(posters.buildEventPoster({
-    imageData,
     code: req.query.code || '',
     title: req.query.title || '',
     place: req.query.place || '',
-    accent: theme.secondary,
+    accent: SPORT_THEMES[WRESTLING_SPORT].secondary,
   }));
 });
 
@@ -2738,13 +2713,16 @@ async function fetchWrestlingEvents(hostUrl, userTimeZone) {
       title: event.title || '',
       code: event.code || '',
       place: event.location || '',
-      image: event.image || '',
     }).toString();
 
     const where = event.location ? ` - ${event.location}` : '';
+    // Said out loud rather than left as a bare date. The promotion has
+    // published no time for this card - confirmed, its page carries no
+    // clock at all - and a date on its own reads like the app losing
+    // the time rather than the time not existing yet.
     const when = event.hasTime
       ? formatEventWhen(iso, userTimeZone)
-      : formatEventWhen(iso, userTimeZone, { dateOnly: true });
+      : `${formatEventWhen(iso, userTimeZone, { dateOnly: true })} - time TBA`;
 
     return {
       // Prefixed so a future promotion in this section cannot collide,
@@ -3074,6 +3052,40 @@ async function getXtreamChannelSource(user) {
 // which categories to ask for - which for UFC means one small request
 // covering the Paramount+ PPV group, rather than pulling the whole
 // service down to find a handful of channels in it.
+// Standing searches an account has written for itself, per sport.
+//
+// A promotion like RAF has no channel to pin. Its cards turn up in a
+// playlist as whatever the provider felt like calling them that week -
+// "RAF 14", "Real American Freestyle", or just the broadcaster's own
+// channel - so a curated list of stream ids goes stale between events
+// while a search for the promotion's name does not.
+//
+// Shaped like the built-in AUTO_SEARCH entries so the stream route can
+// use either without caring which it got.
+function readSearchTerms(user) {
+  const raw = (user && user.searchTerms) || {};
+  const out = {};
+  for (const [sport, terms] of Object.entries(raw)) {
+    if (!Array.isArray(terms)) continue;
+    const cleaned = [...new Set(terms
+      .filter(t => typeof t === 'string')
+      .map(t => t.trim())
+      .filter(t => t.length >= 2 && t.length <= 60))].slice(0, 20);
+    if (cleaned.length) out[String(sport).toUpperCase()] = cleaned;
+  }
+  return out;
+}
+
+// The account's own terms win over the built-in ones. Somebody who has
+// written a list for a sport has said what they want searched, and
+// quietly unioning that with a default would put back the results the
+// list was narrowed to exclude.
+function autoSearchFor(user, sportKey) {
+  const own = readSearchTerms(user)[String(sportKey || '').toUpperCase()];
+  if (own && own.length) return { terms: own, groups: [] };
+  return networks.getAutoSearch(sportKey);
+}
+
 async function fetchAutoSearchChannels(user, config, m3uSource) {
   if (!config) return [];
 
@@ -3408,6 +3420,37 @@ function channelsForSearch(user, channels) {
 
   return result;
 }
+
+// What a set of standing search terms would actually find, so the
+// dashboard can show it before it is saved rather than after an event
+// has already gone out with the wrong channels behind it.
+app.post('/api/networks/search-terms', async (req, res) => {
+  const auth = await authenticateForChannels(req, res);
+  if (!auth) return;
+
+  const terms = Array.isArray(req.body.terms) ? req.body.terms : [];
+  const cleaned = terms.filter(t => typeof t === 'string' && t.trim().length >= 2)
+    .map(t => t.trim()).slice(0, 20);
+  if (cleaned.length === 0) return res.json({ success: true, terms: [], matches: [] });
+
+  // Through the same resolver the stream route uses, so what is
+  // previewed here is what an event will actually be given.
+  const channels = networks.autoSearchChannels(
+    channelsForSearch(auth.user, auth.source.channels),
+    { terms: cleaned, groups: [] },
+    { limit: 40 }
+  );
+
+  return res.json({
+    success: true,
+    terms: cleaned,
+    matches: enrichWithStreamcheck(auth.user, channels).map(c => ({
+      name: c.name, url: c.url, group: c.group || '',
+      probedQuality: c.probedQuality || '', probedTier: c.probedTier || '',
+      probedDetail: c.probedDetail || '', streamStatus: c.streamStatus || null,
+    })),
+  });
+});
 
 // Every category the account can see, with how many channels each holds,
 // alongside the ones currently chosen. Feeds the dashboard's picker.
@@ -3921,6 +3964,7 @@ app.post('/api/user/login', async (req, res) => {
     searchCategories: user.searchCategories || [],
     streamcheckProvider: user.streamcheckProvider || '',
     qualityFilter: readQualityFilter(user),
+    searchTerms: readSearchTerms(user),
     networkLinks: tierNetworkLinks(user.networkLinks),
     savedChannels: (user.savedChannels || []).map(withQualityTier),
     manifestUrl: `/user/${uuid}/manifest.json` 
@@ -3928,7 +3972,7 @@ app.post('/api/user/login', async (req, res) => {
 });
 
 app.post('/api/user/update', async (req, res) => {
-  const { uuid, password, xtream, m3u, selectedSports, timeZone, sportOrder, networkLinks, savedChannels, searchCategories, streamcheckProvider, qualityFilter } = req.body;
+  const { uuid, password, xtream, m3u, selectedSports, timeZone, sportOrder, networkLinks, savedChannels, searchCategories, streamcheckProvider, qualityFilter, searchTerms } = req.body;
   const ip = req.ip;
 
   if (isRateLimited(ip)) {
@@ -3949,6 +3993,10 @@ app.post('/api/user/update', async (req, res) => {
   if (streamcheckProvider !== undefined) {
     user.streamcheckProvider = typeof streamcheckProvider === 'string' ? streamcheckProvider : '';
   }
+  if (searchTerms !== undefined) {
+    user.searchTerms = readSearchTerms({ searchTerms });
+  }
+
   if (qualityFilter !== undefined) {
     // Normalised on the way in rather than trusted: this is read on
     // every search, and a bad shape here would be a filter that throws
@@ -4824,7 +4872,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   //
   // Resolved here, alongside the links, so buildStreamList receives both
   // sources at once and decides the order in one place.
-  const autoSearch = promotion ? promotion.autoSearch : networks.getAutoSearch(sportKey);
+  const autoSearch = promotion ? promotion.autoSearch : autoSearchFor(user, sportKey);
   let autoStreams = [];
   if (autoSearch) {
     const autoChannels = await fetchAutoSearchChannels(user, autoSearch, m3uSource);

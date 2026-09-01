@@ -821,9 +821,18 @@ function buildStreamList({ networkKey, linkStreams, autoStreams }) {
     return { streams, mode: 'links-only', note: '' };
   }
 
-  // Nothing configured. Said plainly rather than returning an empty list
-  // that looks like a failure - and it names the network, because the
-  // useful next action is to go and fill that one slot.
+  // A standing search found channels and no links were pinned. That is
+  // not an unconfigured event, it is how a sport with no pinnable
+  // channel is meant to work - a promotion whose cards appear under a
+  // different name every week is searched for, not pinned. Warning
+  // "not configured" above four playable streams contradicts itself.
+  if (auto.length > 0) {
+    return { streams, mode: 'search-only', note: '' };
+  }
+
+  // Nothing configured and nothing found. Said plainly rather than
+  // returning an empty list that looks like a failure - and it names the
+  // network, because the useful next action is to go and fill that slot.
   return {
     streams,
     mode: 'no-links',

@@ -176,54 +176,86 @@ function buildMatchupPoster({
 //
 // The band behind it carries the promotion's colours so a card with no
 // artwork yet still looks like it belongs to the same section.
-function buildEventPoster({ imageData, code, title, place, accent = '#C8102E' }) {
+function wrapToWidth(text, perLine, maxLines) {
+  const words = String(text || '').trim().split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (next.length > perLine && line) { lines.push(line); line = word; }
+    else line = next;
+  }
+  if (line) lines.push(line);
+  if (lines.length > maxLines) {
+    const kept = lines.slice(0, maxLines);
+    kept[maxLines - 1] = `${kept[maxLines - 1].slice(0, perLine - 1)}\u2026`;
+    return kept;
+  }
+  return lines;
+}
+
+// A promotion's card, drawn rather than photographed.
+//
+// The promotion's own artwork was tried first and dropped: it arrives in
+// mixed shapes, none of them 2:3, and a poster built around it was
+// mostly letterboxing. This is the same answer the MMA cards give - the
+// promotion's mark and the name of the event - which also makes a card
+// a couple of kilobytes instead of a few hundred.
+//
+// The type is set in a system stack rather than drawn as geometry. A
+// poster is loaded as an image and can never reach a web font, so the
+// face differs by platform; textLength pins the wordmark to a fixed
+// width so that difference changes the letterforms and not the layout.
+// The fighters' names cannot be handled that way - they are arbitrary
+// text - so they are wrapped and left to the local font.
+function buildEventPoster({ code, title, place, accent = '#C8102E' }) {
   const ground = '#0B1B2B';
+  const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
 
-  // The artwork comes in whatever shape the promotion drew it - square
-  // for one card, 16:9 for the next - and a 2:3 poster cannot flatter
-  // both. Cropping to fill would cut off the fighters' names, which on
-  // these graphics run along the bottom.
-  //
-  // So it is drawn twice: once cropped to fill and blurred right down,
-  // which turns the empty space into something that belongs to the same
-  // picture, and once whole on top. Defined once and referenced twice,
-  // because the image is a data URI and repeating it would double the
-  // size of the poster for a copy nobody can read.
-  const art = imageData
-    ? '<defs>' +
-        `<image id="art" href="${imageData}" width="${W}" height="${H}"/>` +
-        '<filter id="art-blur" x="-15%" y="-15%" width="130%" height="130%">' +
-          '<feGaussianBlur stdDeviation="42"/>' +
-        '</filter>' +
-        `<clipPath id="art-frame"><rect width="${W}" height="${H}"/></clipPath>` +
-      '</defs>' +
-      `<g clip-path="url(#art-frame)">` +
-        `<use href="#art" preserveAspectRatio="xMidYMid slice" filter="url(#art-blur)" opacity="0.55"/>` +
-      '</g>' +
-      `<rect width="${W}" height="${H}" fill="${ground}" opacity="0.35"/>` +
-      `<use href="#art" y="60" height="${H - 180}" preserveAspectRatio="xMidYMid meet"/>`
-    : '';
+  const text = (body, { y, size, weight = 700, fill = '#ffffff', spacing = 0, length = null }) =>
+    `<text x="${W / 2}" y="${y}" text-anchor="middle" font-family="${FONT}"` +
+    ` font-size="${size}" font-weight="${weight}" letter-spacing="${spacing}" fill="${fill}"` +
+    (length ? ` textLength="${length}" lengthAdjust="spacingAndGlyphs"` : '') +
+    `>${escapeXml(body)}</text>`;
 
-  const line = (text, y, size, weight, fill, spacing) => (text
-    ? `<text x="${W / 2}" y="${y}" text-anchor="middle"` +
-      ` font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"` +
-      ` font-size="${size}" font-weight="${weight}" letter-spacing="${spacing}" fill="${fill}">` +
-      `${escapeXml(text)}</text>`
-    : '');
+  // Two mat circles, which is what a wrestling surface looks like from
+  // above, sized and placed so they read as a watermark rather than as
+  // a diagram.
+  const mat =
+    `<g fill="none" stroke="${accent}" stroke-opacity="0.16">` +
+      `<circle cx="${W / 2}" cy="330" r="250" stroke-width="26"/>` +
+      `<circle cx="${W / 2}" cy="330" r="150" stroke-width="14"/>` +
+    '</g>';
+
+  const nameLines = wrapToWidth(title, 22, 3);
+  const nameTop = 620 - (nameLines.length - 1) * 21;
 
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">` +
-    `<rect width="${W}" height="${H}" fill="${ground}"/>` +
-    `<rect y="0" width="${W}" height="8" fill="${accent}"/>` +
-    art +
-    // Only drawn when there is no artwork - otherwise the graphic
-    // already carries the fighters' names and this would sit on top of
-    // them saying the same thing twice.
-    (imageData ? '' : line(title, 430, 40, 800, '#ffffff', 0)) +
-    (imageData ? '' : line(place, 480, 24, 600, '#ffffff99', 0)) +
-    line(code || 'REAL AMERICAN FREESTYLE', 830, 26, 800, '#ffffff', 6) +
-    `<rect y="${H - 8}" width="${W}" height="8" fill="${accent}"/>` +
+    '<defs>' +
+      `<linearGradient id="ground" x1="0" y1="0" x2="0" y2="1">` +
+        `<stop offset="0" stop-color="#14304a"/><stop offset="1" stop-color="${ground}"/>` +
+      '</linearGradient>' +
+    '</defs>' +
+    `<rect width="${W}" height="${H}" fill="url(#ground)"/>` +
+    mat +
+    `<rect y="0" width="${W}" height="10" fill="${accent}"/>` +
+
+    // The mark: initials over the full name, the way the promotion
+    // writes itself.
+    text('RAF', { y: 372, size: 172, weight: 800, spacing: 6, length: 330 }) +
+    `<rect x="${(W - 300) / 2}" y="410" width="300" height="3" fill="${accent}"/>` +
+    text('REAL AMERICAN FREESTYLE', { y: 452, size: 22, weight: 700, spacing: 4, fill: '#ffffffcc', length: 400 }) +
+
+    // The card's own number, then its headline.
+    (code ? text(code.toUpperCase(), { y: 556, size: 30, weight: 800, spacing: 5, fill: accent }) : '') +
+    nameLines.map((line, i) => text(line, { y: nameTop + i * 42, size: 34, weight: 700 })).join('') +
+    (place ? text(place, { y: 742, size: 22, weight: 600, fill: '#ffffff8c' }) : '') +
+
+    text('FOX NATION', { y: 836, size: 19, weight: 700, spacing: 5, fill: '#ffffff73', length: 200 }) +
+    `<rect y="${H - 10}" width="${W}" height="10" fill="${accent}"/>` +
     '</svg>';
 }
+
 
 module.exports = {
   buildMatchupPoster,

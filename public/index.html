@@ -233,6 +233,10 @@
               <i class="fa-solid fa-database"></i>
               Quality data
             </button>
+            <button id="event-search-btn" onclick="toggleEventSearchPanel()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
+              <i class="fa-solid fa-magnifying-glass"></i>
+              Event searches
+            </button>
             <button id="quality-filter-btn" onclick="toggleQualityFilterPanel()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
               <i class="fa-solid fa-filter"></i>
               Link filters
@@ -295,6 +299,35 @@
           <span id="categories-summary" class="text-[11px] text-[#e6e6e6]/45"></span>
           <button onclick="saveSearchCategories()" class="bg-[#3b8fc4] hover:bg-[#4fa3d8] font-bold py-2 px-4 rounded-lg text-xs transition shrink-0">
             Save categories
+          </button>
+        </div>
+      </div>
+
+      <!-- Standing searches, for sports whose channels cannot be pinned.
+           A promotion's card turns up in a playlist under whatever the
+           provider called it that week, so a saved stream id goes stale
+           between events while the promotion's name does not. -->
+      <div id="event-search-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-4">
+        <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Event searches &mdash; Wrestling</h4>
+        <p class="text-[11px] text-[#e6e6e6]/45 mb-3 leading-relaxed">
+          Rather than pinning channels, these terms are searched against your playlist every time a
+          wrestling card is opened, and whatever matches is offered as a stream. Good terms are the
+          promotion's name and its broadcaster &mdash; RAF, Real American Freestyle, Fox Nation.
+          Nothing is pinned, so a channel the provider renames between events is still found.
+        </p>
+        <div id="event-search-terms" class="flex flex-wrap gap-1.5 mb-2"></div>
+        <div class="flex gap-2 mb-3">
+          <input type="text" id="event-search-input" maxlength="60" placeholder="Add a term, e.g. Real American Freestyle"
+                 onkeydown="if(event.key==='Enter'){event.preventDefault();addEventSearchTerm();}"
+                 class="flex-1 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
+          <button onclick="addEventSearchTerm()" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 font-bold py-2 px-3 rounded-lg text-[11px] transition shrink-0">Add</button>
+          <button onclick="previewEventSearch()" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 font-bold py-2 px-3 rounded-lg text-[11px] transition shrink-0">Preview matches</button>
+        </div>
+        <div id="event-search-preview" class="max-h-64 overflow-y-auto"></div>
+        <div class="flex items-center justify-between gap-3 mt-3">
+          <span id="event-search-summary" class="text-[11px] text-[#e6e6e6]/45"></span>
+          <button onclick="saveEventSearchTerms()" class="bg-[#3b8fc4] hover:bg-[#4fa3d8] font-bold py-2 px-4 rounded-lg text-xs transition shrink-0">
+            Save searches
           </button>
         </div>
       </div>
@@ -2316,6 +2349,122 @@
         await loadStreamcheckProviders();
       } catch (err) {
         note.textContent = `Network error while saving: ${err.message}`;
+      }
+    }
+
+    // ---- Event searches -----------------------------------------------
+    //
+    // Held per sport, though only Wrestling offers them today - college
+    // duals will want their own, and a promotion's terms are no use to
+    // a league that names its games after the two teams.
+    const EVENT_SEARCH_SPORT = 'WRESTLING';
+    let eventSearchTerms = [];
+
+    function toggleEventSearchPanel() {
+      const panel = document.getElementById('event-search-panel');
+      if (!panel) return;
+      const opening = panel.classList.contains('hidden');
+      panel.classList.toggle('hidden', !opening);
+      if (opening) {
+        const saved = (activeUser.searchTerms || {})[EVENT_SEARCH_SPORT] || [];
+        eventSearchTerms = [...saved];
+        renderEventSearchTerms();
+        document.getElementById('event-search-preview').innerHTML = '';
+        document.getElementById('event-search-summary').textContent = '';
+      }
+    }
+
+    function renderEventSearchTerms() {
+      const box = document.getElementById('event-search-terms');
+      if (eventSearchTerms.length === 0) {
+        box.innerHTML = '<p class="text-[11px] text-[#e6e6e6]/40 italic">No terms yet. Nothing is searched, so a wrestling card offers no streams.</p>';
+        return;
+      }
+      box.innerHTML = eventSearchTerms.map((term, i) => `
+        <span class="flex items-center gap-1.5 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg pl-2.5 pr-1.5 py-1">
+          <span class="text-[11px]">${escapeHtml(term)}</span>
+          <button onclick="removeEventSearchTerm(${i})" title="Remove"
+                  class="text-[#e56a6a]/70 hover:text-[#e56a6a] text-[11px] px-1 leading-none">&times;</button>
+        </span>`).join('');
+    }
+
+    function addEventSearchTerm() {
+      const input = document.getElementById('event-search-input');
+      const term = input.value.trim();
+      if (term.length < 2) { showStatus('A search term needs at least two characters.', true); return; }
+      if (eventSearchTerms.some(t => t.toLowerCase() === term.toLowerCase())) {
+        showStatus('That term is already in the list.', true);
+        return;
+      }
+      eventSearchTerms.push(term);
+      input.value = '';
+      renderEventSearchTerms();
+    }
+
+    function removeEventSearchTerm(index) {
+      eventSearchTerms.splice(index, 1);
+      renderEventSearchTerms();
+    }
+
+    // What these terms find, before they are saved. The same resolver the
+    // stream route uses answers this, so the preview is the answer rather
+    // than an approximation of it.
+    async function previewEventSearch() {
+      const box = document.getElementById('event-search-preview');
+      const summary = document.getElementById('event-search-summary');
+      if (eventSearchTerms.length === 0) { box.innerHTML = ''; summary.textContent = 'Add a term first.'; return; }
+      box.innerHTML = '<p class="text-[11px] text-[#e6e6e6]/40 italic p-2">Searching your playlist...</p>';
+
+      try {
+        const res = await fetch('/api/networks/search-terms', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, terms: eventSearchTerms })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          box.innerHTML = `<p class="text-[11px] text-[#e56a6a] p-2">${escapeHtml((data && data.error) || 'The server refused that request.')}</p>`;
+          return;
+        }
+        const matches = data.matches || [];
+        summary.textContent = matches.length === 0
+          ? 'Nothing in your playlist matches these terms.'
+          : `${matches.length} channel${matches.length === 1 ? '' : 's'} would be offered.`;
+        box.innerHTML = matches.length === 0 ? '' : matches.map(m => `
+          <div class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-white/5">
+            <span class="flex-1 min-w-0">
+              <span class="flex items-center gap-2">
+                <span class="text-xs truncate">${escapeHtml(m.name)}</span>
+                ${m.probedQuality ? `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded ${tierClasses(m.probedTier)}"
+                  title="${escapeHtml(m.probedDetail || '')}">${escapeHtml(m.probedQuality)}</span>` : ''}
+              </span>
+              <span class="block text-[10px] text-[#e6e6e6]/45 truncate">${escapeHtml(m.group || '')}</span>
+            </span>
+          </div>`).join('');
+      } catch (err) {
+        box.innerHTML = `<p class="text-[11px] text-[#e56a6a] p-2">Could not reach the server: ${escapeHtml(err.message)}</p>`;
+      }
+    }
+
+    async function saveEventSearchTerms() {
+      const searchTerms = { ...(activeUser.searchTerms || {}), [EVENT_SEARCH_SPORT]: eventSearchTerms };
+      try {
+        const res = await fetch('/api/user/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, searchTerms })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          showStatus((data && data.error) || 'Could not save the searches.', true);
+          return;
+        }
+        activeUser.searchTerms = searchTerms;
+        showStatus(eventSearchTerms.length === 0
+          ? 'Searches cleared - wrestling cards will offer no streams.'
+          : `Saved ${eventSearchTerms.length} search term${eventSearchTerms.length === 1 ? '' : 's'}.`);
+      } catch (err) {
+        showStatus(`Could not reach the server: ${err.message}`, true);
       }
     }
 
