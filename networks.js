@@ -263,16 +263,6 @@ function resolveNetworkFromCompetition(competition) {
 
 const MAX_LINKS_PER_NETWORK = 10;
 
-// A cap on GUESSES, specifically. Auto-fill deliberately stops well
-// short of MAX_LINKS_PER_NETWORK: the extra slots exist so specific feeds
-// can be added by hand - a particular affiliate, a 1080p60 variant found
-// by probing - not so the picker can fill ten guesses.
-//
-// An instance default is not a guess and this ceiling does not apply to
-// it - the operator picked those by hand, which is the very thing the
-// spare slots were being reserved for. See suggestChannelsForNetwork.
-const MAX_SUGGESTIONS = 5;
-
 // A saved link identifies a channel by its stream URL, because that is
 // the only genuinely unique identifier a playlist offers. tvg-id is NOT
 // unique - measured on a real playlist, 1,278 tvg-ids covered more than
@@ -1142,157 +1132,43 @@ function streamIdFromUrl(url) {
 // credentials, nothing account-specific.
 const PREFERRED_STREAM_BONUS = 200;
 
-function scoreChannelForNetwork(channel, network, preferredStreamIds) {
-  // Established before the gates below, because it overrides them.
-  //
-  // An instance default is not a hint about what this channel might be -
-  // it is an operator having pointed at this exact stream and said it IS
-  // this network. Everything after this line is inference from a name,
-  // and inference does not get to overrule a stated fact.
-  //
-  // This was the whole reason ten saved defaults produced five. The
-  // affiliates that survived were named "FOX [Birmingham]", which cleans
-  // up to exactly "fox"; the ones that vanished were named
-  // "US: FOX 10 (KSAZ) PHOENIX HD", which cleans up to "fox10phoenix" -
-  // stripChannelDecorations removes the brackets and the "HD" but keeps
-  // the market and the channel number, as it must, or "FOX 10" and
-  // "FOX Sports 1" would collapse into the same thing. Their tvg-ids are
-  // affiliate call signs (ksaz.us, waga.us) rather than network names, so
-  // the id path missed too, and the alias gate discarded them before the
-  // preference bonus below ever applied. Local affiliates are exactly
-  // what an operator has to pin by hand, so they were also exactly the
-  // ones being thrown away.
-  const preferred = !!preferredStreamIds && preferredStreamIds.has(streamIdFromUrl(channel.streamUrl));
 
-  const aliases = new Set(network.aliases.map(normalizeNetworkName));
-  const coreName = normalizeNetworkName(stripChannelDecorations(channel.name));
-  const idCore = normalizeTvgId(channel.id);
-
-  const nameHit = aliases.has(coreName);
-  const idHit = aliases.has(idCore);
-  if (!nameHit && !idHit && !preferred) return null;
-
-  // Dead channels are never suggested, however well they otherwise match
-  // - unless pinned. DEAD_GROUP_HINTS already says these stay reachable
-  // so they "can be added by hand"; a default IS that, done once for
-  // every account instead of one at a time.
-  if (!preferred && isDeadChannel(channel.categories)) return null;
-
-  let score = 0;
-  if (nameHit) score += 100;
-  // Corroboration, not a second independent identification - so weighted
-  // well below the name match. It was originally 80, which made a
-  // name+id match so dominant that nothing else could reorder it: a 4K
-  // feed whose tvg-id happened to be a variant spelling could never
-  // outrank a plain-SD feed with the canonical id, which defeats the
-  // point of scoring quality at all.
-  if (idHit) score += 40;
-
-  // A US feed is what these leagues are broadcast on; a same-named feed
-  // from another country is carrying different programming entirely.
-  const country = tvgIdCountry(channel.id);
-  if (country && country !== 'us') score -= 60;
-  else score += 10;
-
-  score += scoreGroups(channel.categories);
-  score += detectQuality(channel.name).weight;
-
-  // Backups are real fallbacks worth offering, just never as the primary
-  // pick when the non-backup feed is right there beside it.
-  if (/\bbackup\b/i.test(foldSuperscripts(channel.name))) score -= 8;
-
-  // Applied last and large enough to clear MIN_SUGGESTION_SCORE on
-  // its own: a channel the user picked before is a stated
-  // preference, which beats anything this function can infer from
-  // a name.
-  if (preferred) score += PREFERRED_STREAM_BONUS;
-
-  return score;
-}
-
-// Below this, a channel is a technically-valid match but not one worth
-// proposing: a foreign feed of the right network, or a regional variant
-// buried in an unrelated group. Suggestions pad to 5 slots, and without a
-// floor that padding actively misleads - Dutch ESPN (score 80) was being
-// offered as the 4th and 5th ESPN suggestion purely because only three US
-// feeds existed to fill the list. Three good suggestions beat five where
-// two are wrong; anything below the floor is still reachable through
-// search.
-const MIN_SUGGESTION_SCORE = 100;
-
-// Returns up to `limit` suggested channels for one network, best first.
+// Which of a preset's channels this playlist actually has, for one
+// network, in the order the operator arranged them.
 //
-// Deliberately returns suggestions rather than applying them: for cable
-// networks the top hit is nearly always correct, but for broadcast
-// networks the "right" answer is whichever market the user actually wants
-// and nothing in the playlist can reveal that. So this proposes, and the
-// user disposes.
-function suggestChannelsForNetwork(networkKey, channels, options = {}) {
-  const guessLimit = options.limit || MAX_SUGGESTIONS;
-  const preferredStreamIds = options.preferredStreamIds instanceof Set
-    ? options.preferredStreamIds
-    : new Set(options.preferredStreamIds || []);
+// This used to guess as well - scoring every channel in the playlist on
+// how much its name looked like the network's, and padding each section
+// to five proposals. The guessing is gone. It was right often enough to
+// be trusted and wrong often enough to matter, and for a broadcast
+// network the "right" answer is whichever market somebody actually wants,
+// which no amount of name-matching can reveal. What is left is the part
+// that was never a guess: an operator pinned these exact ids, so they are
+// looked up and returned.
+//
+// Order is the operator's, not a ranking. A network's first link is the
+// first stream offered, so slot 1 is a decision rather than a
+// coincidence, and re-sorting would quietly promote a different market to
+// primary than the one that was chosen.
+function presetChannelsForNetwork(networkKey, channels, preferredStreamIds) {
+  const wanted = preferredStreamIds instanceof Set
+    ? preferredStreamIds
+    : new Set(preferredStreamIds || []);
+  if (wanted.size === 0) return [];
+  if (!NETWORK_BY_KEY.has(networkKey)) return [];
 
-  const network = NETWORK_BY_KEY.get(networkKey);
-  if (!network) return [];
+  const rank = new Map();
+  for (const id of wanted) rank.set(id, rank.size);
 
-  // The operator's own ordering, recovered from the position of each id
-  // in the defaults list. A Set iterates in insertion order and the
-  // defaults arrive as a JSON array built from the admin's links in the
-  // order they were arranged, so that order survives the whole trip
-  // intact - it just was not being read.
-  const preferredRank = new Map();
-  for (const id of preferredStreamIds) preferredRank.set(id, preferredRank.size);
-
-  const scored = [];
+  const found = [];
   for (const channel of channels || []) {
     const streamId = streamIdFromUrl(channel.streamUrl);
-    const preferred = preferredStreamIds.has(streamId);
-    const score = scoreChannelForNetwork(channel, network, preferredStreamIds);
-    if (score === null) continue;
-    // The floor asks whether a match is worth proposing. That question is
-    // already answered for a pinned channel - the operator proposed it.
-    // Leaving it to the +200 bonus to carry a pin over the floor was not
-    // enough: a Spanish-language Canadian affiliate in a penalised group
-    // lands under 100 even with the bonus, and would have been dropped
-    // for the same invisible reason the alias gate dropped the others.
-    if (!preferred && score < MIN_SUGGESTION_SCORE) continue;
-    scored.push({ channel, score, preferred, streamId });
+    if (!streamId || !wanted.has(streamId)) continue;
+    found.push({ channel, streamId });
   }
 
-  scored.sort((a, b) => b.score - a.score || a.channel.name.localeCompare(b.channel.name));
+  found.sort((a, b) => rank.get(a.streamId) - rank.get(b.streamId));
 
-  // Partitioned rather than sliced off the front, because MAX_SUGGESTIONS
-  // caps guesses and an instance default is not one. Slicing the combined
-  // list truncated a ten-channel default set to five, and since the
-  // dashboard can only fill from what this returns, "Use All Suggestions"
-  // on a new account silently applied half of what the operator saved -
-  // with no indication that the rest existed.
-  //
-  // Not fixed by simply widening the slice and trusting the +200 bonus to
-  // float every default to the top: that holds only while the bonus
-  // outruns every base score, which is a relationship between two
-  // constants that have each been tuned before. Keeping the two sets
-  // apart states the rule instead of depending on the arithmetic.
-  //
-  // MAX_LINKS_PER_NETWORK is the real ceiling and still applies - it is
-  // what storage will accept, so proposing more than that would offer
-  // links that could never be saved.
-  // Guesses stay in score order - ranking is all this function knows
-  // about them. Defaults are put back into the operator's order instead,
-  // because for them the ranking has already been done by hand and slot 1
-  // is a decision, not a coincidence: a network's first link is the first
-  // stream offered, so re-sorting them by score quietly promoted a
-  // different market to primary than the one that was chosen.
-  const preferredEntries = scored.filter(s => s.preferred)
-    .sort((a, b) => preferredRank.get(a.streamId) - preferredRank.get(b.streamId));
-  const guessEntries = scored.filter(s => !s.preferred);
-  const chosen = [
-    ...preferredEntries,
-    ...guessEntries.slice(0, Math.max(0, guessLimit - preferredEntries.length)),
-  ].slice(0, MAX_LINKS_PER_NETWORK);
-
-  return chosen.map(({ channel, score, preferred }) => ({
+  return found.slice(0, MAX_LINKS_PER_NETWORK).map(({ channel }) => ({
     ...makeLinkEntry({
       url: channel.streamUrl,
       tvgId: channel.id,
@@ -1304,21 +1180,17 @@ function suggestChannelsForNetwork(networkKey, channels, options = {}) {
       // time, so rotating a password does not strand every saved channel.
       streamId: channel.streamId,
     }),
-    score,
-    preferred,
     quality: detectQuality(channel.name).label,
     groups: channel.categories || [],
   }));
 }
 
-function suggestAllNetworks(channels, options = {}) {
-  const defaults = options.defaults || {};
+// Every network's share of a set of pinned ids.
+function presetChannelsForAll(channels, defaults = {}) {
   const out = {};
   for (const network of NETWORKS) {
-    out[network.key] = suggestChannelsForNetwork(network.key, channels, {
-      limit: options.limit,
-      preferredStreamIds: new Set(defaults[network.key] || []),
-    });
+    out[network.key] = presetChannelsForNetwork(
+      network.key, channels, new Set(defaults[network.key] || []));
   }
   return out;
 }
@@ -1426,6 +1298,8 @@ function searchChannels(query, channels, options = {}) {
 module.exports = {
   NETWORKS,
   MAX_LINKS_PER_NETWORK,
+  presetChannelsForNetwork,
+  presetChannelsForAll,
   normalizeNetworkName,
   isStreamingOnlyName,
   extractNationalBroadcasts,
@@ -1436,8 +1310,6 @@ module.exports = {
   resolveLinkEntry,
   resolveNetworkLinks,
   getNetworkLabel,
-  MIN_SUGGESTION_SCORE,
-  MAX_SUGGESTIONS,
   MAX_SAVED_CHANNELS,
   PREFERRED_STREAM_BONUS,
   streamIdFromUrl,
@@ -1465,9 +1337,6 @@ module.exports = {
   foldSuperscripts,
   detectQuality,
   normalizeTvgId,
-  scoreChannelForNetwork,
-  suggestChannelsForNetwork,
-  suggestAllNetworks,
   searchChannels,
   parseSearchQuery,
   matchesPhrase,

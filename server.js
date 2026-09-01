@@ -3747,15 +3747,19 @@ app.post('/api/networks/suggest', async (req, res) => {
     await streamcheck.ensureProvider(auth.user.streamcheckProvider);
   }
 
-  const suggestions = networks.suggestAllNetworks(channelsForSearch(auth.user, auth.source.channels), {
-    defaults: mergedNetworkDefaults()
-  });
-  for (const key of Object.keys(suggestions)) {
-    suggestions[key] = enrichWithStreamcheck(auth.user, suggestions[key]);
+  // What every saved preset pins, resolved against this playlist. Not
+  // proposals any more - the guessing is gone - so this is only ever the
+  // channels an operator chose by hand, and the dashboard offers them
+  // through Apply on a named preset rather than filling anything in on
+  // its own.
+  const presetChannels = networks.presetChannelsForAll(
+    channelsForSearch(auth.user, auth.source.channels), mergedNetworkDefaults());
+  for (const key of Object.keys(presetChannels)) {
+    presetChannels[key] = enrichWithStreamcheck(auth.user, presetChannels[key]);
   }
   return res.json({
     success: true,
-    suggestions,
+    presetChannels,
     presets: describePresets(),
     // Everything already configured, measured. Keyed by URL because that
     // is what the dashboard draws its badges against.
@@ -3822,6 +3826,29 @@ app.post('/api/networks/defaults', async (req, res) => {
   if (!auth) return;
 
   const action = req.body.action || 'list';
+
+  // One preset's channels, resolved against this account's playlist, so
+  // the dashboard can apply it. Resolved here rather than shipped as raw
+  // ids because only the server can turn an id into a channel with a
+  // name, a group and a URL - and a preset saved against another
+  // provider resolves to nothing here, which is the honest answer.
+  if (action === 'resolve') {
+    const preset = networkDefaults.presets.find(p => p.id === req.body.id);
+    if (!preset) return res.status(404).json({ error: 'That preset no longer exists.' });
+
+    const channels = channelsForSearch(auth.user, auth.source.channels);
+    const resolved = {};
+    let found = 0;
+    let pinned = 0;
+    for (const [networkKey, ids] of Object.entries(preset.networks)) {
+      pinned += ids.length;
+      const list = enrichWithStreamcheck(auth.user,
+        networks.presetChannelsForNetwork(networkKey, channels, new Set(ids)));
+      if (list.length > 0) { resolved[networkKey] = list; found += list.length; }
+    }
+
+    return res.json({ success: true, name: preset.name, networks: resolved, found, pinned });
+  }
 
   if (action === 'save') {
     const name = String(req.body.name || '').trim().slice(0, 60);

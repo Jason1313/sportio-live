@@ -245,10 +245,6 @@
               <i class="fa-solid fa-thumbtack"></i>
               Defaults
             </button>
-            <button id="network-suggest-all-btn" onclick="applyAllNetworkSuggestions()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
-              <i class="fa-solid fa-wand-magic-sparkles"></i>
-              Use All Suggestions
-            </button>
           </div>
         </div>
         <!-- Published measurements. streamcheck.pro sweeps a set of IPTV
@@ -275,13 +271,13 @@
 
       <!-- Which playlist categories any search may look in. Saved on the
            account, so it is chosen once and then applies everywhere -
-           the suggestions and channel search here, and the search in the
+           the channel search here, and the search in the
            watch portal, which goes through the same endpoint. -->
       <div id="network-categories-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-4">
         <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Searchable categories</h4>
         <p class="text-[11px] text-[#e6e6e6]/45 mb-3 leading-relaxed">
-          Tick the categories worth searching and the rest stop appearing anywhere &mdash; suggestions,
-          channel search here, and the search in the watch portal. Channels you have already saved keep
+          Tick the categories worth searching and the rest stop appearing anywhere &mdash; channel
+          search here, and the search in the watch portal. Channels you have already saved keep
           working whatever you pick. With nothing ticked, everything is searched.
         </p>
         <div class="flex gap-2 mb-2">
@@ -305,7 +301,7 @@
       <div id="quality-filter-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-4">
         <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Link filters</h4>
         <p class="text-[11px] text-[#e6e6e6]/45 mb-3 leading-relaxed">
-          Drops channels from every search and every suggestion, here and in the watch portal, using
+          Drops channels from every search, here and in the watch portal, using
           the published data for your provider. Counts are over your own channels, after the category
           filter. Leaving a whole row ticked means it is not filtering on that at all &mdash; and
           channels the sweep never covered are kept unless you say otherwise below.
@@ -331,7 +327,8 @@
       <div id="network-defaults-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-4">
         <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Default presets</h4>
         <p class="text-[11px] text-[#e6e6e6]/45 mb-3 leading-relaxed">
-          Pins the channels you have configured as the suggestions every new account starts from.
+          Pins the channels you have configured so they can be applied to another account in one
+          click. Nothing is filled in automatically &mdash; press Apply on the preset you want.
           Stream ids only &mdash; no URLs and no provider credentials. Those ids are numbered by your
           IPTV provider, so a preset applies to that provider alone; save a separate one for each,
           and delete any that no longer apply.
@@ -521,7 +518,7 @@
     // this page picks it up automatically.
     let networkRegistry = [];
     let networkMaxLinks = 5;
-    let networkSuggestions = {};   // key -> [channel, ...]
+    let presetChannels = {};       // key -> [channel, ...] pinned by a preset
     let networkSearchResults = {}; // key -> [channel, ...]
     let networkStatus = {};        // key -> { ok, healed[], problems[] }
     let networkExpanded = {};      // key -> bool
@@ -1643,18 +1640,17 @@
         return;
       }
 
-      networkSuggestions = (suggestRes.body && suggestRes.body.suggestions) || {};
+      presetChannels = (suggestRes.body && suggestRes.body.presetChannels) || {};
       networkStatus = (statusRes.body && statusRes.body.status) || {};
 
       // Published readings, applied before anything is drawn: the ones
       // riding on the suggestions, and the ones for channels already
       // configured, which arrive keyed by URL because they are not part
       // of any list this response carries.
-      for (const list of Object.values(networkSuggestions)) absorbPublishedEntries(list);
+      for (const list of Object.values(presetChannels)) absorbPublishedEntries(list);
       const linkQuality = (suggestRes.body && suggestRes.body.linkQuality) || {};
       for (const [url, quality] of Object.entries(linkQuality)) absorbPublishedQuality(url, quality);
       applyPublishedToSavedLinks(linkQuality);
-      autoFillNetworkSuggestions();
       seedProbeResultsFromSavedLinks();
       renderNetworkLinks();
 
@@ -1744,45 +1740,11 @@
         <div class="bg-[#3b4d58]/40 border border-[#c9992e]/40 rounded-lg px-4 py-5 text-center">
           <i class="fa-solid fa-spinner fa-spin text-[#c9992e] mb-2"></i>
           <p class="text-xs text-[#e6e6e6]/75 mb-1 font-semibold">${escapeHtml(message || 'Your playlist is still loading.')}</p>
-          <p class="text-[11px] text-[#e6e6e6]/45 mb-3">Channel search and suggestions need the playlist. Your saved links are safe and unchanged.</p>
+          <p class="text-[11px] text-[#e6e6e6]/45 mb-3">Channel search needs the playlist. Your saved links are safe and unchanged.</p>
           <button onclick="loadNetworkLinks()" class="bg-[#3b8fc4] hover:bg-[#4fa3d8] text-xs font-bold py-2 px-4 rounded-lg transition">
             <i class="fa-solid fa-rotate mr-1.5"></i>Retry
           </button>
         </div>`;
-    }
-
-    // Fills in suggestions without the user having to ask, which is the
-    // sensible default given the suggestions are right nearly all of the
-    // time and an unconfigured network does nothing.
-    //
-    // Only ever touches a network with NO SAVED KEY AT ALL. A saved empty
-    // array means the user deliberately cleared that network, and
-    // refilling it on the next page load would make removing a channel
-    // impossible - it would silently come back. The "Use suggestions"
-    // button stays available for putting them back on purpose.
-    //
-    // Runs before the first render so the section paints already filled
-    // in, rather than visibly populating a moment later.
-    function autoFillNetworkSuggestions() {
-      if (!activeUser) return;
-      if (!activeUser.networkLinks) activeUser.networkLinks = {};
-
-      let filledNetworks = 0;
-      for (const network of networkRegistry) {
-        if (Array.isArray(activeUser.networkLinks[network.key])) continue;
-        const suggestions = networkSuggestions[network.key] || [];
-        if (suggestions.length === 0) continue;
-        activeUser.networkLinks[network.key] = suggestions.slice(0, networkMaxLinks);
-        filledNetworks++;
-      }
-
-      if (filledNetworks > 0) {
-        // Staged locally, not saved - consistent with every other panel
-        // on this page. Marking dirty is what tells the user there's
-        // something to commit.
-        markDashboardDirty();
-        showStatus(`Filled in suggested channels for ${filledNetworks} network${filledNetworks === 1 ? '' : 's'}. Review, then Save.`);
-      }
     }
 
     // The trailing id from a stream URL ("...\/1239006.ts" -> "1239006").
@@ -1913,13 +1875,15 @@
 
     function buildNetworkActionsHtml(key) {
       const links = readNetworkLinks(key);
-      const suggestions = networkSuggestions[key] || [];
+      const pinned = presetChannels[key] || [];
 
-      const suggestBtn = suggestions.length > 0
-        ? `<button onclick="applyNetworkSuggestions('${key}')" class="text-[11px] font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
-             <i class="fa-solid fa-wand-magic-sparkles"></i>Use ${suggestions.length} suggestion${suggestions.length === 1 ? '' : 's'}
-           </button>`
-        : `<span class="text-[11px] text-[#e6e6e6]/35 italic">No automatic matches - use search below</span>`;
+      // Nothing is proposed here any more. A network is filled by
+      // applying a named preset, or by searching below - both of which
+      // are the user saying which channel they want, which is the one
+      // thing a name match could never tell us.
+      const suggestBtn = pinned.length > 0
+        ? `<span class="text-[11px] text-[#e6e6e6]/45">${pinned.length} channel${pinned.length === 1 ? '' : 's'} available from a saved preset</span>`
+        : `<span class="text-[11px] text-[#e6e6e6]/35 italic">Search below to add a channel</span>`;
 
       return `
         <div class="flex items-center justify-between gap-3 px-1 pt-1">
@@ -2186,47 +2150,6 @@
       body.classList.toggle('hidden', !networkExpanded[key]);
       const chevron = document.querySelector(`#network-header-${key} i.fa-chevron-down`);
       if (chevron) chevron.classList.toggle('rotate-180', !!networkExpanded[key]);
-    }
-
-    // Suggestions never silently replace what's already there - they're
-    // appended, skipping anything already saved, so re-running this after
-    // hand-picking a channel can't wipe that choice out.
-    function applyNetworkSuggestions(key) {
-      const links = getNetworkLinks(key);
-      const existing = new Set(links.map(l => l.url));
-      let added = 0;
-      for (const suggestion of networkSuggestions[key] || []) {
-        if (links.length >= networkMaxLinks) break;
-        if (existing.has(suggestion.url)) continue;
-        links.push(suggestion);
-        existing.add(suggestion.url);
-        added++;
-      }
-      if (added > 0) markDashboardDirty();
-      networkExpanded[key] = true;
-      const openBody = document.getElementById(`network-body-${key}`);
-      if (openBody) openBody.classList.remove('hidden');
-      refreshNetworkLinksRegion(key);
-    }
-
-    function applyAllNetworkSuggestions() {
-      networkRegistry.forEach(n => {
-        // Skipped before touching state: getNetworkLinks() creates the
-        // array, and creating an empty one for a network with nothing to
-        // suggest would record it as deliberately cleared.
-        if ((networkSuggestions[n.key] || []).length === 0) return;
-        const links = getNetworkLinks(n.key);
-        const existing = new Set(links.map(l => l.url));
-        for (const suggestion of networkSuggestions[n.key] || []) {
-          if (links.length >= networkMaxLinks) break;
-          if (existing.has(suggestion.url)) continue;
-          links.push(suggestion);
-          existing.add(suggestion.url);
-        }
-      });
-      markDashboardDirty();
-      renderNetworkLinks();
-      showStatus('Suggested channels filled in. Review them, then Save.');
     }
 
     function removeNetworkLink(key, index) {
@@ -2812,12 +2735,58 @@
                 preset.source ? ` &middot; <span class="font-mono">${escapeHtml(preset.source)}</span>` : ''}
             </span>
           </span>
+          <button onclick="applyDefaultsPreset('${escapeHtml(preset.id)}')"
+                  title="Fill the network sections from this preset"
+                  class="text-[11px] font-bold py-1.5 px-3 rounded-lg bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 transition shrink-0">
+            Apply
+          </button>
           <button onclick="deleteDefaultsPreset('${escapeHtml(preset.id)}', '${escapeHtml(preset.name)}')"
                   title="Delete this preset"
                   class="text-xs px-1.5 py-1 rounded text-[#e56a6a]/70 hover:text-[#e56a6a] hover:bg-[#3b4d58] transition shrink-0">
             <i class="fa-solid fa-xmark"></i>
           </button>
         </div>`).join('');
+    }
+
+    // Fills the network sections from one preset.
+    //
+    // Appended rather than replacing: a preset is a starting point, and
+    // silently discarding channels somebody added by hand would make
+    // Apply a destructive button that does not look like one. Anything
+    // already there stays, and duplicates are skipped.
+    async function applyDefaultsPreset(id) {
+      const { ok, data } = await postDefaults({ action: 'resolve', id });
+      if (!ok || !data || !data.success) {
+        showStatus((data && data.error) || 'Could not read that preset.', true);
+        return;
+      }
+
+      if (data.found === 0) {
+        showStatus(`None of "${data.name}"'s ${data.pinned} channel(s) are in this playlist - it was probably saved against another provider.`, true);
+        return;
+      }
+
+      if (!activeUser.networkLinks) activeUser.networkLinks = {};
+      let added = 0;
+      for (const [key, channels] of Object.entries(data.networks || {})) {
+        const links = getNetworkLinks(key);
+        const existing = new Set(links.map(l => l.url));
+        for (const channel of channels) {
+          if (links.length >= networkMaxLinks) break;
+          if (existing.has(channel.url)) continue;
+          links.push(channel);
+          existing.add(channel.url);
+          added++;
+        }
+      }
+
+      if (added === 0) {
+        showStatus(`Every channel in "${data.name}" is already configured.`);
+        return;
+      }
+      markDashboardDirty();
+      renderNetworkLinks();
+      showStatus(`Added ${added} channel${added === 1 ? '' : 's'} from "${data.name}". Review, then Save.`);
     }
 
     async function postDefaults(body) {
@@ -2876,8 +2845,8 @@
         `Stream ids only - no URLs and no provider credentials.\n\n` +
         (replacing
           ? 'A preset of that name already exists and will be overwritten.'
-          : 'Other presets are left alone. Every preset contributes its channels to the suggestions, ' +
-            'and the ones belonging to another provider match nothing here.'));
+          : 'Other presets are left alone. A preset is applied from this panel by name, ' +
+            'and one belonging to another provider matches nothing here.'));
       if (!ok) return;
 
       try {
