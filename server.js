@@ -1463,6 +1463,25 @@ app.use(['/poster', '/landscape', '/logo', '/network'], cacheRenderedSvg);
 // in registration order, so the more specific one has to come first or it
 // would never be reached. The league-scoped path has an extra segment and
 // cannot collide, but is kept here beside its twin.
+// A search bucket's terms, saved on their own rather than through the
+// whole-account update - the panel that edits them sits inside a network
+// section and has nothing else to send.
+app.post('/api/networks/search-terms/save', async (req, res) => {
+  const auth = await authenticateForChannels(req, res);
+  if (!auth) return;
+
+  const key = String(req.body.key || '').toUpperCase();
+  if (!networks.isSearchNetwork(key)) {
+    return res.status(400).json({ error: 'That section does not hold search terms.' });
+  }
+
+  const merged = { ...readSearchTerms(auth.user), [key]: req.body.terms };
+  auth.user.searchTerms = readSearchTerms({ searchTerms: merged });
+  await saveUserConfigs();
+
+  return res.json({ success: true, searchTerms: readSearchTerms(auth.user) });
+});
+
 // A promotion's card. Drawn from its name and number, with no artwork
 // fetched: the promotion's own graphics come in mixed shapes, none of
 // them 2:3, and a poster built around them was mostly letterboxing.
@@ -2741,6 +2760,10 @@ async function fetchWrestlingEvents(hostUrl, userTimeZone) {
       broadcastNames: ['Fox Nation'],
       nationalBroadcasts: ['Fox Nation'],
       network: null,
+      // Which bucket in the dashboard holds this card's channels. The
+      // wrestling section will hold more than one promotion, so the
+      // event names its own rather than the sport standing in for it.
+      searchKey: 'RAF',
       poster: `${hostUrl}/poster/wrestling/raf.svg?${art}`,
       background: `${hostUrl}/landscape/wrestling.svg`,
       logo: `${hostUrl}/logo/wrestling.svg`,
@@ -3052,7 +3075,8 @@ async function getXtreamChannelSource(user) {
 // which categories to ask for - which for UFC means one small request
 // covering the Paramount+ PPV group, rather than pulling the whole
 // service down to find a handful of channels in it.
-// Standing searches an account has written for itself, per sport.
+// Standing searches an account has written for itself, keyed by the
+// bucket they belong to rather than by sport.
 //
 // A promotion like RAF has no channel to pin. Its cards turn up in a
 // playlist as whatever the provider felt like calling them that week -
@@ -3060,29 +3084,46 @@ async function getXtreamChannelSource(user) {
 // channel - so a curated list of stream ids goes stale between events
 // while a search for the promotion's name does not.
 //
+// Keyed per bucket because the wrestling section will hold college duals
+// beside the promotions, and a search for one finds nothing for the
+// other. An event says which bucket it belongs to; nothing is inferred
+// from its sport.
+//
 // Shaped like the built-in AUTO_SEARCH entries so the stream route can
 // use either without caring which it got.
 function readSearchTerms(user) {
   const raw = (user && user.searchTerms) || {};
   const out = {};
-  for (const [sport, terms] of Object.entries(raw)) {
+  for (const [bucket, terms] of Object.entries(raw)) {
     if (!Array.isArray(terms)) continue;
     const cleaned = [...new Set(terms
       .filter(t => typeof t === 'string')
       .map(t => t.trim())
       .filter(t => t.length >= 2 && t.length <= 60))].slice(0, 20);
-    if (cleaned.length) out[String(sport).toUpperCase()] = cleaned;
+    if (cleaned.length) out[String(bucket).toUpperCase()] = cleaned;
   }
+
+  // Terms were briefly keyed by sport rather than by bucket, so an
+  // account set up in that window has its RAF terms filed under
+  // WRESTLING. Carried across rather than lost - and only when the
+  // bucket is empty, so it stops mattering the moment anything is saved
+  // through the section itself.
+  if (out.WRESTLING && !out.RAF) out.RAF = out.WRESTLING;
+
   return out;
 }
 
 // The account's own terms win over the built-in ones. Somebody who has
-// written a list for a sport has said what they want searched, and
-// quietly unioning that with a default would put back the results the
-// list was narrowed to exclude.
-function autoSearchFor(user, sportKey) {
-  const own = readSearchTerms(user)[String(sportKey || '').toUpperCase()];
+// written a list has said what they want searched, and quietly unioning
+// that with a default would put back the results the list was narrowed
+// to exclude.
+function autoSearchFor(user, bucketKey, sportKey) {
+  const own = readSearchTerms(user)[String(bucketKey || '').toUpperCase()];
   if (own && own.length) return { terms: own, groups: [] };
+  // A search bucket has no built-in fallback: an empty list means the
+  // account has not set it up, and running a sport-wide default in its
+  // place would serve one promotion's channels for another's card.
+  if (networks.isSearchNetwork(bucketKey)) return null;
   return networks.getAutoSearch(sportKey);
 }
 
@@ -4872,7 +4913,11 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   //
   // Resolved here, alongside the links, so buildStreamList receives both
   // sources at once and decides the order in one place.
-  const autoSearch = promotion ? promotion.autoSearch : autoSearchFor(user, sportKey);
+  // An event can name the bucket its channels live in - a promotion
+  // within a section that holds several. Only that bucket's terms run,
+  // so one promotion's card never reaches for another's channels.
+  const searchKey = game.searchKey || sportKey;
+  const autoSearch = promotion ? promotion.autoSearch : autoSearchFor(user, searchKey, sportKey);
   let autoStreams = [];
   if (autoSearch) {
     const autoChannels = await fetchAutoSearchChannels(user, autoSearch, m3uSource);

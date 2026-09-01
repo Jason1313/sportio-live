@@ -81,7 +81,32 @@ const NETWORKS = [
   // broadcast literally named "UFC" can never resolve to this slot - it's
   // only ever reached explicitly, by the sport.
   { key: 'UFC', label: 'UFC', kind: 'event', sport: 'UFC', aliases: ['UFC', 'UFC Fight Pass', 'UFC PPV'] },
+
+  // A search bucket. Like the event bucket above in that it is bound to
+  // events rather than to a broadcaster, and unlike it in holding search
+  // terms instead of pinned channels.
+  //
+  // A promotion's card appears in a playlist under whatever the provider
+  // called it that week - "RAF 14" one month, the broadcaster's own
+  // channel the next - so there is no stable stream id to pin. The terms
+  // are what stays true between events.
+  //
+  // Bound to the promotion, not to the sport: the wrestling section is
+  // meant to hold college duals too, and a search for this promotion's
+  // name would find nothing for those and vice versa. Each gets its own
+  // bucket, reached by the searchKey the event carries.
+  { key: 'RAF', label: 'Real American Freestyle', kind: 'search', sport: 'WRESTLING',
+    aliases: [] },
 ];
+
+// Buckets that hold search terms rather than channels. The dashboard
+// draws them differently and the stream route resolves them differently,
+// so both need to ask.
+const SEARCH_NETWORK_KEYS = new Set(NETWORKS.filter(n => n.kind === 'search').map(n => n.key));
+
+function isSearchNetwork(key) {
+  return SEARCH_NETWORK_KEYS.has(String(key || '').toUpperCase());
+}
 
 // Names that are streaming services, never a linear channel the IPTV
 // provider would carry under that name. These must NOT resolve to a
@@ -1427,6 +1452,8 @@ module.exports = {
   AUTO_SEARCH,
   MAX_AUTO_SEARCH_RESULTS,
   getAutoSearch,
+  isSearchNetwork,
+  SEARCH_NETWORK_KEYS,
   PROMOTIONS,
   getPromotionForEvent,
   autoSearchChannels,
