@@ -3039,6 +3039,7 @@ async function getXtreamChannelSource(user) {
   const inFlight = xtreamSourceInFlight.get(key);
   const pending = inFlight || (async () => {
     try {
+      const startedAt = Date.now();
       const catalog = await fetchXtreamCatalog(user);
       // An empty list means the provider answered with nothing useful -
       // down, rate limiting, credentials rejected. Serving that as the
@@ -3049,7 +3050,8 @@ async function getXtreamChannelSource(user) {
         return cached;
       }
       xtreamSourceCache.set(key, catalog);
-      console.log(`[Xtream] Catalog fetched: ${catalog.streams.length} stream(s), ${catalog.categories.length} category(ies)`);
+      console.log(`[Xtream] Catalog fetched: ${catalog.streams.length} stream(s),` +
+        ` ${catalog.categories.length} category(ies) in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
       return catalog;
     } catch (err) {
       console.error('[Xtream] Failed to fetch the catalog:', err.message);
@@ -5097,6 +5099,68 @@ async function warmGameCaches() {
   console.log(`[Games] Warmed ${warmed}/${pairs.length} league schedules.`);
 }
 
+// The provider's channel list, kept warm.
+//
+// It is cached for half an hour and nothing was refreshing it, so the
+// first visit after a quiet spell paid for the whole catalog - tens of
+// thousands of channels over two API calls - before the page could
+// answer. Every device afterwards was fast, which is what made it look
+// like a client-side warm-up rather than one cold fetch on the server.
+//
+// Warmed a little inside the lifetime rather than on it, so an entry is
+// replaced before it can expire under somebody's request.
+const CHANNEL_SOURCE_WARM_MS = 25 * 60 * 1000;
+
+// One account per provider. Several accounts commonly share one service,
+// and the cache is keyed by provider rather than by account, so warming
+// each account separately would fetch the same catalog several times.
+function accountsToWarm() {
+  const byProvider = new Map();
+  for (const user of Object.values(userConfigs)) {
+    if (user.connectionType === 'm3u') {
+      const url = user.m3u && user.m3u.playlistUrl;
+      if (url && !byProvider.has(`m3u|${url}`)) byProvider.set(`m3u|${url}`, user);
+      continue;
+    }
+    if (!user.xtream || !user.xtream.url) continue;
+    const key = `xtream|${xtreamCacheKey(user)}`;
+    if (!byProvider.has(key)) byProvider.set(key, user);
+  }
+  return [...byProvider.values()];
+}
+
+async function warmChannelSources() {
+  const users = accountsToWarm();
+  if (users.length === 0) return;
+
+  let warmed = 0;
+  for (const user of users) {
+    try {
+      if (user.connectionType === 'm3u') {
+        // M3U already has its own refresh schedule; this only covers the
+        // case where that has not run yet, and it declines to refetch
+        // something recent on its own.
+        warmM3uSourceInBackground(user);
+        warmed++;
+        continue;
+      }
+      const source = await getXtreamChannelSource(user);
+      if (source) warmed++;
+    } catch (err) {
+      console.error(`[Warm] Could not warm a channel source: ${err.message}`);
+    }
+  }
+  console.log(`[Warm] Channel source ready for ${warmed}/${users.length} provider(s).`);
+}
+
+function scheduleChannelSourceWarm() {
+  setInterval(() => { warmChannelSources(); }, CHANNEL_SOURCE_WARM_MS).unref();
+  // Shortly after boot, not at it: a restart should have the catalog in
+  // hand before the first visitor rather than because of them, but the
+  // process should finish starting first.
+  setTimeout(() => { warmChannelSources(); }, 20 * 1000).unref();
+}
+
 function scheduleGameCacheWarm() {
   setInterval(() => { warmGameCaches(); }, GAME_CACHE_WARM_MS).unref();
   // Not at the moment of boot: the first request in is usually the
@@ -5152,3 +5216,4 @@ function scheduleStreamcheckRefresh() {
 
 scheduleStreamcheckRefresh();
 scheduleGameCacheWarm();
+scheduleChannelSourceWarm();
