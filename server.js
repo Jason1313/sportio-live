@@ -2468,6 +2468,20 @@ const FBS_GROUP_ID = '80';
 const CONFERENCES_URL =
   'https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard/conferences';
 
+// The Power 4, by ESPN's own conference ids: ACC, Big 12, Big Ten, SEC.
+//
+// Written down rather than read, because it is not a thing ESPN
+// publishes - there is no flag on a conference saying it is one of the
+// four, and there could not be: "Power 4" is an editorial grouping that
+// changes when the sport rearranges itself, not a property of the
+// competition. This is the one place it is asserted.
+//
+// It no longer decides which games exist - that gate is gone and the
+// whole FBS slate is carried - it decides which games the watch portal
+// opens on. The Pac-12 (id 9) is deliberately absent: its current
+// membership is the rebuilt one, which is not what Power 4 means.
+const P4_CONFERENCE_IDS = new Set(['1', '4', '5', '8']);
+
 // A fixture list, effectively: conferences change once a year and the
 // endpoint is small. Long cache, one in-flight fetch, and a failure keeps
 // whatever was last read.
@@ -2486,6 +2500,10 @@ async function fetchConferences() {
       // Conference" - and is what ESPN itself puts on a scoreboard.
       name: String(c.shortName || c.name || '').trim(),
       fullName: String(c.name || '').trim(),
+      // Sent to the portal rather than worked out there, so the grouping
+      // is asserted once on the server instead of a second copy of four
+      // ids drifting in a page.
+      p4: P4_CONFERENCE_IDS.has(String(c.groupId || c.id || '')),
     }))
     .filter(c => c.id && c.name)
     .sort((a, b) => a.name.localeCompare(b.name));
