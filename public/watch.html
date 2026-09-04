@@ -1548,8 +1548,13 @@
     // A stream with no url is an informational entry from the addon (for
     // example "on FOX, no channels configured"), not something playable.
     if (!s.url) {
+      // Joined with a dash rather than a space. These two fields are a
+      // headline and its explanation, and running them together made one
+      // long sentence with no seam in it - "No results Only on ESPN+"
+      // reads as a stutter before it reads as two facts.
+      const detail = [s.name, s.title].map(v => String(v || '').trim()).filter(Boolean);
       return `<div class="px-3 py-2.5 text-[11px] text-[#c9992e] leading-snug">
-                ${escapeHtml(s.name || '')} ${escapeHtml(s.title || '')}
+                ${escapeHtml(detail.join(' - '))}
               </div>`;
     }
     return `<div class="stream-row flex items-center gap-2 px-1 rounded-lg hover:bg-white/5 transition">

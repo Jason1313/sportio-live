@@ -6356,19 +6356,6 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   // worked. An entry here is not playable, so it says so plainly rather
   // than looking like a stream that simply failed.
   const finalStreams = [...streams];
-  // A network whose every saved link has gone missing is not an
-  // unconfigured one. Showing both warnings would be two rows for one
-  // situation, and only the broken-link one names what actually happened.
-  if (mode === 'no-links' && linkProblems.length === 0) {
-    finalStreams.unshift({ name: `\u26A0\uFE0F ${headline}`, title: note, url: '' });
-  }
-  if (linkProblems.length > 0) {
-    finalStreams.unshift({
-      name: '\u26A0\uFE0F Broken links',
-      title: `${linkProblems.length} saved ${networks.getNetworkLabel(networkKey)} channel(s) are missing from your playlist.`,
-      url: ''
-    });
-  }
 
   // --- Team search ---
   //
@@ -6376,6 +6363,10 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   // game that already has a channel does not need forty guesses appended
   // to it, and a term as broad as a team nickname is only worth showing
   // when the alternative is an empty panel.
+  //
+  // Runs BEFORE the warning row is written, because the warning says
+  // whether there is a team search below it - and a line promising one
+  // that found nothing is worse than no line at all.
   //
   // Returned in its own field rather than mixed into `streams`. The two
   // are not the same kind of answer - one is a channel someone chose, the
@@ -6391,6 +6382,23 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
       // filtered out of every other search should not reappear here.
       teamSearch = teamSearchFor(user, game, channelsForSearch(user, source.channels));
     }
+  }
+
+  // A network whose every saved link has gone missing is not an
+  // unconfigured one. Showing both warnings would be two rows for one
+  // situation, and only the broken-link one names what actually happened.
+  if (mode === 'no-links' && linkProblems.length === 0) {
+    const guesses = (teamSearch && teamSearch.results.length > 0)
+      ? ' - Automatic team name search below.'
+      : '';
+    finalStreams.unshift({ name: `\u26A0\uFE0F ${headline}`, title: `${note}${guesses}`, url: '' });
+  }
+  if (linkProblems.length > 0) {
+    finalStreams.unshift({
+      name: '\u26A0\uFE0F Broken links',
+      title: `${linkProblems.length} saved ${networks.getNetworkLabel(networkKey)} channel(s) are missing from your playlist.`,
+      url: ''
+    });
   }
 
   console.log(`[Stream] ${sportKey}${promotion ? `/${promotion.key}` : ''} ${idVal} network=${networkKey || 'none'} mode=${mode} links=${linkStreams.length} auto=${autoStreams.length} -> ${finalStreams.length}` +

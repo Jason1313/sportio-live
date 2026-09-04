@@ -928,19 +928,16 @@ function describeNothingFound(networkKey, nationalBroadcasts) {
     };
   }
 
+  // Naming the service is the whole value of this line. Whether it is a
+  // streaming tier or a linear network with no slot is a distinction the
+  // reader does not need drawn for them - "Only on ESPN+" already says
+  // everything actionable, which is that there is nothing to pin.
   const broadcasts = nationalBroadcasts || [];
   if (broadcasts.length > 0) {
-    const names = broadcasts.map(b => b.name).join(', ');
-    const allStreaming = broadcasts.every(b => b.type === 'Streaming');
-    return {
-      headline: 'No results',
-      note: allStreaming
-        ? `Listed on ${names} - streaming only, so there is no channel to pin.`
-        : `Listed on ${names} - no channel slot for it.`,
-    };
+    return { headline: 'No results', note: `Only on ${broadcasts.map(b => b.name).join(', ')}` };
   }
 
-  return { headline: 'No results', note: 'No national broadcast is listed for this game.' };
+  return { headline: 'No results', note: 'No national broadcast listed' };
 }
 
 // ---------------------------------------------------------------------
