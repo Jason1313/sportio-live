@@ -878,13 +878,13 @@ function dedupeByUrl(streams) {
 // - written deliberately, scoped to a named group - which is why it
 // survived the removal of the tier system and is the one thing that can
 // find a channel nobody configured.
-function buildStreamList({ networkKey, linkStreams, autoStreams }) {
+function buildStreamList({ networkKey, linkStreams, autoStreams, nationalBroadcasts }) {
   const links = linkStreams || [];
   const auto = autoStreams || [];
   const streams = dedupeByUrl([...links, ...auto]);
 
   if (links.length > 0) {
-    return { streams, mode: 'links-only', note: '' };
+    return { streams, mode: 'links-only', headline: '', note: '' };
   }
 
   // A standing search found channels and no links were pinned. That is
@@ -893,19 +893,54 @@ function buildStreamList({ networkKey, linkStreams, autoStreams }) {
   // different name every week is searched for, not pinned. Warning
   // "not configured" above four playable streams contradicts itself.
   if (auto.length > 0) {
-    return { streams, mode: 'search-only', note: '' };
+    return { streams, mode: 'search-only', headline: '', note: '' };
   }
 
-  // Nothing configured and nothing found. Said plainly rather than
-  // returning an empty list that looks like a failure - and it names the
-  // network, because the useful next action is to go and fill that slot.
+  // Nothing playable. Which of three quite different situations it is
+  // matters, because only one of them is something the user can fix, and
+  // a single message covering all three sent people to the dashboard to
+  // configure a channel that could not exist.
+  //
+  //   - A network slot resolved and is empty. Actionable: go and fill it.
+  //   - A national broadcast exists but maps to no slot, because it is a
+  //     streaming tier (SECN+, ESPN+) or a network with no slot defined.
+  //     Nothing to configure; the useful thing is to say what it IS on,
+  //     since the alternative is the user going and looking it up to find
+  //     out why their ESPN links did not fire.
+  //   - No national broadcast listed at all.
   return {
     streams,
     mode: 'no-links',
-    note: networkKey
-      ? `No ${getNetworkLabel(networkKey)} channels configured`
-      : 'No channel configured for this broadcast',
+    ...describeNothingFound(networkKey, nationalBroadcasts),
   };
+}
+
+// The headline is what a player shows as the row; the note is the line
+// under it. Both are kept short - this is a row in a stream list, not a
+// paragraph, and the old single message ran to two clauses and a comma
+// before it said anything specific.
+function describeNothingFound(networkKey, nationalBroadcasts) {
+  if (networkKey) {
+    const label = getNetworkLabel(networkKey);
+    return {
+      headline: `No ${label} channels configured`,
+      note: `Add one in the Sportio dashboard.`,
+    };
+  }
+
+  const broadcasts = nationalBroadcasts || [];
+  if (broadcasts.length > 0) {
+    const names = broadcasts.map(b => b.name).join(', ');
+    const allStreaming = broadcasts.every(b => b.type === 'Streaming');
+    return {
+      headline: 'No results',
+      note: allStreaming
+        ? `Listed on ${names} - streaming only, so there is no channel to pin.`
+        : `Listed on ${names} - no channel slot for it.`,
+    };
+  }
+
+  return { headline: 'No results', note: 'No national broadcast is listed for this game.' };
 }
 
 // ---------------------------------------------------------------------

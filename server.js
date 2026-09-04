@@ -6208,15 +6208,16 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     // wording: nothing was ever configured, or what was configured has
     // gone missing from the playlist. Only the second is a problem.
     if (netStreams.length === 0) {
+      const label = networks.getNetworkLabel(networkKey);
       netStreams.push(problems.length > 0
         ? {
             name: '\u26A0\uFE0F Broken links',
-            title: `All ${problems.length} saved ${networks.getNetworkLabel(networkKey)} channel(s) are missing from your playlist - check the dashboard.`,
+            title: `All ${problems.length} saved ${label} channel(s) are missing from your playlist.`,
             url: ''
           }
         : {
-            name: '\u26A0\uFE0F Not configured',
-            title: `No ${networks.getNetworkLabel(networkKey)} channels saved yet - add one in the Sportio dashboard.`,
+            name: `\u26A0\uFE0F No ${label} channels configured`,
+            title: 'Add one in the Sportio dashboard.',
             url: ''
           });
     }
@@ -6321,8 +6322,13 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     }));
   }
 
-  const { streams, mode, note } = networks.buildStreamList({
-    networkKey, linkStreams, autoStreams
+  const { streams, mode, headline, note } = networks.buildStreamList({
+    networkKey, linkStreams, autoStreams,
+    // So a game with no slot can say what it IS on. ESPN files a lot of
+    // college football on SECN+ and ESPN+, which are streaming tiers with
+    // no channel to pin, and "not configured" sent people to the
+    // dashboard looking for a slot that could not exist.
+    nationalBroadcasts: game.nationalBroadcasts,
   });
 
   // The only channel available for telling the user something is wrong -
@@ -6330,17 +6336,16 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   // worked. An entry here is not playable, so it says so plainly rather
   // than looking like a stream that simply failed.
   const finalStreams = [...streams];
-  if (mode === 'no-links') {
-    finalStreams.unshift({
-      name: '\u26A0\uFE0F Not configured',
-      title: `${note} - add one in the Sportio dashboard, or search for a channel in the watch portal.`,
-      url: ''
-    });
+  // A network whose every saved link has gone missing is not an
+  // unconfigured one. Showing both warnings would be two rows for one
+  // situation, and only the broken-link one names what actually happened.
+  if (mode === 'no-links' && linkProblems.length === 0) {
+    finalStreams.unshift({ name: `\u26A0\uFE0F ${headline}`, title: note, url: '' });
   }
   if (linkProblems.length > 0) {
     finalStreams.unshift({
-      name: '\u26A0\uFE0F Broken link',
-      title: `${linkProblems.length} saved ${networks.getNetworkLabel(networkKey)} channel(s) are missing from your playlist - check the dashboard.`,
+      name: '\u26A0\uFE0F Broken links',
+      title: `${linkProblems.length} saved ${networks.getNetworkLabel(networkKey)} channel(s) are missing from your playlist.`,
       url: ''
     });
   }
