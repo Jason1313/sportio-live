@@ -2440,67 +2440,171 @@ const SEASON_WEEK_LEAGUES = {
   // one round covering both, which also means the CFP is still shown if
   // ESPN ever stops double-listing it.
   //
-  // p4OnlyIn lists the season types the P4 filter applies to, which is
-  // the regular season and not the postseason. A bowl is a bowl: the
-  // filter exists to cut a 99-game September Saturday down to the games
-  // worth a row, and a postseason has already done that cutting itself.
-  NCAAFB: { seasonTypes: [2, 3], mergedSeasonTypes: [3], p4OnlyIn: [2] }
+  // There is no conference gate here any more. It used to drop every game
+  // without a Power 4 team in it, which cut a 99-game September Saturday
+  // to about 60 - and also meant the MAC, the Sun Belt and Conference USA
+  // had no schedule in this app at all. The catalog now carries the whole
+  // FBS slate tagged with rank and conference, and the narrowing happens
+  // where somebody can see and change it.
+  NCAAFB: { seasonTypes: [2, 3], mergedSeasonTypes: [3] }
 };
 
-// ACC, Big Ten, Big 12, SEC. Ids come from ESPN's own FBS conference
-// list rather than a guess, and membership is read per team per game, so
-// realignment needs no change here - Stanford counts as ACC and USC as
-// Big Ten because ESPN says so.
+// Every FBS conference, read from ESPN rather than written down here.
 //
-// The Pac-12 (id 9) is deliberately absent. Its 2026 membership is the
-// rebuilt one - Boise State, Fresno State, Texas State, Washington State
-// - which is not what Power 4 means.
-const P4_CONFERENCE_IDS = new Set(['1', '4', '5', '8']);
+// This used to be four hardcoded ids - the P4 - and a filter that dropped
+// every game without one of them in it. That cut a 99-game September
+// Saturday to about 60, which was the point at the time, but it also
+// meant the MAC, the Sun Belt and Conference USA simply did not exist in
+// this app. The narrowing is now done by rank and by the account's own
+// hidden-conference list, so the schedule itself no longer has to be
+// short.
+//
+// ESPN publishes the list on the scoreboard's own conferences endpoint,
+// with each FBS conference carrying parentGroupId 80. Reading it means
+// realignment, a renamed conference or a new one all arrive on their own
+// - and it is the same source the group=80 scoreboard query already uses,
+// so the two cannot disagree about what FBS is.
+const FBS_GROUP_ID = '80';
+const CONFERENCES_URL =
+  'https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard/conferences';
 
-// Any game with at least one P4 team in it, not only P4-on-P4. A P4 side
-// hosting an FCS opponent is still that side's game that week, and
-// dropping it would hide most of September.
-//
-// This bounds the result tightly: there are exactly 67 P4 teams (ACC 17,
-// Big Ten 18, Big 12 16, SEC 16), so a week can never exceed 67 games
-// and in practice runs well under, because P4 teams play each other and
-// take byes. Measured across 2026: 60 in week 1, 48 in week 3, 28 in
-// week 6, 36 in week 12 - against 99, 75, 58 and 70 FBS games.
-function involvesP4Team(event) {
-  const competitors = (event.competitions || [])[0]?.competitors || [];
-  return competitors.some(c => P4_CONFERENCE_IDS.has(String(c.team?.conferenceId ?? '')));
+// A fixture list, effectively: conferences change once a year and the
+// endpoint is small. Long cache, one in-flight fetch, and a failure keeps
+// whatever was last read.
+const CONFERENCE_CACHE_MS = 24 * 60 * 60 * 1000;
+let conferenceCache = { byId: new Map(), list: [], fetchedAt: 0 };
+let conferenceInFlight = null;
+
+async function fetchConferences() {
+  const res = await axios.get(CONFERENCES_URL, { timeout: 10000 });
+  const raw = (res.data && res.data.conferences) || [];
+  const list = raw
+    .filter(c => String(c.parentGroupId || '') === FBS_GROUP_ID)
+    .map(c => ({
+      id: String(c.groupId || c.id || ''),
+      // shortName is what fits on a chip - "Big Ten", not "Big Ten
+      // Conference" - and is what ESPN itself puts on a scoreboard.
+      name: String(c.shortName || c.name || '').trim(),
+      fullName: String(c.name || '').trim(),
+    }))
+    .filter(c => c.id && c.name)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return { byId: new Map(list.map(c => [c.id, c])), list, fetchedAt: Date.now() };
 }
 
-// The P4 conferences, by ESPN's own ids. Only the id-to-name mapping
-// lives here: which teams are IN a conference comes per team per game
-// from ESPN, so realignment never touches this.
-//
-// Deliberately only these four. Tagging every conference meant a bowl
-// round offered eleven chips, most of them one game each, which is a
-// worse way to find anything than no filter at all. Everything else is
-// left untagged and reachable under All.
-const CONFERENCE_NAMES = {
-  '1': 'ACC',
-  '4': 'Big 12',
-  '5': 'Big Ten',
-  '8': 'SEC'
-};
+async function ensureConferences() {
+  if (conferenceCache.list.length > 0 && Date.now() - conferenceCache.fetchedAt < CONFERENCE_CACHE_MS) {
+    return conferenceCache;
+  }
+  if (conferenceInFlight) return conferenceInFlight;
 
-// The P4 conferences a game belongs to - one per side, deduplicated, so
-// an all-P4 conference game yields one entry and a P4 cross-conference
-// game two. This is what the watch portal's conference filter reads.
+  conferenceInFlight = (async () => {
+    try {
+      conferenceCache = await fetchConferences();
+      console.log(`[Conferences] ${conferenceCache.list.length} FBS conferences loaded.`);
+    } catch (err) {
+      // Soft, like every other third-party read here. An empty list means
+      // games are tagged with no conference and the filter offers nothing
+      // - the schedule itself is unaffected.
+      console.error('[Conferences] Could not load the FBS list:', err.message);
+    } finally {
+      conferenceInFlight = null;
+    }
+    return conferenceCache;
+  })();
+  return conferenceInFlight;
+}
+
+function listConferences() {
+  return conferenceCache.list;
+}
+
+// Every FBS team, for the watch portal's pin picker.
+//
+// Two requests, because neither endpoint alone answers the question.
+// ESPN's core API knows which teams are in the FBS group this season but
+// returns them as bare $ref URLs with no names in them; the site API
+// knows every team's name but returns all 760 across every division with
+// nothing saying which are FBS. The ids in those refs are enough to
+// intersect the two - 138 named FBS teams, measured.
+//
+// Not built from the standings, which was the obvious single-request
+// answer and is wrong early: in week 1 of 2026 the Sun Belt had zero
+// entries and Conference USA ten, so a picker built on it could not have
+// found James Madison at all.
+const FBS_TEAMS_CACHE_MS = 24 * 60 * 60 * 1000;
+let fbsTeamCache = { list: [], fetchedAt: 0 };
+let fbsTeamInFlight = null;
+
+async function fetchFbsTeams() {
+  // The season the calendar says we are in, not the wall-clock year - a
+  // college season runs into January and asking for the wrong one returns
+  // an empty group.
+  const calendar = await fetchSeasonCalendar('NCAAFB');
+  const year = (calendar && calendar.year) || new Date().getFullYear();
+
+  const [group, named] = await Promise.all([
+    axios.get(`https://sports.core.api.espn.com/v2/sports/football/leagues/college-football/seasons/${year}` +
+      `/types/2/groups/${FBS_GROUP_ID}/teams?limit=300`, { timeout: 15000 }),
+    axios.get('https://site.api.espn.com/apis/site/v2/sports/football/college-football/teams?limit=900',
+      { timeout: 15000 }),
+  ]);
+
+  const fbsIds = new Set(((group.data && group.data.items) || [])
+    .map(item => (String(item.$ref || '').match(/teams\/(\d+)/) || [])[1])
+    .filter(Boolean));
+
+  return (((named.data || {}).sports || [])[0]?.leagues?.[0]?.teams || [])
+    .map(entry => entry.team)
+    .filter(team => team && fbsIds.has(String(team.id)))
+    .map(team => ({
+      id: String(team.id),
+      name: team.displayName || '',
+      abbr: team.abbreviation || '',
+    }))
+    .filter(team => team.name)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function ensureFbsTeams() {
+  if (fbsTeamCache.list.length > 0 && Date.now() - fbsTeamCache.fetchedAt < FBS_TEAMS_CACHE_MS) {
+    return fbsTeamCache.list;
+  }
+  if (fbsTeamInFlight) return fbsTeamInFlight;
+
+  fbsTeamInFlight = (async () => {
+    try {
+      const list = await fetchFbsTeams();
+      if (list.length > 0) fbsTeamCache = { list, fetchedAt: Date.now() };
+      console.log(`[Teams] ${list.length} FBS teams loaded.`);
+    } catch (err) {
+      console.error('[Teams] Could not load the FBS team list:', err.message);
+    } finally {
+      fbsTeamInFlight = null;
+    }
+    return fbsTeamCache.list;
+  })();
+  return fbsTeamInFlight;
+}
+
+// The conferences a game belongs to - one per side, deduplicated, so an
+// in-conference game yields one entry and a cross-conference game two.
+// This is what the watch portal's conference filter reads.
 //
 // Both sides are tagged rather than just one, because "show me Big Ten
-// games" plainly means every game a Big Ten team is in, home or away. A
-// game with no P4 team at all is tagged with nothing and shows only
-// under All, which is the right answer for a filter offering P4 chips.
+// games" plainly means every game a Big Ten team is in, home or away.
+//
+// An FBS side playing an FCS opponent tags only the FBS conference: the
+// FCS team's conference id is real but is not in the FBS list, and a
+// filter offering "Big Sky" alongside the SEC would be offering a
+// conference this app never shows a full schedule for.
 function conferencesForEvent(competition) {
   const competitors = competition?.competitors || [];
   const seen = new Map();
   for (const competitor of competitors) {
     const id = String(competitor.team?.conferenceId ?? '');
-    const name = CONFERENCE_NAMES[id];
-    if (name && !seen.has(id)) seen.set(id, { id, name });
+    const conference = conferenceCache.byId.get(id);
+    if (conference && !seen.has(id)) seen.set(id, { id, name: conference.name });
   }
   return [...seen.values()];
 }
@@ -2777,11 +2881,8 @@ async function fetchSeasonWeekGames(sport, hostUrl, userTimeZone) {
     return [];
   }
 
-  const config = SEASON_WEEK_LEAGUES[sportKey] || {};
-  const p4Applies = (config.p4OnlyIn || []).includes(resolved.seasonType);
   const games = await fetchTodayGames(sport, hostUrl, userTimeZone, {
     queries: resolved.weeks.map(week => seasonWeekQuery(sportKey, resolved.year, resolved.seasonType, week)),
-    eventFilter: p4Applies ? involvesP4Team : null
   });
 
   console.log(`[ESPN] ${sportKey} ${resolved.label}: ${resolved.events.length} scheduled -> ${games.length} shown`);
@@ -2794,17 +2895,17 @@ async function fetchSeasonWeekGames(sport, hostUrl, userTimeZone) {
 // deduplicated by event id. Each query carries its own league params, so
 // nothing is appended here.
 //
-// `options.eventFilter` drops events before they are mapped, which is
-// where the college P4 filter runs - it needs each team's conference id,
-// and that only exists on the raw ESPN event.
+// There is no event filter here any more. It existed for the college
+// Power 4 gate, which dropped two thirds of a September Saturday before
+// anything was built; the whole slate is carried now and narrowed by the
+// reader instead.
 async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York', options = {}) {
   if (!ESPN_ENDPOINTS[sport.toUpperCase()]) return [];
 
   try {
     const queries = options.queries
       || [`dates=${getLocalDateString(userTimeZone)}${getNcaaScoreboardParams(sport)}`];
-    const allEvents = await fetchScoreboardEvents(sport.toUpperCase(), queries);
-    const events = options.eventFilter ? allEvents.filter(options.eventFilter) : allEvents;
+    const events = await fetchScoreboardEvents(sport.toUpperCase(), queries);
 
     // Callers that fetch a whole round sort the result themselves; this
     // covers the day-at-a-time leagues, which took ESPN's order as given.
@@ -2997,6 +3098,18 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
         name: displayName,
         homeTeam: homeTeam.displayName || '',
         awayTeam: awayTeam.displayName || '',
+        // Who is playing, as ids rather than names.
+        //
+        // The watch portal needs both halves of this: the rank, to lead
+        // with the top 25 rather than all ninety-nine games, and the team
+        // id, because a pinned team is pinned by id and a display name is
+        // not a stable key - ESPN writes "Miami" for two different
+        // programmes. The rank is already computed for the title above;
+        // this is the same number, kept rather than thrown away.
+        teams: [
+          { id: String(homeTeam.id || ''), name: homeTeam.displayName || '', abbr: homeAbbr, rank: homeRank || null },
+          { id: String(awayTeam.id || ''), name: awayTeam.displayName || '', abbr: awayAbbr, rank: awayRank || null },
+        ].filter(team => team.id),
         // Just the nickname (e.g. "Suns"), not the full "Phoenix Suns" -
         // needed for tier 4's city/state exclusion rule in stream ranking.
         homeNick,
@@ -3387,6 +3500,11 @@ async function buildGamesForSport(sport, hostUrl, userTimeZone) {
   if (sport.toUpperCase() === SOCCER_SPORT) {
     return fetchSoccerGames(hostUrl, userTimeZone);
   }
+  // Before anything is built, because conferencesForEvent reads the list
+  // synchronously while mapping events - a cold cache would tag a whole
+  // round with nothing and the filter would come back empty.
+  if (NCAA_SPORTS.has(sport.toUpperCase())) await ensureConferences();
+
   if (SEASON_WEEK_LEAGUES[sport.toUpperCase()]) {
     return fetchSeasonWeekGames(sport, hostUrl, userTimeZone);
   }
@@ -4136,7 +4254,13 @@ function warmM3uPlaylistInBackground(provider) {
 //
 // Returns null after having already sent a response, so callers just
 // check for null and return.
-async function authenticateForChannels(req, res) {
+// The credential half on its own, for the endpoints that only need to
+// know whose account this is.
+//
+// Split out of authenticateForChannels because that one also resolves the
+// account's whole channel list - right for anything reading the playlist,
+// and pure waste for a request asking which conferences are hidden.
+async function authenticateAccount(req, res) {
   const { uuid, password } = req.body;
   const ip = req.ip;
 
@@ -4154,6 +4278,13 @@ async function authenticateForChannels(req, res) {
     return null;
   }
   clearFailedAttempts(ip);
+  return { user };
+}
+
+async function authenticateForChannels(req, res) {
+  const account = await authenticateAccount(req, res);
+  if (!account) return null;
+  const { user } = account;
 
   // Xtream reaches the same features through its own channel list rather
   // than a parsed playlist. Both arrive here in the same shape, and so do
@@ -4187,6 +4318,40 @@ async function authenticateForChannels(req, res) {
 
   return { user, source };
 }
+
+// What the watch portal's league filters are built from: the conferences
+// that exist, and what this account has done with them.
+//
+// Small and called once on boot, so it carries the conference list
+// itself rather than making the page ask twice. The team list is NOT
+// here - it is 138 entries the portal only needs when somebody opens the
+// pin picker, and sending it to every visitor on every load to save one
+// request when they open a panel is the wrong trade.
+app.post('/api/leagues/preferences', async (req, res) => {
+  const auth = await authenticateAccount(req, res);
+  if (!auth) return;
+
+  await ensureConferences();
+  return res.json({
+    success: true,
+    conferences: { NCAAFB: listConferences() },
+    pinnedTeams: readPinnedTeams(auth.user),
+    hiddenConferences: readHiddenConferences(auth.user),
+  });
+});
+
+// Every team that can be pinned. Loaded when the picker opens, cached on
+// the server for a day.
+app.post('/api/leagues/teams', async (req, res) => {
+  const auth = await authenticateAccount(req, res);
+  if (!auth) return;
+
+  const sport = String(req.body.sport || '').toUpperCase();
+  if (sport !== 'NCAAFB') {
+    return res.status(400).json({ error: 'No team list is published for that league.' });
+  }
+  return res.json({ success: true, teams: await ensureFbsTeams() });
+});
 
 // The full network registry, so the dashboard renders its sections from
 // the server's list rather than keeping a second copy in the page that
@@ -4225,6 +4390,59 @@ app.get('/api/networks', (req, res) => {
 function formatKey(record) {
   if (!record || !record.height || !record.fps) return null;
   return `${record.height}p${Math.round(record.fps)}`;
+}
+
+// Teams the account has pinned, and conferences it has hidden, both
+// keyed by sport.
+//
+// Keyed by sport rather than assumed to be college football because the
+// conference tag already is: soccer tags every game with its competition,
+// so hiding La Liga is the same operation as hiding the MAC and needs no
+// second implementation when somebody asks for it.
+//
+// The pin carries the team's name and abbreviation as well as its id. The
+// id is the key - display names are not unique, ESPN writes "Miami" for
+// two different programmes - but the portal has to draw the pin list
+// before any game with that team in it has loaded, and a bare id is not
+// something anyone recognises.
+const MAX_PINNED_TEAMS = 40;
+const MAX_HIDDEN_CONFERENCES = 40;
+
+function readPinnedTeams(user) {
+  const raw = (user && user.pinnedTeams) || {};
+  const out = {};
+  for (const [sport, teams] of Object.entries(raw)) {
+    if (!Array.isArray(teams)) continue;
+    const seen = new Set();
+    const cleaned = [];
+    for (const team of teams) {
+      if (!team || typeof team !== 'object') continue;
+      const id = String(team.id || '').trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      cleaned.push({
+        id,
+        name: String(team.name || '').trim().slice(0, 80),
+        abbr: String(team.abbr || '').trim().slice(0, 10),
+      });
+      if (cleaned.length >= MAX_PINNED_TEAMS) break;
+    }
+    if (cleaned.length > 0) out[String(sport).toUpperCase()] = cleaned;
+  }
+  return out;
+}
+
+function readHiddenConferences(user) {
+  const raw = (user && user.hiddenConferences) || {};
+  const out = {};
+  for (const [sport, ids] of Object.entries(raw)) {
+    if (!Array.isArray(ids)) continue;
+    const cleaned = [...new Set(ids
+      .filter(id => typeof id === 'string' && id.trim())
+      .map(id => id.trim()))].slice(0, MAX_HIDDEN_CONFERENCES);
+    if (cleaned.length > 0) out[String(sport).toUpperCase()] = cleaned;
+  }
+  return out;
 }
 
 const QUALITY_TIERS = ['good', 'okay', 'low'];
@@ -5330,6 +5548,8 @@ app.post('/api/user/login', async (req, res) => {
     streamcheckProvider: user.streamcheckProvider || '',
     qualityFilter: readQualityFilter(user),
     searchTerms: readSearchTerms(user),
+    pinnedTeams: readPinnedTeams(user),
+    hiddenConferences: readHiddenConferences(user),
     autoPick: readAutoPick(user),
     networkLinks: tierNetworkLinks(user.networkLinks),
     savedChannels: (user.savedChannels || []).map(withQualityTier),
@@ -5338,7 +5558,7 @@ app.post('/api/user/login', async (req, res) => {
 });
 
 app.post('/api/user/update', async (req, res) => {
-  const { uuid, password, xtream, m3u, selectedSports, timeZone, sportOrder, networkLinks, savedChannels, searchCategories, streamcheckProvider, qualityFilter, searchTerms, providers } = req.body;
+  const { uuid, password, xtream, m3u, selectedSports, timeZone, sportOrder, networkLinks, savedChannels, searchCategories, streamcheckProvider, qualityFilter, searchTerms, providers, pinnedTeams, hiddenConferences } = req.body;
   const ip = req.ip;
 
   if (isRateLimited(ip)) {
@@ -5420,6 +5640,12 @@ app.post('/api/user/update', async (req, res) => {
   }
   if (searchTerms !== undefined) {
     user.searchTerms = readSearchTerms({ searchTerms });
+  }
+  if (pinnedTeams !== undefined) {
+    user.pinnedTeams = readPinnedTeams({ pinnedTeams });
+  }
+  if (hiddenConferences !== undefined) {
+    user.hiddenConferences = readHiddenConferences({ hiddenConferences });
   }
 
   if (qualityFilter !== undefined) {
@@ -6053,6 +6279,10 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
     finalScore: game.finalScore || '',
     isToday: game.isToday !== false,
     conferences: game.conferences || [],
+    // Read by the portal's ranked-only default and its pinned teams. Only
+    // the leagues that build a game from ESPN competitors carry it; every
+    // other card is simply never ranked and never pinned.
+    teams: game.teams || [],
     // Home pools several leagues and re-sorts them into one list, which
     // needs the same inputs the server sorts by.
     startsAt: game.date || '',

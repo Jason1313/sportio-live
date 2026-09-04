@@ -473,9 +473,44 @@
     <div id="saved-list" class="max-w-2xl space-y-1.5"></div>
   </section>
 
-  <!-- Conference chips. Only rendered for a catalog whose games carry
-       conferences, which today means college football. -->
+  <!-- The filter bar: which lens the league is being viewed through,
+       plus the settings that decide what the lens can see. Only rendered
+       for a catalog whose games carry conferences or a poll, which today
+       means college football. -->
   <div id="conference-filter" class="hidden mb-4"></div>
+
+  <!-- Pinned teams and hidden conferences, saved to the account. -->
+  <div id="league-settings" class="hidden fixed inset-0 z-40 bg-black/70 flex items-end sm:items-center justify-center p-0 sm:p-6">
+    <div class="bg-[#2f3e47] border border-white/10 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[85vh] overflow-y-auto">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-white/10 sticky top-0 bg-[#2f3e47]">
+        <h3 class="text-sm font-bold">League settings</h3>
+        <button onclick="closeLeagueSettings()" class="text-[#e6e6e6]/50 hover:text-[#e6e6e6] px-2 py-1">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+
+      <div class="px-4 py-3 space-y-1.5">
+        <p class="text-[10px] uppercase tracking-wider text-[#5aa8d1]">Pinned teams</p>
+        <p class="text-[11px] text-[#e6e6e6]/45 leading-snug">
+          A pinned team's games show on Home and in the opening view of its league, ranked or not,
+          and whether or not its conference is switched off below.
+        </p>
+        <div id="league-settings-pinned" class="flex flex-wrap gap-1.5 pt-1"></div>
+        <input type="text" oninput="onLeagueTeamSearch(this.value)" placeholder="Search teams to pin"
+               class="w-full mt-2 bg-[#1f2b36] border border-white/10 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
+        <div id="league-settings-results" class="pt-1"></div>
+      </div>
+
+      <div class="px-4 py-3 border-t border-white/10 space-y-1.5">
+        <p class="text-[10px] uppercase tracking-wider text-[#5aa8d1]">Conferences</p>
+        <p class="text-[11px] text-[#e6e6e6]/45 leading-snug">
+          Switch one off to drop it from the filter bar and from every list. A game against a
+          conference still shown is kept &mdash; hiding the MAC does not hide MAC at Michigan.
+        </p>
+        <div id="league-settings-conferences" class="flex flex-wrap gap-1.5 pt-1"></div>
+      </div>
+    </div>
+  </div>
 
   <div id="grid" class="grid gap-4"></div>
   <p id="grid-empty" class="hidden text-sm text-[#e6e6e6]/45 py-16 text-center"></p>
@@ -580,7 +615,16 @@
   // to another tab and back does not silently reset the filter, which
   // would look like the app forgetting what you asked for.
   let catalogMetas = [];
-  let conferenceChoice = {};
+  // Which lens each catalog is being viewed through, kept per catalog so
+  // switching to another tab and back does not silently reset it.
+  let catalogLens = {};
+  // Read from the account on boot: the conferences that exist, the teams
+  // pinned, the conferences hidden. Saved back as they are changed.
+  let leaguePrefs = { conferences: {}, pinnedTeams: {}, hiddenConferences: {} };
+  // Leagues with a poll to rank by. Only college football has one; every
+  // other league reports ESPN's unranked sentinel for every competitor,
+  // so a Top 25 chip there would filter to nothing.
+  const POLL_LEAGUES = new Set(['NCAAFB']);
 
   function showToast(msg, isError) {
     const el = document.getElementById('toast');
@@ -1112,7 +1156,8 @@
     catalogs = [];
     activeCatalog = null;
     catalogMetas = [];
-    conferenceChoice = {};
+    catalogLens = {};
+    leaguePrefs = { conferences: {}, pinnedTeams: {}, hiddenConferences: {} };
     savedChannels = [];
     savedResults = [];
     savedGroups = [];
@@ -1182,6 +1227,19 @@
     }
     savedChannels = (savedRes.data && savedRes.data.channels) || [];
     seedProbeResultsFromSaved();
+
+    // The filter bar is drawn from these, so they are fetched before the
+    // first tab renders rather than after. Small enough to be worth
+    // waiting for; a failure just leaves every conference shown and
+    // nothing pinned, which is the state a new account is in anyway.
+    const prefsRes = await postJson('/api/leagues/preferences');
+    if (prefsRes.ok && prefsRes.data) {
+      leaguePrefs = {
+        conferences: prefsRes.data.conferences || {},
+        pinnedTeams: prefsRes.data.pinnedTeams || {},
+        hiddenConferences: prefsRes.data.hiddenConferences || {},
+      };
+    }
 
     // Home first, then the curated list, then the individual leagues.
     catalogs = [
@@ -1316,6 +1374,19 @@
   }
 
   // Every live game across every configured league, on one page.
+  // Home's version of the league tab's opening lens. It has no filter bar
+  // of its own - it is a mixed page and a conference chip would mean
+  // nothing across five leagues - so this is the default and the only
+  // view: hidden conferences dropped, and for a league with a poll, the
+  // ranked games plus the pinned teams.
+  function homeLensFor(sport, metas) {
+    const pinned = pinnedTeamIds(sport);
+    const hidden = hiddenConferenceIds(sport);
+    const shown = metas.filter(m => isPinnedGame(m, pinned) || inShownConference(m, hidden));
+    if (!POLL_LEAGUES.has(sport)) return shown;
+    return shown.filter(m => isRankedGame(m) || isPinnedGame(m, pinned));
+  }
+
   async function loadHome() {
     const sources = gameCatalogs();
     if (sources.length === 0) {
@@ -1341,12 +1412,14 @@
       // or not anything is on - so they would sit at the top of Home
       // permanently, in a page whose entire claim is that everything on it
       // is happening now. They stay in their own league's tab.
-      return {
-        failed: false,
-        metas: metas
-          .filter(m => !m.pinned && m.isToday !== false)
-          .map(m => ({ ...m, league }))
-      };
+      // Home answers "what is on", and for college football that is not
+      // ninety-nine games. The same lens the league tab opens with is
+      // applied here - the poll plus whatever is pinned - so a Saturday
+      // reads as a page rather than a directory. Leagues without a poll
+      // are untouched beyond their own hidden conferences.
+      const sport = sportOfCatalog(c.id);
+      const shown = homeLensFor(sport, metas.filter(m => !m.pinned && m.isToday !== false));
+      return { failed: false, metas: shown.map(m => ({ ...m, league })) };
     }));
 
     const games = results.flatMap(r => r.metas);
@@ -1366,11 +1439,15 @@
 
   // The conferences present in a set of metas, each with how many games
   // it accounts for. Counted before filtering so the chips do not
-  // renumber themselves as you click between them.
+  // renumber themselves as you click between them, and hidden ones are
+  // left out entirely - a chip for a conference you have switched off is
+  // a control that undoes your own setting.
   function conferencesIn(metas) {
+    const hidden = hiddenConferenceIds();
     const counts = new Map();
     for (const meta of metas) {
       for (const conference of meta.conferences || []) {
+        if (hidden.has(conference.id)) continue;
         if (!counts.has(conference.id)) counts.set(conference.id, { ...conference, count: 0 });
         counts.get(conference.id).count++;
       }
@@ -1381,53 +1458,149 @@
       (a.id === 'other') - (b.id === 'other') || b.count - a.count || a.name.localeCompare(b.name));
   }
 
+  // Which league a catalog belongs to. Ids are built as sb_{sport}_{date}
+  // by the server, so this is reading the id rather than keeping a
+  // parallel map that could fall out of step with it.
+  function sportOfCatalog(id) {
+    const parts = String(id || '').split('_');
+    return parts.length >= 2 ? parts[1].toUpperCase() : '';
+  }
+
+  function pinnedTeamIds(sport) {
+    const key = sport || sportOfCatalog(activeCatalog);
+    return new Set(((leaguePrefs.pinnedTeams || {})[key] || []).map(t => t.id));
+  }
+
+  function hiddenConferenceIds(sport) {
+    const key = sport || sportOfCatalog(activeCatalog);
+    return new Set((leaguePrefs.hiddenConferences || {})[key] || []);
+  }
+
+  function isRankedGame(meta) {
+    return (meta.teams || []).some(t => t.rank);
+  }
+
+  function isPinnedGame(meta, pinned) {
+    return (meta.teams || []).some(t => pinned.has(t.id));
+  }
+
+  // A game survives its conference being hidden if ANY side is in a
+  // conference still shown. Hiding the MAC should not take a MAC-at-Big
+  // Ten game with it - that is a Big Ten game too, and the Big Ten is the
+  // reason it is on the page.
+  function inShownConference(meta, hidden) {
+    const list = meta.conferences || [];
+    return list.length === 0 || list.some(c => !hidden.has(c.id));
+  }
+
+  // The three lenses, applied in this order:
+  //
+  //   hidden conferences   - always, except for a pinned team, which is
+  //                          an explicit "show me this" and outranks a
+  //                          blanket "not this conference"
+  //   top / all            - the default view is the poll plus whatever
+  //                          you pinned, because a September Saturday is
+  //                          ninety-nine games and about twenty-five of
+  //                          them are why anyone opened the page
+  //   one conference       - a deliberate choice, so it is a hard filter:
+  //                          picking the ACC and still being shown a
+  //                          pinned Sun Belt game would read as a bug
+  function gamesForLens(metas, lens) {
+    const pinned = pinnedTeamIds();
+    const hidden = hiddenConferenceIds();
+    const shown = metas.filter(m => isPinnedGame(m, pinned) || inShownConference(m, hidden));
+    if (lens.conference) {
+      return shown.filter(m => (m.conferences || []).some(c => c.id === lens.conference));
+    }
+    if (lens.top) return shown.filter(m => isRankedGame(m) || isPinnedGame(m, pinned));
+    return shown;
+  }
+
+  function lensFor(catalogId) {
+    // Top 25 is the opening view of a league that has a poll, and simply
+    // everything for one that does not - there is nothing to rank a
+    // soccer fixture by, so a "Top 25" chip there would filter to zero.
+    if (!catalogLens[catalogId]) {
+      catalogLens[catalogId] = { top: leagueHasPoll(catalogId), conference: '' };
+    }
+    return catalogLens[catalogId];
+  }
+
+  function leagueHasPoll(catalogId) {
+    return POLL_LEAGUES.has(sportOfCatalog(catalogId));
+  }
+
   function renderConferenceFilter() {
     const box = document.getElementById('conference-filter');
     if (!box) return;
     const conferences = conferencesIn(catalogMetas);
-    // Nothing to choose between with one conference, and nothing to offer
-    // at all for a league that has none.
-    if (conferences.length < 2) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+    const lens = lensFor(activeCatalog);
+    const poll = leagueHasPoll(activeCatalog);
 
-    const selected = conferenceChoice[activeCatalog] || '';
-    // Games only. A pinned card belongs to no conference and is shown
-    // under every chip, so counting it would overstate All by one.
-    const total = catalogMetas.filter(m => !m.pinned).length;
-    const chip = (id, label, count, on) =>
-      `<button onclick="chooseConference('${id}')"
+    // Nothing to choose between with one conference and no poll, and
+    // nothing to offer at all for a league that has neither.
+    if (conferences.length < 2 && !poll) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+
+    // Games only. A pinned network card belongs to no conference and is
+    // shown under every chip, so counting it would overstate All by one.
+    const games = catalogMetas.filter(m => !m.pinned);
+    const pinnedCount = pinnedTeamIds().size;
+
+    const chip = (label, count, on, onclick) =>
+      `<button onclick="${onclick}"
                class="text-[11px] font-semibold px-2.5 py-1 rounded-full border transition ${on
                  ? 'border-[#3b8fc4] bg-[#3b8fc4] text-white'
                  : 'border-white/15 bg-[#1f2b36] text-[#e6e6e6]/65 hover:text-[#e6e6e6] hover:border-white/30'}">
          ${escapeHtml(label)} <span class="opacity-60">${count}</span></button>`;
 
+    // Named for what it actually holds. With teams pinned the opening
+    // view is the poll plus those, and a chip reading "Top 25" over a
+    // list containing an unranked James Madison would be lying about its
+    // own contents.
+    const topLabel = pinnedCount > 0 ? 'Top 25 + pinned' : 'Top 25';
+    const topChip = poll
+      ? chip(topLabel, gamesForLens(games, { top: true, conference: '' }).length,
+             lens.top && !lens.conference, 'chooseLens(&quot;top&quot;)')
+      : '';
+
     box.classList.remove('hidden');
     box.innerHTML = `<div class="flex flex-wrap items-center gap-1.5">
-        <span class="text-[10px] uppercase tracking-wider text-[#e6e6e6]/35 mr-1">Conference</span>
-        ${chip('', 'All', total, !selected)}
-        ${conferences.map(c => chip(c.id, c.name, c.count, selected === c.id)).join('')}
+        <span class="text-[10px] uppercase tracking-wider text-[#e6e6e6]/35 mr-1">Show</span>
+        ${topChip}
+        ${chip('All', gamesForLens(games, { top: false, conference: '' }).length,
+               !lens.top && !lens.conference, 'chooseLens(&quot;all&quot;)')}
+        ${conferences.map(c => chip(c.name, c.count, lens.conference === c.id,
+               `chooseLens(${quoteAttr(c.id)})`)).join('')}
+        <button onclick="openLeagueSettings()" title="Pin teams, hide conferences"
+                class="text-[11px] font-semibold px-2 py-1 rounded-full border border-white/15 bg-[#1f2b36] text-[#e6e6e6]/50 hover:text-[#e6e6e6] hover:border-white/30 transition">
+          <i class="fa-solid fa-sliders"></i>
+        </button>
       </div>`;
   }
 
-  function chooseConference(id) {
-    // Clicking the selected chip clears it, so All is always one click
-    // away without hunting for it.
-    conferenceChoice[activeCatalog] = (conferenceChoice[activeCatalog] === id) ? '' : id;
+  // One lens at a time, so the bar reads as a single choice rather than a
+  // set of switches that can be combined into an empty page. Picking a
+  // conference while Top 25 was on used to leave both applied, which for
+  // most conferences is nothing at all.
+  function chooseLens(id) {
+    const lens = lensFor(activeCatalog);
+    if (id === 'top') { lens.top = true; lens.conference = ''; }
+    else if (id === 'all') { lens.top = false; lens.conference = ''; }
+    else { lens.top = false; lens.conference = lens.conference === id ? '' : id; }
     applyConferenceFilter();
   }
 
   function applyConferenceFilter() {
-    const selected = conferenceChoice[activeCatalog] || '';
+    const lens = lensFor(activeCatalog);
 
-    // Pinned cards are held apart from the filtering entirely. They are
-    // not games and belong to no conference, so they neither narrow down
-    // nor get narrowed away - they lead the row whatever is selected, and
-    // they stay there in a week with no games at all, which is the whole
-    // point of pinning one.
-    const pinned = catalogMetas.filter(m => m.pinned);
+    // Pinned network cards are held apart from the filtering entirely.
+    // They are not games and belong to no conference, so they neither
+    // narrow down nor get narrowed away - they lead the row whatever is
+    // selected, and they stay there in a week with no games at all, which
+    // is the whole point of pinning one.
+    const pinnedCards = catalogMetas.filter(m => m.pinned);
     const games = catalogMetas.filter(m => !m.pinned);
-    const shownGames = selected
-      ? games.filter(m => (m.conferences || []).some(c => c.id === selected))
-      : games;
+    const shownGames = gamesForLens(games, lens);
 
     renderConferenceFilter();
     // Emptiness is a statement about the games, so it is measured on them
@@ -1435,8 +1608,159 @@
     // replacing them.
     showEmpty(shownGames.length > 0
       ? ''
-      : (selected ? 'No games for that conference in this round.' : 'Nothing scheduled.'));
-    renderGameGrid([...pinned, ...shownGames]);
+      : (lens.conference ? 'No games for that conference in this round.'
+        : lens.top ? 'Nothing ranked in this round. Choose All to see the rest.'
+        : 'Nothing scheduled.'));
+    renderGameGrid([...pinnedCards, ...shownGames]);
+  }
+
+  // ------------------------------------------------------------------
+  // League settings: pinned teams and hidden conferences
+  // ------------------------------------------------------------------
+  //
+  // Edited here rather than in the dashboard because this is where the
+  // games are: the moment you want a team pinned is the moment you are
+  // looking at a page that does not have it. Saved to the account on
+  // every change, so it follows the login rather than the browser.
+  //
+  // The team list is fetched only when this opens - 138 entries that
+  // every other visit has no use for.
+  let leagueTeamList = null;
+  let leagueTeamQuery = '';
+
+  function openLeagueSettings() {
+    const sport = sportOfCatalog(activeCatalog);
+    if (!sport) return;
+    leagueTeamQuery = '';
+    document.getElementById('league-settings').classList.remove('hidden');
+    lockScroll();
+    renderLeagueSettings();
+    if (leagueTeamList === null) loadLeagueTeams(sport);
+  }
+
+  function closeLeagueSettings() {
+    document.getElementById('league-settings').classList.add('hidden');
+    unlockScroll();
+  }
+
+  async function loadLeagueTeams(sport) {
+    const res = await postJson('/api/leagues/teams', { sport });
+    leagueTeamList = (res.ok && res.data && res.data.teams) || [];
+    renderLeagueSettings();
+  }
+
+  function onLeagueTeamSearch(value) {
+    leagueTeamQuery = String(value || '');
+    renderLeagueTeamResults();
+  }
+
+  function renderLeagueSettings() {
+    const sport = sportOfCatalog(activeCatalog);
+    const conferences = (leaguePrefs.conferences || {})[sport] || [];
+    const hidden = hiddenConferenceIds(sport);
+
+    const confBox = document.getElementById('league-settings-conferences');
+    if (confBox) {
+      confBox.innerHTML = conferences.length === 0
+        ? '<p class="text-[11px] text-[#e6e6e6]/40 italic">No conferences published for this league.</p>'
+        : conferences.map(c => {
+            const on = !hidden.has(c.id);
+            return `<button onclick="toggleConferenceHidden(${quoteAttr(c.id)})"
+                      class="text-[11px] font-semibold px-2.5 py-1 rounded-full border transition ${on
+                        ? 'border-[#3b8fc4]/50 bg-[#3b8fc4]/15 text-[#5aa8d1]'
+                        : 'border-white/10 bg-[#1f2b36] text-[#e6e6e6]/35 line-through'}">
+                      ${escapeHtml(c.name)}</button>`;
+          }).join('');
+    }
+
+    renderLeaguePinned();
+    renderLeagueTeamResults();
+  }
+
+  function renderLeaguePinned() {
+    const sport = sportOfCatalog(activeCatalog);
+    const pinned = (leaguePrefs.pinnedTeams || {})[sport] || [];
+    const box = document.getElementById('league-settings-pinned');
+    if (!box) return;
+    box.innerHTML = pinned.length === 0
+      ? '<p class="text-[11px] text-[#e6e6e6]/40 italic">No teams pinned. Search below to add one.</p>'
+      : pinned.map(t => `
+          <button onclick="unpinTeam(${quoteAttr(t.id)})"
+                  class="text-[11px] font-semibold px-2.5 py-1 rounded-full border border-[#e6b800]/40 bg-[#e6b800]/15 text-[#e6b800] hover:border-[#c0392b]/50 hover:text-[#e56a6a] transition">
+            ${escapeHtml(t.name)} <span class="opacity-60">&times;</span></button>`).join('');
+  }
+
+  function renderLeagueTeamResults() {
+    const box = document.getElementById('league-settings-results');
+    if (!box) return;
+
+    if (leagueTeamList === null) {
+      box.innerHTML = '<p class="text-[11px] text-[#e6e6e6]/40 italic">Loading teams...</p>';
+      return;
+    }
+    const query = leagueTeamQuery.trim().toLowerCase();
+    if (query.length < 2) {
+      box.innerHTML = `<p class="text-[11px] text-[#e6e6e6]/40 italic">
+        Type at least two letters to find a team (${leagueTeamList.length} in this league).</p>`;
+      return;
+    }
+
+    const pinnedIds = pinnedTeamIds();
+    const hits = leagueTeamList
+      .filter(t => t.name.toLowerCase().includes(query) || t.abbr.toLowerCase() === query)
+      .slice(0, 20);
+
+    box.innerHTML = hits.length === 0
+      ? '<p class="text-[11px] text-[#e6e6e6]/40 italic">No team matched.</p>'
+      : hits.map(t => {
+          const already = pinnedIds.has(t.id);
+          return `<button ${already ? 'disabled' : `onclick="pinTeam(${quoteAttr(t.id)})"`}
+                    class="w-full text-left text-[11px] px-2.5 py-1.5 rounded transition ${already
+                      ? 'text-[#e6e6e6]/30'
+                      : 'text-[#e6e6e6]/75 hover:bg-white/5'}">
+                    <i class="fa-solid ${already ? 'fa-check' : 'fa-thumbtack'} text-[9px] mr-1.5 opacity-60"></i>
+                    ${escapeHtml(t.name)} <span class="opacity-40">${escapeHtml(t.abbr)}</span></button>`;
+        }).join('');
+  }
+
+  function pinTeam(id) {
+    const sport = sportOfCatalog(activeCatalog);
+    const team = (leagueTeamList || []).find(t => t.id === id);
+    if (!team) return;
+    const list = (leaguePrefs.pinnedTeams[sport] || []).slice();
+    if (list.some(t => t.id === id)) return;
+    list.push({ id: team.id, name: team.name, abbr: team.abbr });
+    leaguePrefs.pinnedTeams = { ...leaguePrefs.pinnedTeams, [sport]: list };
+    saveLeaguePrefs();
+  }
+
+  function unpinTeam(id) {
+    const sport = sportOfCatalog(activeCatalog);
+    const list = (leaguePrefs.pinnedTeams[sport] || []).filter(t => t.id !== id);
+    leaguePrefs.pinnedTeams = { ...leaguePrefs.pinnedTeams, [sport]: list };
+    saveLeaguePrefs();
+  }
+
+  function toggleConferenceHidden(id) {
+    const sport = sportOfCatalog(activeCatalog);
+    const hidden = new Set(leaguePrefs.hiddenConferences[sport] || []);
+    if (hidden.has(id)) hidden.delete(id); else hidden.add(id);
+    leaguePrefs.hiddenConferences = { ...leaguePrefs.hiddenConferences, [sport]: [...hidden] };
+    saveLeaguePrefs();
+  }
+
+  // Redrawn immediately and saved in the background. Waiting for the
+  // round trip before a chip changes colour makes every toggle feel
+  // broken on a phone; the settings are small and a failed save is
+  // reported rather than silently kept.
+  async function saveLeaguePrefs() {
+    renderLeagueSettings();
+    applyConferenceFilter();
+    const res = await postJson('/api/user/update', {
+      pinnedTeams: leaguePrefs.pinnedTeams,
+      hiddenConferences: leaguePrefs.hiddenConferences,
+    });
+    if (!res.ok) showEmpty('Could not save that change to your account.');
   }
 
   async function selectCatalog(id) {
@@ -2048,6 +2372,19 @@
   function closeStreams() {
     document.getElementById('streams').classList.add('hidden');
     unlockScroll();
+  }
+
+  // A string safe to drop into an inline handler as an argument -
+  // JSON-quoted so the value survives, then attribute-escaped so its
+  // quotes cannot end the attribute early. escapeHtml is no use for this:
+  // it serialises a text node, which leaves " alone because a quote means
+  // nothing in text and everything in an attribute.
+  function quoteAttr(value) {
+    return JSON.stringify(value == null ? '' : String(value))
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
   }
 
   function escapeHtml(str) {
