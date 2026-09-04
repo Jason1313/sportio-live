@@ -269,14 +269,22 @@ function looksAmerican(channel) {
   const tokens = tokenize(channel && channel.name);
   if (tokens.length === 0) return false;
 
+  // A leading foreign tag settles it, and is checked FIRST - ahead of
+  // both the US marker and the call sign.
+  //
+  // Ahead of the US marker because a network can have "USA" in its own
+  // name: "Carib USA Network" is a Caribbean feed and "(MX) (IZ)
+  // Telemundo Arizona USA (Nogales)" a Mexican one, and both were
+  // reading as American purely because the channel is called USA.
+  //
+  // Ahead of the call sign because "AU: ABC KIDS NATIONAL" has a token of
+  // call-sign shape and is Australian. A Caribbean relay of a US station
+  // - "Carib (AMP) WSVN FOX" - is not the US station either.
+  if (FOREIGN_PREFIX.has(tokens[0])) return false;
+
   // An explicit US tag settles it wherever it appears - one provider
   // writes "US:" at the front, another "NFL NETWORK USA (DZ)".
   if (tokens.some(token => US_MARKERS.has(token))) return true;
-
-  // A leading foreign tag settles it the other way, and does so before
-  // the call sign is consulted: "AU: ABC KIDS NATIONAL" has a token of
-  // call-sign shape and is an Australian channel.
-  if (FOREIGN_PREFIX.has(tokens[0])) return false;
 
   return tokens.some(token => CALL_SIGN.test(token) && !NOT_CALL_SIGNS.has(token));
 }
@@ -348,7 +356,32 @@ const DEFAULT_RULES = {
     // NBC Sports is what was asked for. The news and golf feeds are added
     // on the same reasoning as ABC News below: they carry the network's
     // name and never carry its games.
-    exclude: ['NBC SPORTS', 'NBCSN', 'NBC NEWS', 'NBC GOLF'],
+    //
+    // Telemundo and USA Network are here because providers file them
+    // under their OWNER's name: "US NBC (KVEA) Telemundo", "US: NBC USA
+    // NETWORK (EAST)". Both are NBCUniversal, neither is NBC, and without
+    // these two lines each provider offered fourteen Spanish-language
+    // Telemundo stations and a USA Network feed as NBC - measured, 16
+    // wrong candidates apiece. They now have sections of their own.
+    exclude: ['NBC SPORTS', 'NBCSN', 'NBC NEWS', 'NBC GOLF',
+      'TELEMUNDO', 'USA NETWORK', 'USA NET'],
+  },
+  TELEMUNDO: {
+    // Affiliates carry a channel number the same way the English-language
+    // broadcast networks do - "TELEMUNDO 47 (WNJU)", "TELEMUNDO 42 NEW
+    // ORLEANS".
+    numbered: true,
+    include: ['TELEMUNDO'],
+    groups: ['US | Telemundo'],
+    // Telemundo-branded channels that are not the broadcast station: the
+    // 24/7 news and highlights feeds, the entertainment spin-offs, and
+    // the international service, which does not hold the US rights.
+    // All of these are on the playlists and all answer to "Telemundo".
+    exclude: [
+      'NOTICIAS TELEMUNDO', 'TELEMUNDO INTERNACIONAL', 'TELEMUNDO AL DIA',
+      'TELEMUNDO AHORA', 'TELEMUNDO DEPORTES', 'TELEMUNDO ACTION',
+      'TELEMUNDO ROMANCE', 'TELEMUNDO CINE', 'TELEMUNDO NOVELAS',
+    ],
   },
   ABC: {
     numbered: true,
@@ -438,6 +471,14 @@ const DEFAULT_RULES = {
     groups: [],
     // A different product that shares the name.
     exclude: ['FANTASY REDZONE'],
+  },
+  USANET: {
+    // "USA" on its own is NOT an include term. It is a country tag on
+    // half the playlist - "US: USA NETWORK" is fine, but a bare "USA"
+    // would match every American channel there is.
+    include: ['USA NETWORK', 'USA NET'],
+    groups: ['US | USA Network'],
+    exclude: ['USA TODAY'],
   },
   TNT: {
     include: ['TNT'],

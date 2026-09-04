@@ -534,11 +534,16 @@
     // The leagues this app covers. This list used to be narrower than
     // the server's, which still carried basketball, hockey, baseball and
     // soccer; those have been removed there too, so the two now agree.
-    const SPORTS = ['NFL', 'NCAAFB', 'UFC', 'WRESTLING'];
+    const SPORTS = ['NFL', 'NCAAFB', 'NHL', 'MLB', 'SOCCER', 'UFC', 'WRESTLING'];
     const SPORT_LABELS = {
       GLOBAL: 'Global',
       NCAAFB: 'College Football',
       UFC: 'MMA',
+      // One section covering the Premier League, La Liga, Serie A, the
+      // Bundesliga and Ligue 1 - named for the sport, like Wrestling,
+      // because no one of those five is the section. Which competition a
+      // fixture belongs to is a filter chip on the card row.
+      SOCCER: 'Soccer',
       // Its own section rather than a corner of MMA, and named for the
       // sport rather than the promotion so college duals can join it.
       WRESTLING: 'Wrestling'
@@ -547,6 +552,9 @@
       GLOBAL: 'fa-globe',
       NFL: 'fa-football',
       NCAAFB: 'fa-football',
+      NHL: 'fa-hockey-puck',
+      MLB: 'fa-baseball',
+      SOCCER: 'fa-futbol',
       UFC: 'fa-hand-fist',
       WRESTLING: 'fa-medal'
     };

@@ -41,6 +41,17 @@ const NETWORKS = [
   { key: 'ABC',  label: 'ABC',  kind: 'broadcast', aliases: ['ABC'] },
   { key: 'CW',   label: 'The CW', kind: 'broadcast', aliases: ['CW', 'The CW', 'CW Network'] },
 
+  // Telemundo is affiliate-based like the four above - WNJU New York,
+  // KVEA Los Angeles, WSCV Miami - which is why it is 'broadcast' and not
+  // 'cable' despite being thought of as one national channel.
+  //
+  // Carried for soccer: it has the Spanish-language Premier League
+  // rights, and ESPN listed it on 3 of the next 30 fixtures. ESPN writes
+  // it as the bare word "Tele", which is why that is an alias rather than
+  // an abbreviation anyone would guess.
+  { key: 'TELEMUNDO', label: 'Telemundo', kind: 'broadcast',
+    aliases: ['Telemundo', 'Tele'] },
+
   // Cable/satellite networks - single national feed.
   { key: 'ESPN',    label: 'ESPN',        kind: 'cable', aliases: ['ESPN'] },
   { key: 'ESPN2',   label: 'ESPN2',       kind: 'cable', aliases: ['ESPN2'] },
@@ -67,6 +78,12 @@ const NETWORKS = [
   // "NFL REDZONE" and "NFL Red Zone" are already the same key.
   { key: 'REDZONE', label: 'NFL RedZone', kind: 'cable', pinnedTo: 'NFL',
     aliases: ['NFL RedZone', 'NFL Red Zone', 'RedZone', 'Red Zone', 'NFL RZ'] },
+  // The single biggest soccer carrier on American linear TV: measured
+  // over three weeks it held 5 of 30 Premier League fixtures and 1 of 27
+  // Bundesliga, more than any other channel in either. ESPN writes it
+  // "USA Net".
+  { key: 'USANET',  label: 'USA Network', kind: 'cable',
+    aliases: ['USA Network', 'USA Net', 'USA'] },
   { key: 'TNT',     label: 'TNT',         kind: 'cable', aliases: ['TNT'] },
   { key: 'TRUTV',   label: 'truTV',       kind: 'cable', aliases: ['truTV', 'TruTV'] },
 

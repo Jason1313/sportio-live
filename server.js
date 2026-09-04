@@ -479,17 +479,24 @@ function saveAdminConfig(config) {
 
 let adminConfig = loadAdminConfig();
 
-// The three leagues this app covers. Basketball, hockey, baseball and
-// soccer were all supported once and were removed rather than left
-// dormant: they cost nothing to run, since every catalog, refresh and
-// warm is driven by what an account actually selects, but they were
-// four sports' worth of tables and branches nobody read. Restoring one
-// means restoring its entry in each table in this file - the endpoints
-// here, the logo bucket, the theme, and the display name - which the
-// git history has in one commit.
+// The leagues this app covers.
+//
+// Basketball, hockey, baseball and soccer were all removed once, on the
+// grounds that nobody was reading them. Hockey, baseball and soccer are
+// back; basketball is not. A league costs nothing to carry - every
+// catalog, refresh and warm is driven by what an account actually
+// selects - so this list is about what is worth offering, not about load.
+//
+// A key here is not automatically a browsable section. PFL and OTHER
+// exist so the MMA section can fan out across promotions, and the five
+// soccer competitions exist so the Soccer section can fan out across
+// leagues; what an account can actually pick is SUPPORTED_SPORTS below,
+// crossed with the dashboard's own list.
 const ESPN_ENDPOINTS = {
   NFL: 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard',
   NCAAFB: 'https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard',
+  NHL: 'https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard',
+  MLB: 'https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard',
   UFC: 'https://site.api.espn.com/apis/site/v2/sports/mma/ufc/scoreboard',
   // Not a browsable catalog of its own - see MMA_LEAGUES. Listed here so
   // getRealLeagueLogoUrl('PFL') can find the league's artwork, which it
@@ -501,8 +508,67 @@ const ESPN_ENDPOINTS = {
   // even though RIZIN and PFL have leagues of their own. It is one
   // endpoint covering an open-ended set of promotions, which is exactly
   // why the section can carry "everything else" without enumerating it.
-  OTHER: 'https://site.api.espn.com/apis/site/v2/sports/mma/other/scoreboard'
+  OTHER: 'https://site.api.espn.com/apis/site/v2/sports/mma/other/scoreboard',
+
+  // The five soccer competitions the Soccer section fans out across - see
+  // SOCCER_LEAGUES. Each is a real ESPN league with its own scoreboard,
+  // its own badge and its own teams, which is why they are listed
+  // individually rather than reached through ESPN's own 'soccer/all'
+  // endpoint.
+  //
+  // That endpoint exists and was measured: 100 events, 70 of them NCAA
+  // college soccer, and its `leagues` array comes back empty - so it
+  // gives no competition identity, no badge, and a section three
+  // quarters full of college fixtures. Naming the five costs five
+  // entries and gets a real badge and a real label on every card.
+  EPL: 'https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard',
+  LALIGA: 'https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard',
+  SERIEA: 'https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard',
+  BUNDESLIGA: 'https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard',
+  LIGUE1: 'https://site.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard'
 };
+
+// The Soccer section's competitions, in display order.
+//
+// Modelled on MMA_LEAGUES, and for the same reason: one section covering
+// several ESPN leagues, so widening it is an entry here rather than a
+// code path. `key` must exist in ESPN_ENDPOINTS above (for the badge),
+// in SPORT_THEMES (for the poster colours) and in
+// TEAM_LOGO_BUCKET_OVERRIDES (ESPN files every soccer team under the
+// literal folder 'soccer', never the league's own slug) - the startup
+// check below enforces all three.
+//
+// `label` is what the card is tagged with, and it rides in the same
+// `conferences` field college football uses for its ACC/SEC chips. That
+// is not a hack for want of a field: a competition is exactly the thing
+// somebody wants to filter a mixed row of fifty fixtures down to, which
+// is what that field already does.
+const SOCCER_LEAGUES = [
+  { key: 'EPL', label: 'Premier League' },
+  { key: 'LALIGA', label: 'La Liga' },
+  { key: 'SERIEA', label: 'Serie A' },
+  { key: 'BUNDESLIGA', label: 'Bundesliga' },
+  { key: 'LIGUE1', label: 'Ligue 1' }
+];
+
+// The browsable Soccer section. Not an ESPN league itself - it is the
+// five above, merged - so it is named here rather than in
+// ESPN_ENDPOINTS, the same way wrestling is.
+const SOCCER_SPORT = 'SOCCER';
+
+// How far ahead the Soccer section looks, in days.
+//
+// The third answer to the question fetchTodayGames' comment poses, and a
+// deliberate one. These leagues are not daily: a club plays once or twice
+// a week, so a today-only section is empty most days. They are not
+// season-week either - ESPN publishes no round structure for them the way
+// it does for the NFL, so there is no round to resolve.
+//
+// A week is the unit the competitions themselves run on, and it is what
+// people mean by "what's on this week". Measured over the next 21 days it
+// comes to about fifty fixtures a week across the five, which is the same
+// order as a college football Saturday and filterable by competition.
+const SOCCER_SCHEDULE_DAYS = 7;
 
 // The ESPN MMA leagues the MMA section pulls from, in display order.
 //
@@ -585,14 +651,21 @@ function getNcaaScoreboardParams(sportKey) {
 // entry in the tables above and cannot be recognised by looking for one.
 // Every gate that used to ask "does ESPN know this" asks this instead.
 const WRESTLING_SPORT = 'WRESTLING';
-const SUPPORTED_SPORTS = new Set([...Object.keys(ESPN_ENDPOINTS), WRESTLING_SPORT]);
+const SUPPORTED_SPORTS = new Set([...Object.keys(ESPN_ENDPOINTS), WRESTLING_SPORT, SOCCER_SPORT]);
 
 const ESPN_LEAGUES = {
   NFL: 'nfl',
   NCAAFB: 'college-football',
+  NHL: 'nhl',
+  MLB: 'mlb',
   UFC: 'ufc',
   PFL: 'pfl',
-  OTHER: 'other'
+  OTHER: 'other',
+  EPL: 'eng.1',
+  LALIGA: 'esp.1',
+  SERIEA: 'ita.1',
+  BUNDESLIGA: 'ger.1',
+  LIGUE1: 'fra.1'
 };
 
 // The landscape background's decorative overlay is spliced directly into
@@ -711,7 +784,18 @@ const TEAM_LOGO_BUCKET_OVERRIDES = {
   // Confirmed live - ESPN buckets ALL NCAA team logos under the literal
   // folder 'ncaa', not each sport's own league slug (NOT
   // 'college-football', which is what the fallback would otherwise use).
-  NCAAFB: 'ncaa'
+  NCAAFB: 'ncaa',
+
+  // And every soccer club under the literal folder 'soccer', whatever
+  // league it plays in - so eng.1, esp.1, ita.1, ger.1 and fra.1 all need
+  // this, or each would look for its badges under its own slug and find
+  // nothing.
+  EPL: 'soccer',
+  LALIGA: 'soccer',
+  SERIEA: 'soccer',
+  BUNDESLIGA: 'soccer',
+  LIGUE1: 'soccer',
+  SOCCER: 'soccer'
 };
 
 // The trailing fallback is the key itself, which is what ESPN's own
@@ -729,6 +813,15 @@ function getTeamLogoBucket(sportKey) {
 const SPORT_DISPLAY_NAMES = {
   NCAAFB: 'College Football',
   WRESTLING: 'Wrestling',
+  SOCCER: 'Soccer',
+  // The five competitions the Soccer section merges. They are never
+  // sections of their own, but a card carries its league key, so these
+  // are what a card is labelled with.
+  EPL: 'Premier League',
+  LALIGA: 'La Liga',
+  SERIEA: 'Serie A',
+  BUNDESLIGA: 'Bundesliga',
+  LIGUE1: 'Ligue 1',
   // The internal key stays UFC on purpose. It is what every saved account
   // already has in networkLinks and sportOrder, and what
   // existing catalog ids are built from - renaming it would migrate all
@@ -864,7 +957,13 @@ async function getBase64Image(url) {
 // was a guaranteed-failed request per team per slate, which is what
 // filled the log with fetch failures for images that then loaded fine
 // from the standard URL a moment later.
-const NO_SCOREBOARD_LOGO_BUCKETS = new Set(['ncaa']);
+//
+// Soccer is the same, and was measured the same way: scoreboard/lyon.png,
+// scoreboard/liv.png and scoreboard/rma.png all 404 while 500/167.png and
+// 500/364.png return the badge. A week of five leagues is around fifty
+// fixtures and a hundred crests, so leaving it in would have put a
+// hundred failed requests behind every Soccer tab.
+const NO_SCOREBOARD_LOGO_BUCKETS = new Set(['ncaa', 'soccer']);
 
 function teamLogoUrls(league, abbr, id) {
   const urls = [];
@@ -1723,6 +1822,20 @@ const SPORT_THEMES = {
   NFL: { primary: '#013369', secondary: '#D50A0A' },
   WRESTLING: { primary: '#0B1B2B', secondary: '#C8102E' },
   NCAAFB: { primary: '#013369', secondary: '#D50A0A' },
+  NHL: { primary: '#000000', secondary: '#41B6E6' },
+  MLB: { primary: '#0C2340', secondary: '#BA0C2F' },
+  // Each soccer competition keeps its own colours rather than sharing one
+  // "soccer" palette. A Soccer row mixes five leagues, and the accent is
+  // the cheapest way to tell at a glance which one a card belongs to -
+  // the same reason each card carries its own badge. SOCCER itself is the
+  // section's own colour, used where the section is drawn rather than a
+  // fixture.
+  SOCCER: { primary: '#0B6E4F', secondary: '#8FD694' },
+  EPL: { primary: '#3D195B', secondary: '#00FF85' },
+  LALIGA: { primary: '#EE8707', secondary: '#000000' },
+  SERIEA: { primary: '#0A2240', secondary: '#00A650' },
+  BUNDESLIGA: { primary: '#D20515', secondary: '#000000' },
+  LIGUE1: { primary: '#091C3E', secondary: '#DAE021' },
   UFC: { primary: '#000000', secondary: '#D20A0A' },
   PFL: { primary: '#0A0A0A', secondary: '#E4002B' },
   OTHER: { primary: '#1A1A1A', secondary: '#B31217' }
@@ -1735,12 +1848,70 @@ const SPORT_THEMES = {
 const DEFAULT_THEME = { primary: '#1E293B', secondary: '#64748B' };
 
 // Primary accent used for the subtle poster background gradient per sport.
-function getSportMotif(sportKey, accentColor) {
+function getSportMotif(sportKey, accentColor, opacity) {
+  // Each case keeps its own tuned value as the default - they differ on
+  // purpose - and a caller that needs the mark at full strength, like
+  // the logo route, passes one instead.
+  const o = (tuned) => (opacity === undefined ? tuned : opacity);
   switch (sportKey) {
+    case 'MLB':
+      return `
+        <g transform="translate(1500,540)" opacity="${o(0.18)}" stroke="${accentColor}" stroke-width="6" fill="none">
+          <circle r="380" />
+          <path d="M -260,-280 A 380,380 0 0,1 -260,280" stroke-dasharray="14 10" />
+          <path d="M 260,-280 A 380,380 0 0,0 260,280" stroke-dasharray="14 10" />
+        </g>`;
+    // The mat: the outer boundary, the passivity zone and the centre
+    // circle. Same shapes posters.js already draws on the stock wrestling
+    // card, so the section's mark and its cards agree.
+    //
+    // Wrestling had no motif at all, which until the logo route learned
+    // to draw one only meant a plain landscape. Now it is also what the
+    // section's own badge is made of, since ESPN carries no wrestling and
+    // there is no badge to fetch.
+    case 'WRESTLING':
+      return `
+        <g transform="translate(1500,540)" opacity="${o(0.16)}" stroke="${accentColor}" stroke-width="6" fill="none">
+          <circle r="380" />
+          <circle r="300" stroke-dasharray="18 12" />
+          <circle r="120" />
+          <line x1="-120" y1="0" x2="120" y2="0" />
+        </g>`;
+    case 'NHL':
+      return `
+        <g transform="translate(1500,540)" opacity="${o(0.18)}" stroke="${accentColor}" stroke-width="6" fill="none">
+          <circle r="380" />
+          <circle r="60" fill="${accentColor}" opacity="0.5" stroke="none" />
+          <line x1="-460" y1="0" x2="-260" y2="0" stroke-width="14" />
+          <line x1="260" y1="0" x2="460" y2="0" stroke-width="14" />
+        </g>`;
+    // A pitch seen from above, not a ball: the centre circle, the halfway
+    // line and the two penalty areas. Drawn rather than fetched, like
+    // every other motif here - it is a background, and a real crest at
+    // this opacity would read as a smudge.
+    //
+    // Shared by the section and all five competitions, because they are
+    // the same game. Only the accent differs, and that comes from the
+    // theme.
+    case 'SOCCER':
+    case 'EPL':
+    case 'LALIGA':
+    case 'SERIEA':
+    case 'BUNDESLIGA':
+    case 'LIGUE1':
+      return `
+        <g transform="translate(1500,540)" opacity="${o(0.16)}" stroke="${accentColor}" stroke-width="6" fill="none">
+          <rect x="-460" y="-330" width="920" height="660" />
+          <line x1="0" y1="-330" x2="0" y2="330" />
+          <circle r="130" />
+          <circle r="10" fill="${accentColor}" stroke="none" />
+          <rect x="-460" y="-180" width="120" height="360" />
+          <rect x="340" y="-180" width="120" height="360" />
+        </g>`;
     case 'NFL':
     case 'NCAAFB':
       return `
-        <g transform="translate(1500,540)" opacity="0.16" stroke="${accentColor}" stroke-width="10">
+        <g transform="translate(1500,540)" opacity="${o(0.16)}" stroke="${accentColor}" stroke-width="10">
           <line x1="-420" y1="-300" x2="420" y2="-300" />
           <line x1="-420" y1="-150" x2="420" y2="-150" />
           <line x1="-420" y1="0" x2="420" y2="0" />
@@ -1953,9 +2124,27 @@ app.get('/logo/:sport.svg', async (req, res) => {
   const leagueLogoUrl = await getRealLeagueLogoUrl(sportKey);
 
   const logoData = leagueLogoUrl ? await getBase64Image(leagueLogoUrl) : null;
+
+  // A section that is not an ESPN league has no badge to fetch, and
+  // until now got a blank square. Wrestling has been served one all
+  // along, and Soccer would be the second: both are sections built from
+  // something other than a single league, so there is no one mark that
+  // belongs to them.
+  //
+  // Drawn instead, from the same motif the landscape background uses -
+  // which is the app's existing answer to "there is no artwork for
+  // this", and reads as a deliberate mark rather than a failed fetch.
+  const theme = SPORT_THEMES[sportKey] || DEFAULT_THEME;
+  // The motif draws itself around a point at (1500,540) in the 1920x1080
+  // background, so it is moved to the centre of this square box and
+  // scaled to sit inside it. Full strength rather than the background's
+  // 0.16, which would be invisible as a mark.
   const logoMarkup = logoData
     ? `<image href="${logoData}" x="0" y="0" width="1080" height="1080" preserveAspectRatio="xMidYMid meet" />`
-    : '';
+    : `<rect width="1080" height="1080" fill="${theme.primary}" />
+       <g transform="translate(540,540) scale(0.95) translate(-1500,-540)">
+         ${getSportMotif(sportKey, theme.secondary, 0.85)}
+       </g>`;
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1080 1080" width="1080" height="1080">
     ${logoMarkup}
@@ -2893,12 +3082,58 @@ async function fetchWrestlingEvents(hostUrl, userTimeZone) {
   });
 }
 
+// One week of fixtures across the five competitions, merged into one
+// section.
+//
+// Each league is fetched under its OWN key rather than under 'SOCCER',
+// which is what gives every card its competition's badge, its
+// competition's colours, and the right team-logo folder. The section
+// exists only as the thing they are merged into.
+//
+// Tagged with the competition in `conferences`, the field college
+// football uses for its ACC/SEC chips - so a mixed row of fifty fixtures
+// arrives filterable by league in the watch portal without a line of new
+// UI.
+//
+// A league that fails is skipped rather than failing the section:
+// fetchTodayGames already returns an empty list on error, and four
+// competitions is a better answer than none.
+async function fetchSoccerGames(hostUrl, userTimeZone) {
+  const fromDateStr = getLocalDateString(userTimeZone);
+  const toDateStr = addDaysToDateString(fromDateStr, SOCCER_SCHEDULE_DAYS);
+
+  const perLeague = await Promise.all(SOCCER_LEAGUES.map(async (league) => {
+    const games = await fetchTodayGames(league.key, hostUrl, userTimeZone, {
+      queries: [`dates=${fromDateStr}-${toDateStr}`]
+    });
+    // The same { id, name } shape conferencesForEvent produces, because
+    // the watch portal's filter reads both through one code path and a
+    // bare string there renders a chip with no label and matches nothing.
+    return games.map(game => ({
+      ...game,
+      conferences: [{ id: league.key.toLowerCase(), name: league.label }]
+    }));
+  }));
+
+  const games = perLeague.flat();
+  console.log(`[ESPN] Soccer: ${games.length} fixture(s) over ${SOCCER_SCHEDULE_DAYS} days` +
+    ` (${SOCCER_LEAGUES.map((l, i) => `${l.label} ${perLeague[i].length}`).join(', ')})`);
+
+  // Sorted across the whole section rather than league by league. A week
+  // of five competitions read in league order would be five separate
+  // schedules stacked; by kickoff it is one.
+  return sortGamesByRelevance(games);
+}
+
 async function buildGamesForSport(sport, hostUrl, userTimeZone) {
   if (sport === 'UFC') {
     return fetchTodayMmaEvents(hostUrl, userTimeZone);
   }
   if (sport.toUpperCase() === WRESTLING_SPORT) {
     return fetchWrestlingEvents(hostUrl, userTimeZone);
+  }
+  if (sport.toUpperCase() === SOCCER_SPORT) {
+    return fetchSoccerGames(hostUrl, userTimeZone);
   }
   if (SEASON_WEEK_LEAGUES[sport.toUpperCase()]) {
     return fetchSeasonWeekGames(sport, hostUrl, userTimeZone);
@@ -5329,6 +5564,21 @@ for (const league of MMA_LEAGUES) {
   }
   if (!ESPN_ENDPOINTS[league.key] || !ESPN_CORE_EVENT_ENDPOINTS[league.key] || !SPORT_THEMES[league.key]) {
     throw new Error(`[MMA] League '${league.slug}' is missing an ESPN endpoint, Core event endpoint or theme for key '${league.key}'.`);
+  }
+}
+
+// The same check for the Soccer section, and it earns its keep for a
+// reason MMA does not have: soccer team badges live under the literal
+// folder 'soccer' rather than the league's own slug, so a competition
+// added here without that override would draw every card with two blank
+// crests - and blank crests look like a slow network, not a missing
+// table entry.
+for (const league of SOCCER_LEAGUES) {
+  if (!ESPN_ENDPOINTS[league.key] || !SPORT_THEMES[league.key]) {
+    throw new Error(`[Soccer] '${league.label}' is missing an ESPN endpoint or theme for key '${league.key}'.`);
+  }
+  if (TEAM_LOGO_BUCKET_OVERRIDES[league.key] !== 'soccer') {
+    throw new Error(`[Soccer] '${league.label}' needs TEAM_LOGO_BUCKET_OVERRIDES.${league.key} = 'soccer' - ESPN files every club's badge there, not under the league slug.`);
   }
 }
 
