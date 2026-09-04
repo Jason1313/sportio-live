@@ -289,11 +289,20 @@ const MAX_LINKS_PER_NETWORK = 10;
 // tvgId/name/group ride along purely as healing metadata: if the exact URL
 // stops appearing after a playlist refresh, they're what we search by to
 // find where that channel moved to. See resolveLinkEntry.
-function makeLinkEntry({ url, tvgId, name, group, streamId, type, probedQuality }) {
+//
+// providerId names which of the account's providers the link came from.
+// An account can carry several, and a stream id is only unique WITHIN one
+// of them - so without this a link saved from the second provider would
+// be rebuilt against the first one's credentials and play a completely
+// different channel. Empty on links saved before an account had more than
+// one provider, which callers read as the primary provider - the only one
+// those links could ever have come from.
+function makeLinkEntry({ url, tvgId, name, group, streamId, type, probedQuality, providerId }) {
   return {
     type: type || (streamId ? 'xtream' : 'm3u'),
     url: url || '',
     streamId: streamId || null,
+    providerId: typeof providerId === 'string' ? providerId : '',
     tvgId: tvgId || '',
     name: name || '',
     group: group || '',
@@ -320,7 +329,7 @@ function validateNetworkLinks(networkKey, rawLinks) {
   }
 
   const links = [];
-  const seenUrls = new Set();
+  const seen = new Set();
   for (const raw of rawLinks) {
     if (!raw || typeof raw !== 'object') {
       return { ok: false, error: 'Each link must be an object.' };
@@ -330,16 +339,25 @@ function validateNetworkLinks(networkKey, rawLinks) {
       if (!entry.streamId || !/^\d+$/.test(String(entry.streamId))) {
         return { ok: false, error: 'Xtream links need a numeric stream id.' };
       }
+      // Scoped by provider, because a stream id is only unique within one.
+      // Two providers each numbering a channel 1568650 is ordinary and
+      // they are different channels, so an unscoped check would reject
+      // the second one and make a two-provider network un-saveable.
+      const key = `${entry.providerId}|${entry.streamId}`;
+      if (seen.has(key)) {
+        return { ok: false, error: 'The same stream is listed twice for this network.' };
+      }
+      seen.add(key);
     } else {
       if (!/^https?:\/\//i.test(entry.url)) {
         return { ok: false, error: 'M3U links need an http(s) stream URL.' };
       }
       // Same URL twice in one network's slots is always a mistake - it
       // would just produce a duplicate entry in the player's list.
-      if (seenUrls.has(entry.url)) {
+      if (seen.has(entry.url)) {
         return { ok: false, error: 'The same stream is listed twice for this network.' };
       }
-      seenUrls.add(entry.url);
+      seen.add(entry.url);
     }
     links.push(entry);
   }
@@ -390,6 +408,13 @@ function validateSavedChannels(rawChannels) {
 // ---------------------------------------------------------------------
 // Link resolution + healing
 // ---------------------------------------------------------------------
+
+// Accepts either one playlist or a function from providerId to that
+// provider's playlist, so callers holding a single source do not have to
+// wrap it. See resolveNetworkLinks.
+function sourceResolver(source) {
+  return typeof source === 'function' ? source : () => source;
+}
 
 // Resolves one saved link against the current parsed playlist.
 //
@@ -447,16 +472,23 @@ function resolveLinkEntry(entry, source) {
 // but reported separately, so the caller can tell the difference between
 // "nothing configured" and "configured but broken" - two situations that
 // need very different messages.
+//
+// `source` may be one parsed playlist, or a function taking the link's
+// providerId and returning that provider's playlist. An account can hold
+// several providers, and healing a link against the wrong one's channel
+// list is worse than not healing it at all - it would swap a broken link
+// for a confidently wrong one.
 function resolveNetworkLinks(networkLinks, networkKey, source, buildXtreamUrl) {
   const entries = (networkLinks && networkLinks[networkKey]) || [];
+  const sourceFor = sourceResolver(source);
   const resolved = [];
   const problems = [];
 
   entries.forEach((entry, index) => {
-    const result = resolveLinkEntry(entry, source);
+    const result = resolveLinkEntry(entry, sourceFor(entry.providerId));
 
     if (entry.type === 'xtream') {
-      const url = buildXtreamUrl ? buildXtreamUrl(entry.streamId) : null;
+      const url = buildXtreamUrl ? buildXtreamUrl(entry.streamId, entry.providerId) : null;
       if (url) resolved.push({ ...entry, url, slot: index + 1, status: 'ok' });
       else problems.push({ slot: index + 1, name: entry.name, reason: 'no Xtream credentials configured' });
       return;
@@ -486,11 +518,12 @@ function resolveNetworkLinks(networkLinks, networkKey, source, buildXtreamUrl) {
 // { resolved, problems } split so the caller can tell "gone" from
 // "moved".
 function resolveSavedChannels(savedChannels, source) {
+  const sourceFor = sourceResolver(source);
   const resolved = [];
   const problems = [];
 
   (savedChannels || []).forEach((entry, index) => {
-    const result = resolveLinkEntry(entry, source);
+    const result = resolveLinkEntry(entry, sourceFor(entry.providerId));
     if (result.status === 'missing') {
       problems.push({ slot: index + 1, name: entry.name || entry.url, reason: result.note });
       return;
@@ -789,6 +822,7 @@ function autoSearchChannels(channels, config, options = {}) {
       name: channel.name || '',
       url: channel.streamUrl,
       group: matchedGroup || (channel.categories || [])[0] || '',
+      providerId: channel.providerId || '',
     });
     if (out.length >= limit) break;
   }
@@ -1196,6 +1230,7 @@ function presetChannelsForNetwork(networkKey, channels, preferredStreamIds) {
       // stores the id and has its URL rebuilt from credentials at request
       // time, so rotating a password does not strand every saved channel.
       streamId: channel.streamId,
+      providerId: channel.providerId,
     }),
     quality: detectQuality(channel.name).label,
     groups: channel.categories || [],
@@ -1365,6 +1400,7 @@ function searchChannels(query, channels, options = {}) {
           name: channel.name,
           group: groups[0] || '',
           streamId: channel.streamId,
+          providerId: channel.providerId,
         }),
         groups,
       }

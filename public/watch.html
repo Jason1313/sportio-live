@@ -563,6 +563,13 @@
   // list and turning it off is the first thing anyone will do.
   let teamSearchData = null;
   let teamSearchOff = new Set();
+  // The same idea one level up: an account can hold several IPTV
+  // services, and when a team search returns eighty guesses, "not that
+  // provider" is as useful a cut as "not that word" - often more so, when
+  // one service files a thousand per-event listings and the other does
+  // not. Switched off client-side like the terms, for the same reason:
+  // the answer is already in hand and a redraw is instant.
+  let teamSearchProvidersOff = new Set();
 
   const credentials = () => ({ uuid, password });
   let catalogs = [];
@@ -1494,6 +1501,7 @@
     streamSearchNote = '';
     teamSearchData = null;
     teamSearchOff = new Set();
+    teamSearchProvidersOff = new Set();
     clearTimeout(streamSearchTimer);
     panel.classList.remove('hidden');
     lockScroll();
@@ -1616,22 +1624,42 @@
   // one of them is unticked.
   function visibleTeamSearchRows() {
     if (!teamSearchData) return [];
-    return teamSearchData.results.filter(r => r.terms.some(t => !teamSearchOff.has(t)));
+    return teamSearchData.results.filter(r =>
+      r.terms.some(t => !teamSearchOff.has(t))
+      && !teamSearchProvidersOff.has(r.providerId || ''));
   }
 
   function teamSearchHtml() {
     if (!teamSearchData || teamSearchData.terms.length === 0) return '';
 
     const rows = visibleTeamSearchRows();
-    const chips = teamSearchData.terms.map(t => {
-      const off = teamSearchOff.has(t.term);
-      return `<button onclick="toggleTeamSearchTerm(${JSON.stringify(t.term).replace(/"/g, '&quot;')})"
-                      class="text-[10px] px-1.5 py-0.5 rounded border transition ${off
-                        ? 'border-[#c0392b]/40 bg-[#c0392b]/15 text-[#e56a6a] line-through'
-                        : 'border-[#5aa8d1]/40 bg-[#5aa8d1]/15 text-[#5aa8d1]'}">
-                ${escapeHtml(t.term)} <span class="opacity-60">${t.count}</span>
-              </button>`;
-    }).join('');
+    const chip = (label, count, off, onclick, tone) => `
+      <button onclick="${onclick}"
+              class="text-[10px] px-1.5 py-0.5 rounded border transition ${off
+                ? 'border-[#c0392b]/40 bg-[#c0392b]/15 text-[#e56a6a] line-through'
+                : tone}">
+        ${escapeHtml(label)} <span class="opacity-60">${count}</span>
+      </button>`;
+
+    const chips = teamSearchData.terms.map(t => chip(
+      t.term, t.count, teamSearchOff.has(t.term),
+      `toggleTeamSearchTerm(${JSON.stringify(t.term).replace(/"/g, '&quot;')})`,
+      'border-[#5aa8d1]/40 bg-[#5aa8d1]/15 text-[#5aa8d1]'
+    )).join('');
+
+    // Only when there is more than one to choose between. A single-
+    // provider account has nothing to filter and a lone chip that can
+    // only ever empty the panel is worse than no chip at all.
+    const providers = teamSearchData.providers || [];
+    const providerChips = providers.length < 2 ? '' : `
+      <div class="flex flex-wrap gap-1 mt-1 items-center">
+        <span class="text-[10px] text-[#e6e6e6]/35">Providers</span>
+        ${providers.map(pr => chip(
+          pr.label, pr.count, teamSearchProvidersOff.has(pr.id),
+          `toggleTeamSearchProvider(${JSON.stringify(pr.id).replace(/"/g, '&quot;')})`,
+          'border-[#e6b800]/40 bg-[#e6b800]/15 text-[#e6b800]'
+        )).join('')}
+      </div>`;
 
     // Said plainly rather than left to be inferred from an empty panel:
     // nothing is configured for this game, so these are guesses made from
@@ -1643,16 +1671,17 @@
         </p>
         <p class="text-[10px] text-[#e6e6e6]/45 mt-0.5 leading-snug">
           No channel is configured for this game, so your playlist was searched for each team.
-          Switch a term off to drop what it found.
+          Switch a term off to drop what it found${providers.length > 1 ? ', or a provider to drop everything on that service' : ''}.
         </p>
         <div class="flex flex-wrap gap-1 mt-1.5">${chips}</div>
+        ${providerChips}
       </div>`;
 
     if (rows.length === 0) {
       return header + `<p class="text-[11px] text-[#e6e6e6]/40 px-3 pb-2 italic">
           ${teamSearchData.results.length === 0
             ? 'Nothing in your playlist matched either team.'
-            : 'Every term is switched off.'}
+            : 'Everything found is switched off.'}
         </p>`;
     }
     return header + rows.map(streamRowHtml).join('');
@@ -1662,6 +1691,12 @@
     if (teamSearchOff.has(term)) teamSearchOff.delete(term);
     else teamSearchOff.add(term);
     // Redrawn from what is already in hand - no refetch.
+    renderStreams();
+  }
+
+  function toggleTeamSearchProvider(id) {
+    if (teamSearchProvidersOff.has(id)) teamSearchProvidersOff.delete(id);
+    else teamSearchProvidersOff.add(id);
     renderStreams();
   }
 
@@ -1711,12 +1746,23 @@
     const channels = (res.data && res.data.channels) || [];
     streamSearchGroups = (res.data && res.data.groups) || [];
     streamSearchNote = channels.length === 0 ? `Nothing in your playlist matched "${query}".` : '';
+    // Which service each hit is on. Only worth saying when the account
+    // has more than one, and then it is worth saying on every row: the
+    // list is a mix, and two channels with the same name from two
+    // services are otherwise indistinguishable.
+    const providers = (res.data && res.data.providers) || [];
+    const providerLabel = providers.length < 2
+      ? () => ''
+      : (id) => {
+          const hit = providers.find(pr => pr.id === id) || providers[0];
+          return hit ? `  🛰️ ${hit.label}` : '';
+        };
     // Mapped into the same { name, title, url } shape the addon returns,
     // so one row renderer serves both.
     streamSearchRows = channels.map(c => ({
       name: c.name || '',
       url: c.url,
-      title: `🔍 Search  📁 ${(c.groups || []).join(' | ')}`
+      title: `🔍 Search  📁 ${(c.groups || []).join(' | ')}${providerLabel(c.providerId)}`
     }));
     renderStreams();
   }

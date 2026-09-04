@@ -264,12 +264,12 @@
           blackscreen channels are flagged before you ever try one. Quality checks then read from it
           instead of measuring, and fall back to measuring for anything it does not list.
         </p>
-        <div class="flex gap-2 mb-2">
-          <select id="streamcheck-provider" onchange="saveStreamcheckProvider()"
-                  class="flex-1 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
-            <option value="">Not using published data</option>
-          </select>
-        </div>
+        <!-- One row per provider on the account. Stream ids are assigned
+             per service and collide across them, so each provider needs
+             its own table named separately - a single choice for the
+             account would describe one service's channels and quietly
+             mis-describe the other's. -->
+        <div id="streamcheck-rows" class="space-y-2 mb-2"></div>
         <p id="streamcheck-status" class="text-[11px] text-[#e6e6e6]/45 leading-relaxed"></p>
       </div>
 
@@ -408,6 +408,34 @@
           <i class="fa-solid fa-clock"></i>
           Change Timezone
         </button>
+        <button id="manage-providers-btn" onclick="toggleProvidersPanel()" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 text-xs font-bold py-2.5 rounded-lg transition flex items-center justify-center gap-2">
+          <i class="fa-solid fa-satellite-dish"></i>
+          Providers
+        </button>
+      </div>
+
+      <!-- Several IPTV services under one login.
+           No single service carries everything - one has the national
+           feeds, another the regionals - and the alternative to this was
+           two accounts, two manifests and two lists of links kept in step
+           by hand. Every list in the app draws on all of them, and
+           auto-pick fills a network's slots from each in turn so one
+           service having a bad night is half a list rather than all of
+           it. Order matters: it is the tie-break when two services offer
+           equally good channels. -->
+      <div id="providers-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-6">
+        <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Your providers</h4>
+        <p id="providers-intro" class="text-[11px] text-[#e6e6e6]/45 mb-3 leading-relaxed"></p>
+        <div id="providers-list" class="space-y-3"></div>
+        <div id="providers-error" class="hidden text-xs text-[#e56a6a] font-semibold mt-3"></div>
+        <div class="grid grid-cols-2 gap-3 mt-4">
+          <button id="providers-add-btn" onclick="addProviderRow()" class="w-full bg-[#56707d] hover:bg-[#66818f] font-bold py-2.5 rounded-lg text-xs transition">
+            Add a provider
+          </button>
+          <button onclick="saveProviders()" class="w-full bg-[#3b8fc4] hover:bg-[#4fa3d8] font-bold py-2.5 rounded-lg text-xs transition">
+            Save providers
+          </button>
+        </div>
       </div>
 
       <!-- Xtream Credentials (collapsed until Edit Xtream is clicked) -->
@@ -1011,6 +1039,11 @@
             uuid: data.uuid,
             password,
             connectionType,
+            // As the server normalised it, ids and all. Building it here
+            // from the wizard fields would give the dashboard a provider
+            // with no id, and every per-provider control keys off that.
+            providers: data.providers || [],
+            maxProviders: data.maxProviders || 4,
             xtream: connectionType === 'xtream' ? wizardXtream : undefined,
             m3u: connectionType === 'm3u' ? wizardM3u : undefined,
             selectedSports: wizardSelectedSports,
@@ -1070,6 +1103,11 @@
     let editXtreamOriginalValues = null;
 
     let editXtreamTestedCredentials = null;
+    // Set when a credential edit has been confirmed but not yet saved, so
+    // Save and Copy Link knows to send the provider list. Without it that
+    // button would either never persist a credential change, or send a
+    // stale list over every save.
+    let providerCredentialsPending = false;
 
     const UNSAVED_CHANGES_WARNING = 'You have unsaved category changes that will be lost if you continue. Continue anyway?';
 
@@ -1097,10 +1135,19 @@
       xtreamBtn.classList.toggle('hidden', isM3u);
       xtreamBtn.classList.toggle('flex', !isM3u);
 
-      formatBlock.classList.toggle('hidden', isM3u);
+      // Hidden for M3U, which has no such choice, and hidden once the
+      // account holds more than one service - each of those sets its own
+      // format in the Providers panel, and a single control here would
+      // silently be about one of them.
+      const providerCount = (activeUser.providers || []).length;
+      formatBlock.classList.toggle('hidden', isM3u || providerCount > 1);
       const select = document.getElementById('xtream-format-select');
       if (select) {
-        select.value = (activeUser.xtream && activeUser.xtream.streamFormat) === 'ts' ? 'ts' : 'm3u8';
+        // The first provider's format. The control edits one service,
+        // and the first is the one the pre-providers dashboard was always
+        // editing - see legacyConnectionFields on the server.
+        const first = (activeUser.providers || [])[0];
+        select.value = (first && first.streamFormat) === 'ts' ? 'ts' : 'm3u8';
       }
     }
 
@@ -1113,7 +1160,8 @@
         ['edit-xtream-trigger-btn', 'edit-xtream-panel'],
         ['edit-m3u-trigger-btn', 'edit-m3u-panel'],
         ['manage-sports-btn', 'manage-sports-panel'],
-        ['change-timezone-btn', 'change-timezone-panel']
+        ['change-timezone-btn', 'change-timezone-panel'],
+        ['manage-providers-btn', 'providers-panel']
       ];
       pairs.forEach(([btnId, panelId]) => {
         const btn = document.getElementById(btnId);
@@ -1142,7 +1190,10 @@
         closeManageSportsPanelSilently();
         closeChangeTimezonePanelSilently();
         closeDeleteAccountPanelSilently();
-        const x = (activeUser && activeUser.xtream) || {};
+        // The first provider, not the legacy copy - the Providers panel
+        // can have replaced these since login, and prefilling from a
+        // stale field would offer credentials the account no longer has.
+        const x = ((activeUser && activeUser.providers) || [])[0] || {};
         editXtreamOriginalValues = { url: x.url || '', username: x.username || '', password: x.password || '' };
         document.getElementById('edit-xtream-url').value = editXtreamOriginalValues.url;
         document.getElementById('edit-xtream-username').value = editXtreamOriginalValues.username;
@@ -1273,7 +1324,7 @@
         closeManageSportsPanelSilently();
         closeChangeTimezonePanelSilently();
         closeDeleteAccountPanelSilently();
-        const m = (activeUser && activeUser.m3u) || {};
+        const m = ((activeUser && activeUser.providers) || [])[0] || {};
         editM3uOriginalValues = { playlistUrl: m.playlistUrl || '', epgUrl: m.epgUrl || '' };
         document.getElementById('edit-m3u-playlist-url').value = editM3uOriginalValues.playlistUrl;
         document.getElementById('edit-m3u-epg-url').value = editM3uOriginalValues.epgUrl;
@@ -1391,6 +1442,14 @@
       }
 
       activeUser.m3u = editM3uImportedValues;
+      // Staged into the provider list, the same way the Xtream panel
+      // does. saveAllChanges sends that list; it never sent `m3u`, so
+      // before this an edited playlist URL was applied to the session and
+      // then quietly lost on the next login.
+      if ((activeUser.providers || []).length > 0) {
+        activeUser.providers[0] = { ...activeUser.providers[0], ...editM3uImportedValues };
+        providerCredentialsPending = true;
+      }
       document.getElementById('edit-m3u-panel').classList.add('hidden');
       resetEditM3uState();
       markDashboardDirty();
@@ -1407,6 +1466,14 @@
       }
 
       activeUser.xtream = editXtreamTestedCredentials;
+      // Staged into the provider list, which is what actually gets saved.
+      // This panel edits the first provider - the only one an account had
+      // before the list existed, and the one every other legacy control
+      // here still means.
+      if ((activeUser.providers || []).length > 0) {
+        activeUser.providers[0] = { ...activeUser.providers[0], ...editXtreamTestedCredentials };
+        providerCredentialsPending = true;
+      }
       document.getElementById('edit-xtream-panel').classList.add('hidden');
       resetEditXtreamState();
       markDashboardDirty();
@@ -1466,6 +1533,14 @@
       const div = document.createElement('div');
       div.textContent = str == null ? '' : String(str);
       return div.innerHTML;
+    }
+
+    // A string safe to drop into an inline handler as an argument -
+    // JSON-quoted so the value survives, then attribute-escaped so the
+    // quotes do not end the attribute early. Ids are generated here and
+    // are tame, but the same helper is used for labels the user typed.
+    function quoteAttr(value) {
+      return escapeHtml(JSON.stringify(value == null ? '' : String(value)));
     }
 
     // --- Dashboard: Change Timezone editor ---
@@ -1839,6 +1914,21 @@
     // One row per saved link. Slot number is the priority - slot 1 is
     // tried first - so it's shown explicitly rather than left implicit in
     // the ordering.
+    // Which service a link, suggestion or search hit is on.
+    //
+    // Only rendered when the account holds more than one - with a single
+    // provider it is the same word on every row and says nothing. It
+    // matters most on this list: ten slots holding five channels from
+    // each of two services look identical without it, and which is which
+    // is exactly what someone reordering them is deciding.
+    function providerTag(providerId) {
+      const providers = (activeUser && activeUser.providers) || [];
+      if (providers.length < 2) return '';
+      const provider = providers.find(pr => pr.id === providerId) || providers[0];
+      return `<span class="text-[#e6b800]/80" title="Provider this channel is on">${escapeHtml(provider.label)}</span>
+              <span class="text-[#e6e6e6]/25">&middot;</span> `;
+    }
+
     function buildNetworkLinkRow(key, link, index, total) {
       const status = networkStatus[key] || {};
       const healed = (status.healed || []).find(h => h.slot === index + 1);
@@ -1865,7 +1955,8 @@
               ${quality}
             </div>
             <div class="text-[10px] text-[#e6e6e6]/45 truncate">
-              <span class="font-mono text-[#5aa8d1]/70" title="Stream id - unique to this feed, specific to your provider">#${escapeHtml(streamIdFromUrl(link.url))}</span>
+              ${providerTag(link.providerId)}
+              <span class="font-mono text-[#5aa8d1]/70" title="Stream id - unique to this feed, and only within one provider">#${escapeHtml(streamIdFromUrl(link.url))}</span>
               ${link.tvgId ? `<span class="font-mono text-[#e6e6e6]/35" title="Channel id - shared by every feed of this channel, and what Save As Defaults stores">${escapeHtml(link.tvgId)}</span>` : ''}
               ${link.group ? '&middot; ' + escapeHtml(link.group) : ''}
             </div>
@@ -2368,6 +2459,12 @@
       if (opening) loadStreamcheckProviders();
     }
 
+    // What streamcheck.pro publishes tables for, and what this instance
+    // is holding for each. Fetched when the panel opens and reused while
+    // the rows redraw.
+    let streamcheckTables = [];
+    let streamcheckHeld = [];
+
     async function loadStreamcheckProviders() {
       const note = document.getElementById('streamcheck-status');
       note.textContent = 'Loading providers...';
@@ -2383,44 +2480,72 @@
           return;
         }
 
-        const select = document.getElementById('streamcheck-provider');
-        select.innerHTML = '<option value="">Not using published data</option>' +
-          (data.providers || []).map(p =>
-            `<option value="${escapeHtml(p)}" ${p === data.selected ? 'selected' : ''}>${escapeHtml(p)}</option>`).join('');
-
-        const held = (data.cached || []).find(c => c.provider === data.selected);
-        note.textContent = !data.selected
-          ? 'Pick the provider your playlist comes from. Its stream ids are what the lookup matches on.'
-          : held
-            ? `Holding ${held.channels.toLocaleString()} channels for ${held.provider}, from the sweep dated ${held.runDate}.`
-            : `${data.selected} selected. Its data loads on the next dashboard refresh.`;
+        streamcheckTables = data.providers || [];
+        streamcheckHeld = data.cached || [];
+        // The server's list decides which providers exist and what each
+        // is pointed at; a stale local copy would draw a row for one
+        // since removed.
+        mergeProviders(data.accountProviders || activeUser.providers);
+        renderStreamcheckRows();
       } catch (err) {
         note.textContent = `Could not reach the server: ${err.message}`;
       }
     }
 
-    async function saveStreamcheckProvider() {
-      const select = document.getElementById('streamcheck-provider');
+    function renderStreamcheckRows() {
+      const box = document.getElementById('streamcheck-rows');
       const note = document.getElementById('streamcheck-status');
-      const streamcheckProvider = select.value;
-      note.textContent = streamcheckProvider
-        ? `Fetching ${streamcheckProvider}'s published data - this takes a few seconds the first time...`
-        : 'Turning published data off...';
+      if (!box) return;
+
+      const providers = activeUser.providers || [];
+      box.innerHTML = providers.map(pr => `
+        <div class="flex items-center gap-2">
+          ${providers.length > 1
+            ? `<span class="text-[11px] text-[#e6e6e6]/55 w-24 shrink-0 truncate">${escapeHtml(pr.label)}</span>`
+            : ''}
+          <select onchange="saveStreamcheckTable(${quoteAttr(pr.id)}, this.value)"
+                  class="flex-1 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
+            <option value="">Not using published data</option>
+            ${streamcheckTables.map(t =>
+              `<option value="${escapeHtml(t)}" ${t === pr.streamcheckProvider ? 'selected' : ''}>${escapeHtml(t)}</option>`).join('')}
+          </select>
+        </div>`).join('');
+
+      // One line per provider that names a table, because an account
+      // holding two can easily have one loaded and one not - a state that
+      // is otherwise indistinguishable from both being fine.
+      const lines = providers.map(pr => {
+        if (!pr.streamcheckProvider) return `${pr.label}: not using published data.`;
+        const held = streamcheckHeld.find(c => c.provider === pr.streamcheckProvider);
+        return held
+          ? `${pr.label}: ${held.channels.toLocaleString()} channels from ${held.provider}, sweep dated ${held.runDate}.`
+          : `${pr.label}: ${pr.streamcheckProvider} selected, loading on the next refresh.`;
+      });
+      note.textContent = providers.every(pr => !pr.streamcheckProvider)
+        ? 'Pick the provider each of your services comes from. Its stream ids are what the lookup matches on.'
+        : lines.join('  ');
+    }
+
+    async function saveStreamcheckTable(providerId, table) {
+      const note = document.getElementById('streamcheck-status');
+      note.textContent = table
+        ? `Fetching ${table}'s published data - this takes a few seconds the first time...`
+        : 'Turning published data off for that provider...';
       try {
-        const res = await fetch('/api/user/update', {
+        const res = await fetch('/api/streamcheck/select', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, streamcheckProvider })
+          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, providerId, table })
         });
         const data = await res.json().catch(() => null);
         if (!res.ok || !data || !data.success) {
           note.textContent = (data && data.error) || 'Could not save the provider.';
           return;
         }
-        activeUser.streamcheckProvider = streamcheckProvider;
-        showStatus(streamcheckProvider
-          ? `Using published quality data for ${streamcheckProvider}.`
-          : 'Published quality data turned off.');
+        mergeProviders(data.providers || activeUser.providers);
+        showStatus(table
+          ? `Using published quality data for ${table}.`
+          : 'Published quality data turned off for that provider.');
         // The suggestions on screen were built without it - and this is
         // the request that loads the provider table, so the panel can
         // report what arrived once it returns.
@@ -2428,6 +2553,207 @@
         await loadStreamcheckProviders();
       } catch (err) {
         note.textContent = `Network error while saving: ${err.message}`;
+      }
+    }
+
+    // Folds the server's provider list onto the one this page is holding.
+    //
+    // Credentials travel exactly twice - on register and on login - and
+    // every other response describes a provider without them. Assigning
+    // those responses straight over activeUser.providers would silently
+    // empty the password the Edit panel prefills from, so the server's
+    // copy wins on everything it actually carries and the secrets already
+    // in hand are kept for providers it still lists.
+    function mergeProviders(serverList) {
+      const held = new Map((activeUser.providers || []).map(pr => [pr.id, pr]));
+      activeUser.providers = (serverList || []).map(pr => {
+        const previous = held.get(pr.id) || {};
+        return {
+          ...previous,
+          ...pr,
+          password: pr.password !== undefined ? pr.password : (previous.password || ''),
+        };
+      });
+      return activeUser.providers;
+    }
+
+    // ---- Providers ----------------------------------------------------
+    //
+    // Held as a draft while the panel is open and saved as one list, not
+    // as a series of single edits. Order is part of what is being edited:
+    // it decides which service's block of auto-picked links comes first
+    // when two of them offer equally good channels, and a reorder cannot
+    // be expressed as a sequence of add/remove without the list being
+    // briefly wrong in between.
+    let providerDraft = null;
+
+    function toggleProvidersPanel() {
+      const panel = document.getElementById('providers-panel');
+      if (!panel) return;
+      const opening = panel.classList.contains('hidden');
+      panel.classList.toggle('hidden', !opening);
+      if (!opening) { providerDraft = null; return; }
+      // Copied, so closing the panel without saving leaves the account
+      // untouched. Whatever password the draft is carrying rides along; a
+      // row the user does not retype arrives at the server either with
+      // the credentials it already had or with nothing, and the server
+      // keeps the stored one for the second case.
+      providerDraft = (activeUser.providers || []).map(pr => ({ ...pr }));
+      if (providerDraft.length === 0) providerDraft.push(blankProvider());
+      renderProviders();
+    }
+
+    function blankProvider() {
+      const kind = (activeUser && activeUser.connectionType === 'm3u') ? 'm3u' : 'xtream';
+      return { id: '', label: '', kind, streamcheckProvider: '',
+               url: '', username: '', password: '', playlistUrl: '', epgUrl: '' };
+    }
+
+    function renderProviders() {
+      const list = document.getElementById('providers-list');
+      const intro = document.getElementById('providers-intro');
+      const addBtn = document.getElementById('providers-add-btn');
+      if (!list || !providerDraft) return;
+
+      const max = activeUser.maxProviders || 4;
+      const full = providerDraft.length >= max;
+      intro.textContent = `Each service is searched, picked from and quality-checked on its own. `
+        + `Up to ${max}; the order here is the order their links are tried in.`;
+      addBtn.disabled = full;
+      addBtn.classList.toggle('opacity-40', full);
+      addBtn.classList.toggle('cursor-not-allowed', full);
+
+      const field = (i, key, type, placeholder, value) => `
+        <input type="${type}" value="${escapeHtml(value || '')}" placeholder="${escapeHtml(placeholder)}"
+               oninput="updateProviderField(${i}, ${quoteAttr(key)}, this.value)"
+               class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">`;
+
+      list.innerHTML = providerDraft.map((pr, i) => `
+        <div class="border border-[#e6e6e6]/10 rounded-lg p-3 space-y-2">
+          <div class="flex items-center gap-2">
+            <span class="text-[10px] font-bold text-[#5aa8d1] w-5 shrink-0">${i + 1}</span>
+            ${field(i, 'label', 'text', 'Name for this provider', pr.label)}
+            <button onclick="moveProvider(${i}, -1)" ${i === 0 ? 'disabled' : ''}
+                    class="text-[11px] px-2 py-1.5 rounded border border-[#e6e6e6]/15 ${i === 0 ? 'opacity-30' : 'hover:bg-white/5'}">
+              <i class="fa-solid fa-arrow-up"></i>
+            </button>
+            <button onclick="moveProvider(${i}, 1)" ${i === providerDraft.length - 1 ? 'disabled' : ''}
+                    class="text-[11px] px-2 py-1.5 rounded border border-[#e6e6e6]/15 ${i === providerDraft.length - 1 ? 'opacity-30' : 'hover:bg-white/5'}">
+              <i class="fa-solid fa-arrow-down"></i>
+            </button>
+            <button onclick="removeProvider(${i})" ${providerDraft.length === 1 ? 'disabled' : ''}
+                    class="text-[11px] px-2 py-1.5 rounded border border-[#c0392b]/40 text-[#e56a6a] ${providerDraft.length === 1 ? 'opacity-30' : 'hover:bg-[#c0392b]/15'}">
+              <i class="fa-solid fa-trash"></i>
+            </button>
+          </div>
+          ${pr.kind === 'm3u'
+            ? field(i, 'playlistUrl', 'text', 'Playlist URL (http://...)', pr.playlistUrl)
+              + field(i, 'epgUrl', 'text', 'EPG URL (optional)', pr.epgUrl)
+            : field(i, 'url', 'text', 'Server URL (http://...)', pr.url)
+              + `<div class="grid grid-cols-2 gap-2">
+                   ${field(i, 'username', 'text', 'Username', pr.username)}
+                   ${field(i, 'password', 'password', pr.id ? 'Password (unchanged)' : 'Password', '')}
+                 </div>
+                 <label class="flex items-center gap-2 text-[10px] text-[#e6e6e6]/45">
+                   Stream format
+                   <select onchange="updateProviderField(${i}, 'streamFormat', this.value)"
+                           class="bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-2 py-1 text-[11px] focus:border-[#3b8fc4] focus:outline-none">
+                     <option value="m3u8" ${pr.streamFormat !== 'ts' ? 'selected' : ''}>.m3u8 (HLS)</option>
+                     <option value="ts" ${pr.streamFormat === 'ts' ? 'selected' : ''}>.ts (MPEG-TS)</option>
+                   </select>
+                 </label>`}
+          ${pr.id ? `<p class="text-[10px] text-[#e6e6e6]/35">
+              Quality data: ${escapeHtml(pr.streamcheckProvider || 'none chosen')} &mdash; chosen under Quality data.
+            </p>` : ''}
+        </div>`).join('');
+    }
+
+    function updateProviderField(index, key, value) {
+      if (!providerDraft || !providerDraft[index]) return;
+      providerDraft[index][key] = value;
+      // Deliberately no redraw: rebuilding the rows on every keystroke
+      // would put the caret back at the end of the field being typed in.
+    }
+
+    function moveProvider(index, delta) {
+      const target = index + delta;
+      if (!providerDraft || target < 0 || target >= providerDraft.length) return;
+      const [moved] = providerDraft.splice(index, 1);
+      providerDraft.splice(target, 0, moved);
+      renderProviders();
+    }
+
+    function removeProvider(index) {
+      if (!providerDraft || providerDraft.length === 1) return;
+      const pr = providerDraft[index];
+      // Links already saved from a removed provider are left alone rather
+      // than swept up. They still name a real channel, and an account
+      // that removes a service by mistake would otherwise lose every link
+      // it had ever chosen from it with no way back.
+      const name = pr.label || 'this provider';
+      if (!confirm(`Remove ${name}? Links saved from it stop resolving until you add it back.`)) return;
+      providerDraft.splice(index, 1);
+      renderProviders();
+    }
+
+    function addProviderRow() {
+      if (!providerDraft) return;
+      if (providerDraft.length >= (activeUser.maxProviders || 4)) return;
+      providerDraft.push(blankProvider());
+      renderProviders();
+    }
+
+    async function saveProviders() {
+      const err = document.getElementById('providers-error');
+      err.classList.add('hidden');
+      if (!providerDraft) return;
+
+      // An empty password on a row that already exists means "leave it
+      // alone", which the server understands. On a NEW row it means the
+      // credentials are incomplete, and saying so here beats a provider
+      // that saves cleanly and then cannot be reached.
+      for (const [i, pr] of providerDraft.entries()) {
+        const missing = pr.kind === 'm3u'
+          ? (!pr.playlistUrl ? 'a playlist URL' : '')
+          : (!pr.url ? 'a server URL'
+            : !pr.username ? 'a username'
+            : (!pr.id && !pr.password) ? 'a password' : '');
+        if (missing) {
+          err.textContent = `Provider ${i + 1} needs ${missing}.`;
+          err.classList.remove('hidden');
+          return;
+        }
+      }
+
+      try {
+        const res = await fetch('/api/user/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uuid: activeUser.uuid, password: activeUser.password, providers: providerDraft
+          })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          err.textContent = (data && data.error) || 'Could not save your providers.';
+          err.classList.remove('hidden');
+          return;
+        }
+        mergeProviders(data.providers || []);
+        providerDraft = activeUser.providers.map(pr => ({ ...pr, password: '' }));
+        renderProviders();
+        // The stand-alone stream-format control is only right for an
+        // account with one service, so adding or removing one changes
+        // whether it belongs on screen at all.
+        applyConnectionType();
+        showStatus(`Saved ${activeUser.providers.length} provider(s).`);
+        // Everything on screen was drawn from the old list - the channel
+        // picker, the badges, the quality panel - so it is all redrawn
+        // rather than left describing services the account no longer has.
+        await loadNetworkLinks();
+      } catch (e) {
+        err.textContent = `Network error while saving: ${e.message}`;
+        err.classList.remove('hidden');
       }
     }
 
@@ -2506,12 +2832,12 @@
       const d = qualityFilterOptions;
 
       if (!d.provider) {
-        body.innerHTML = '<p class="text-[11px] text-[#e6e6e6]/45 p-2 leading-relaxed">No provider is selected under Quality data, so there is nothing to filter on yet.</p>';
+        body.innerHTML = '<p class="text-[11px] text-[#e6e6e6]/45 p-2 leading-relaxed">No published data is selected under Quality data, so there is nothing to filter on yet.</p>';
         document.getElementById('quality-filter-summary').textContent = '';
         return;
       }
       if (!d.loaded) {
-        body.innerHTML = `<p class="text-[11px] text-[#e6e6e6]/45 p-2 leading-relaxed">${escapeHtml(d.provider)}'s published data has not loaded yet. It arrives with the next dashboard refresh; reopen this panel then.</p>`;
+        body.innerHTML = `<p class="text-[11px] text-[#e6e6e6]/45 p-2 leading-relaxed">The published data for ${escapeHtml(d.provider)} has not loaded yet. It arrives with the next dashboard refresh; reopen this panel then.</p>`;
         document.getElementById('quality-filter-summary').textContent = '';
         return;
       }
@@ -2735,15 +3061,18 @@
       if (!autoPickData) return;
       rememberAutoPickScroll();
 
-      if (!autoPickData.provider) {
-        note.innerHTML = 'No provider is named for this account, so nothing has been measured. ' +
-          'Pick one under <strong>Quality data</strong> first &mdash; auto-pick has nothing to judge without it.';
+      const providers = autoPickData.providers || [];
+      const named = providers.filter(pr => pr.table);
+      if (named.length === 0) {
+        note.innerHTML = 'No published data is named for this account, so nothing has been measured. ' +
+          'Pick a table for each provider under <strong>Quality data</strong> first &mdash; auto-pick ' +
+          'has nothing to judge without it.';
         body.innerHTML = '';
         summary.textContent = '';
         return;
       }
       if (!autoPickData.loaded) {
-        note.textContent = `The published data for ${autoPickData.provider} has not loaded yet. Try again in a moment.`;
+        note.textContent = `The published data for ${named.map(pr => pr.table).join(' and ')} has not loaded yet. Try again in a moment.`;
         body.innerHTML = '';
         summary.textContent = '';
         return;
@@ -2753,7 +3082,17 @@
         ? `Last run ${new Date(autoPickData.lastRun).toLocaleString()}` +
           (autoPickData.lastRunDate ? ` from the ${autoPickData.lastRunDate} sweep.` : '.')
         : 'Has not run yet.';
-      note.textContent = `${autoPickData.provider}, sweep ${autoPickData.runDate || 'unknown'}. ${last}`;
+      // Every provider is named, loaded or not. An account with two
+      // services where only one has published data still auto-picks - it
+      // just quietly picks from one of them, and this is the only place
+      // that would say so.
+      const heads = providers.map(pr => pr.table
+        ? `${pr.label}: ${pr.table}, sweep ${pr.runDate || 'unknown'}${pr.loaded ? '' : ' (not loaded)'}`
+        : `${pr.label}: no published data`);
+      const share = providers.length > 1
+        ? ` Up to ${autoPickData.perProviderLimit} links from each provider, best provider first.`
+        : '';
+      note.textContent = `${heads.join('. ')}. ${last}${share}`;
 
       const keys = Object.keys(autoPickData.rules);
       body.innerHTML = `<div id="autopick-list" class="space-y-1.5 max-h-[28rem] overflow-y-auto pr-1">` +
@@ -2786,8 +3125,15 @@
         if (r.notAlive) bits.push(`${r.notAlive} dead`);
         if (r.slow) bits.push(`${r.slow} under ${autoPickData.minFps}fps`);
         if (r.unmeasured) bits.push(`${r.unmeasured} unmeasured`);
+        // Which provider the picks came from, when there is more than
+        // one. "3 picks" from an account with two services leaves the
+        // interesting half unsaid - whether it found three on each or
+        // three on one and nothing on the other.
+        const split = (result.perProvider || []).length > 1
+          ? ` (${result.perProvider.map(pp => `${pp.label}: ${pp.picked}`).join(', ')})`
+          : '';
         detail = `<span class="${result.picks.length ? 'text-[#7fc98a]' : 'text-[#e0a355]'}">` +
-          `${result.picks.length} pick${result.picks.length === 1 ? '' : 's'}</span>` +
+          `${result.picks.length} pick${result.picks.length === 1 ? '' : 's'}${escapeHtml(split)}</span>` +
           `<span class="text-[#e6e6e6]/35"> · ${bits.join(' · ')}</span>` +
           (result.usedSlow ? '<span class="text-[#e0a355]"> · fell back to 30fps</span>' : '') +
           // Worded off whether the network is actually handed over. On an
@@ -3378,7 +3724,7 @@
                     <span class="text-xs truncate">${escapeHtml(c.name)}</span>
                     ${renderProbeBadge(key, c.url, true)}
                   </span>
-                  <span class="block text-[10px] text-[#e6e6e6]/45 truncate"><span class="font-mono text-[#5aa8d1]/70">#${escapeHtml(streamIdFromUrl(c.url))}</span> &middot; ${escapeHtml((c.groups || []).join(' | '))}</span>
+                  <span class="block text-[10px] text-[#e6e6e6]/45 truncate">${providerTag(c.providerId)}<span class="font-mono text-[#5aa8d1]/70">#${escapeHtml(streamIdFromUrl(c.url))}</span> &middot; ${escapeHtml((c.groups || []).join(' | '))}</span>
                 </span>
               </button>
             </div>`).join('');
@@ -3455,7 +3801,12 @@
           body: JSON.stringify({
             uuid: activeUser.uuid,
             password: activeUser.password,
-            xtream: activeUser.xtream,
+            // Only when the Edit panel actually staged a credential
+            // change. Sending the provider list on every save would push
+            // whatever this page happens to be holding back over the
+            // account - including a list the Providers panel has since
+            // replaced - so it goes only when there is a change to make.
+            ...(providerCredentialsPending ? { providers: activeUser.providers } : {}),
             selectedSports: activeUser.selectedSports,
             timeZone: activeUser.timeZone,
             sportOrder: activeUser.sportOrder,
@@ -3464,6 +3815,10 @@
         });
         const data = await res.json();
         if (data.success) {
+          if (providerCredentialsPending) {
+            mergeProviders(data.providers || activeUser.providers);
+            providerCredentialsPending = false;
+          }
           return true;
         } else {
           showStatus(data.error || 'Failed to save settings.', true);
@@ -3479,22 +3834,34 @@
     // button. The whole point of this control is to try the other format
     // and see whether a stream plays, and a change you have to remember
     // to save first would just read as "the setting did nothing".
+    //
+    // Edits the FIRST provider. An account with several sets the format
+    // per provider in the Providers panel instead, and this block is
+    // hidden there - a service can have HLS working while another does
+    // not, so one control for the account would be wrong for one of them.
     async function saveXtreamStreamFormat() {
-      if (!activeUser || !activeUser.xtream) return;
+      const providers = (activeUser && activeUser.providers) || [];
+      if (providers.length === 0) return;
       const select = document.getElementById('xtream-format-select');
       const streamFormat = select.value === 'ts' ? 'ts' : 'm3u8';
-      const previous = activeUser.xtream.streamFormat || 'm3u8';
-      const xtream = { ...activeUser.xtream, streamFormat };
+      const previous = providers[0].streamFormat || 'm3u8';
+
+      // Passwords are omitted deliberately: the server keeps the stored
+      // one when a known provider arrives without it, and there is no
+      // reason for a format change to put credentials back on the wire.
+      const next = providers.map((pr, i) => ({
+        ...pr, password: '', streamFormat: i === 0 ? streamFormat : pr.streamFormat
+      }));
 
       try {
         const res = await fetch('/api/user/update', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, xtream })
+          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, providers: next })
         });
         const data = await res.json();
         if (!data.success) throw new Error(data.error || 'save failed');
-        activeUser.xtream = xtream;
+        mergeProviders(data.providers || activeUser.providers);
         showStatus(`Streams will now use .${streamFormat}. Re-check a channel's quality to confirm it plays.`);
         // Every saved link and suggestion on screen carries the old
         // extension in its URL, so they are all stale.

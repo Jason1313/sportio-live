@@ -735,6 +735,83 @@ function pickForNetwork(networkKey, channels, read, options = {}) {
   };
 }
 
+// Which of two picks is the better one, by the same ladder rankCandidates
+// orders a single provider's candidates with. Pulled out because the
+// multi-provider version below has to compare across two already-sorted
+// lists, and the two orderings must not be allowed to drift apart.
+function comparePicks(a, b) {
+  if (!a) return b ? 1 : 0;
+  if (!b) return -1;
+  return a.band - b.band
+    || (b.reading.bpp || 0) - (a.reading.bpp || 0)
+    || (b.reading.height || 0) - (a.reading.height || 0);
+}
+
+// The same job across an account's providers, keeping each one's share
+// separate.
+//
+// An account can hold several IPTV services, and the useful answer is not
+// simply the ten best channels overall - that regularly means ten from
+// one service, which is ten links that all go dark together when it has a
+// bad night. So each provider contributes its own best few, and the
+// account ends up with real redundancy rather than a well-ranked single
+// point of failure.
+//
+// The provider holding the single best channel goes first, and takes the
+// whole first block with it. Ordering the blocks rather than interleaving
+// them is deliberate: slot order is the order a player tries them in, and
+// somebody who reaches for slot 2 after slot 1 stutters is far better
+// served by the same service's next-best feed than by a hop to the other
+// one - if slot 1 was the best link either provider had, its stablemates
+// are the next most likely thing to work.
+//
+// `channelsByProvider` is [{ providerId, channels }] in the account's own
+// provider order, which is the tie-break when two providers' best picks
+// are indistinguishable.
+function pickAcrossProviders(networkKey, channelsByProvider, read, options = {}) {
+  const groups = (channelsByProvider || []).filter(g => g && g.channels);
+  if (groups.length === 0) {
+    return { networkKey, picks: [], considered: 0, rejected: { unmeasured: 0, notAlive: 0, slow: 0 }, usedSlow: false, perProvider: [] };
+  }
+
+  const blocks = groups.map(group => ({
+    providerId: group.providerId,
+    outcome: pickForNetwork(networkKey, group.channels, read, options),
+  }));
+
+  // Stable within a tie, so two providers whose best channels read
+  // identically stay in the order the account lists them and a re-run
+  // does not shuffle every slot for no reason.
+  const ordered = [...blocks].sort((a, b) =>
+    comparePicks(a.outcome.picks[0], b.outcome.picks[0]));
+
+  const rejected = { unmeasured: 0, notAlive: 0, slow: 0 };
+  for (const block of blocks) {
+    rejected.unmeasured += block.outcome.rejected.unmeasured;
+    rejected.notAlive += block.outcome.rejected.notAlive;
+    rejected.slow += block.outcome.rejected.slow;
+  }
+
+  return {
+    networkKey,
+    picks: ordered.flatMap(block =>
+      block.outcome.picks.map(pick => ({ ...pick, providerId: block.providerId }))),
+    considered: blocks.reduce((sum, b) => sum + b.outcome.considered, 0),
+    rejected,
+    usedSlow: blocks.some(b => b.outcome.usedSlow),
+    // Per provider, in the order the blocks were laid out, so a panel can
+    // say "5 from A, 2 from B" and explain a short list as one service
+    // having nothing to offer rather than the whole pick having failed.
+    perProvider: ordered.map(block => ({
+      providerId: block.providerId,
+      picked: block.outcome.picks.length,
+      considered: block.outcome.considered,
+      rejected: block.outcome.rejected,
+      usedSlow: block.outcome.usedSlow,
+    })),
+  };
+}
+
 module.exports = {
   DEFAULT_RULES,
   BANDS,
@@ -744,6 +821,7 @@ module.exports = {
   candidatesFor,
   rankCandidates,
   pickForNetwork,
+  pickAcrossProviders,
   looksAmerican,
   normalize,
   tokenize,

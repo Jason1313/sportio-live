@@ -146,6 +146,26 @@ function decryptSavedChannelsFromStorage(savedChannels) {
   return savedChannels.map(c => ({ ...c, url: c.url ? decrypt(c.url) : c.url }));
 }
 
+// A provider holds exactly the credentials the legacy xtream/m3u fields
+// held, so it gets exactly the same treatment - the whole point of moving
+// them into an array was that the second one is no less sensitive than
+// the first. label/kind/streamcheckProvider stay readable: none of them
+// is a secret, and a users.json dump that still names its providers is
+// far easier to diagnose without the key.
+function encryptProvidersForStorage(providers) {
+  if (!Array.isArray(providers)) return providers;
+  return providers.map(entry => (entry.kind === 'm3u'
+    ? { ...entry, playlistUrl: encrypt(entry.playlistUrl), epgUrl: entry.epgUrl ? encrypt(entry.epgUrl) : entry.epgUrl }
+    : { ...entry, url: encrypt(entry.url), username: encrypt(entry.username), password: encrypt(entry.password) }));
+}
+
+function decryptProvidersFromStorage(providers) {
+  if (!Array.isArray(providers)) return providers;
+  return providers.map(entry => (entry.kind === 'm3u'
+    ? { ...entry, playlistUrl: decrypt(entry.playlistUrl), epgUrl: entry.epgUrl ? decrypt(entry.epgUrl) : entry.epgUrl }
+    : { ...entry, url: decrypt(entry.url), username: decrypt(entry.username), password: decrypt(entry.password) }));
+}
+
 function encryptNetworkLinksForStorage(networkLinks) {
   if (!networkLinks || typeof networkLinks !== 'object') return networkLinks;
   const out = {};
@@ -164,6 +184,174 @@ function decryptNetworkLinksFromStorage(networkLinks) {
     out[networkKey] = links.map(l => ({ ...l, url: l.url ? decrypt(l.url) : l.url }));
   }
   return out;
+}
+
+// ---------------------------------------------------------------------
+// Providers
+// ---------------------------------------------------------------------
+//
+// An account is one username and password, and it can carry more than one
+// IPTV service behind them.
+//
+// This started as a single connection per account - `connectionType` plus
+// one of `xtream`/`m3u` - and that shape survives in the stored files, so
+// everything here reads through `providersOf` rather than those fields.
+// The reason for the change is that no single service carries everything:
+// one has the good national feeds, another the regional ones, and the
+// only way to have both was two accounts, two manifests, and two lists to
+// keep in step by hand.
+//
+// Providers are homogeneous within an account. Both kinds still work, but
+// an account is either Xtream or M3U throughout, which is what lets one
+// `connectionType` still describe it and keeps every downstream branch
+// exactly where it was.
+//
+// Each provider carries its own streamcheck.pro table. Stream ids are
+// assigned per service and collide freely across them, so a reading
+// looked up in the wrong table is not a miss - it is a confident
+// description of somebody else's channel.
+const XTREAM_STREAM_FORMATS = ['m3u8', 'ts'];
+
+const MAX_PROVIDERS = 4;
+
+function makeProviderId() {
+  return `p${uuidv4().replace(/-/g, '').slice(0, 10)}`;
+}
+
+// Trimmed to what an account is actually allowed to store. Called on
+// every write, so a malformed provider fails at the boundary rather than
+// halfway through a scheduled auto-pick that nobody is watching.
+function normaliseProvider(raw, kind, index) {
+  if (!raw || typeof raw !== 'object') return null;
+  const str = (v) => (typeof v === 'string' ? v.trim() : '');
+  const id = str(raw.id) || makeProviderId();
+  const label = str(raw.label).slice(0, 40) || `Provider ${index + 1}`;
+  const streamcheckProvider = str(raw.streamcheckProvider);
+
+  if (kind === 'm3u') {
+    const playlistUrl = str(raw.playlistUrl) || str(raw.m3u && raw.m3u.playlistUrl);
+    if (!playlistUrl) return null;
+    return {
+      id, label, kind: 'm3u', streamcheckProvider,
+      playlistUrl,
+      epgUrl: str(raw.epgUrl) || str(raw.m3u && raw.m3u.epgUrl),
+    };
+  }
+
+  const src = raw.url ? raw : (raw.xtream || {});
+  const url = str(src.url).replace(/\/+$/, '');
+  if (!url) return null;
+  return {
+    id, label, kind: 'xtream', streamcheckProvider,
+    url,
+    username: str(src.username),
+    password: typeof src.password === 'string' ? src.password : '',
+    streamFormat: XTREAM_STREAM_FORMATS.includes(src.streamFormat) ? src.streamFormat : 'm3u8',
+  };
+}
+
+// Folds a stored account into the providers array, whatever shape it was
+// last written in.
+//
+// Accounts predating this hold `xtream`/`m3u` and a single top-level
+// `streamcheckProvider`, and there is no migration pass over users.json -
+// this runs on read, so an account that is never touched again keeps
+// working and one that is saved gets rewritten in the new shape for free.
+function migrateAccountProviders(user) {
+  if (!user) return user;
+  const kind = user.connectionType === 'm3u' ? 'm3u' : 'xtream';
+
+  if (Array.isArray(user.providers) && user.providers.length > 0) {
+    user.providers = user.providers
+      .map((raw, i) => normaliseProvider(raw, kind, i))
+      .filter(Boolean)
+      .slice(0, MAX_PROVIDERS);
+    if (user.providers.length > 0) return dropLegacyConnection(user);
+  }
+
+  const legacy = kind === 'm3u' ? user.m3u : user.xtream;
+  const provider = normaliseProvider(
+    { ...(legacy || {}), label: 'Provider 1', streamcheckProvider: user.streamcheckProvider || '' },
+    kind, 0
+  );
+  user.providers = provider ? [provider] : [];
+  return provider ? dropLegacyConnection(user) : user;
+}
+
+// The old single-connection fields, removed once the array holds the same
+// credentials. Leaving them would mean two copies of one password in
+// users.json, with only one of them ever updated again - a stale secret
+// on disk that nothing reads and nothing rotates.
+function dropLegacyConnection(user) {
+  delete user.xtream;
+  delete user.m3u;
+  return user;
+}
+
+function providersOf(user) {
+  return (user && Array.isArray(user.providers)) ? user.providers : [];
+}
+
+// The provider a link, channel or reading belongs to.
+//
+// An empty providerId means the link was saved before the account had
+// more than one provider, and the primary is the only thing it could have
+// come from - so it resolves there rather than being dropped. An id that
+// names a provider since deleted resolves there too: the link is stale
+// either way, and pointing it at a live provider gives the healer a
+// chance to find where the channel went.
+function providerFor(user, providerId) {
+  const list = providersOf(user);
+  if (list.length === 0) return null;
+  if (!providerId) return list[0];
+  return list.find(entry => entry.id === providerId) || list[0];
+}
+
+function providerIdFor(user, providerId) {
+  const provider = providerFor(user, providerId);
+  return provider ? provider.id : '';
+}
+
+function providerLabelFor(user, providerId) {
+  const provider = providerFor(user, providerId);
+  return provider ? provider.label : '';
+}
+
+// The streamcheck.pro table a given provider's stream ids belong to, and
+// whether it is in memory to be read.
+function streamcheckTableFor(user, providerId) {
+  const provider = providerFor(user, providerId);
+  const table = (provider && provider.streamcheckProvider) || '';
+  return (table && streamcheck.isLoaded(table)) ? table : '';
+}
+
+// Every streamcheck table this account names, deduplicated. Used by the
+// panels that describe the account as a whole rather than one link.
+function streamcheckTablesFor(user) {
+  return [...new Set(providersOf(user)
+    .map(entry => entry.streamcheckProvider)
+    .filter(Boolean))];
+}
+
+// Credentials never leave the server for any provider but the account's
+// own, and even then the dashboard is the only caller - so passwords ride
+// along there and nowhere else.
+function describeProvider(provider, { withSecrets = false } = {}) {
+  const base = {
+    id: provider.id,
+    label: provider.label,
+    kind: provider.kind,
+    streamcheckProvider: provider.streamcheckProvider || '',
+  };
+  if (provider.kind === 'm3u') {
+    return withSecrets
+      ? { ...base, playlistUrl: provider.playlistUrl, epgUrl: provider.epgUrl || '' }
+      : base;
+  }
+  return withSecrets
+    ? { ...base, url: provider.url, username: provider.username, password: provider.password,
+        streamFormat: provider.streamFormat || 'm3u8' }
+    : { ...base, streamFormat: provider.streamFormat || 'm3u8' };
 }
 
 const app = express();
@@ -251,13 +439,14 @@ if (fs.existsSync(DATA_FILE)) {
   try {
     const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
     for (const [uuid, user] of Object.entries(raw)) {
-      userConfigs[uuid] = {
+      userConfigs[uuid] = migrateAccountProviders({
         ...user,
         xtream: decryptXtreamFromStorage(user.xtream),
         m3u: decryptM3uFromStorage(user.m3u),
+        providers: decryptProvidersFromStorage(user.providers),
         networkLinks: decryptNetworkLinksFromStorage(user.networkLinks),
         savedChannels: decryptSavedChannelsFromStorage(user.savedChannels)
-      };
+      });
     }
   } catch (err) {
     console.error('[Storage] Error loading users.json:', err.message);
@@ -272,6 +461,7 @@ function saveUserConfigs() {
         ...user,
         xtream: encryptXtreamForStorage(user.xtream),
         m3u: encryptM3uForStorage(user.m3u),
+        providers: encryptProvidersForStorage(user.providers),
         networkLinks: encryptNetworkLinksForStorage(user.networkLinks),
         savedChannels: encryptSavedChannelsForStorage(user.savedChannels)
       };
@@ -423,14 +613,18 @@ function mergedNetworkDefaults() {
 // query - an M3U playlist URL carries the account credentials in its
 // path, and this string is shown in the dashboard and written to a file.
 function providerHostFor(user) {
-  const raw = user.connectionType === 'm3u'
-    ? (user.m3u && user.m3u.playlistUrl)
-    : (user.xtream && user.xtream.url);
-  try {
-    return new URL(String(raw || '')).host;
-  } catch (err) {
-    return '';
-  }
+  // Every provider the account holds, because a preset saved from it can
+  // pin ids from any of them - and a label naming only the first would
+  // send somebody looking for a channel on a service that never had it.
+  const hosts = providersOf(user).map(provider => {
+    const raw = provider.kind === 'm3u' ? provider.playlistUrl : provider.url;
+    try {
+      return new URL(String(raw || '')).host;
+    } catch (err) {
+      return '';
+    }
+  }).filter(Boolean);
+  return [...new Set(hosts)].join(', ');
 }
 
 // Metadata only. The stream ids themselves are of no use to the
@@ -1593,16 +1787,16 @@ app.post('/api/networks/autopick', async (req, res) => {
 
   const user = auth.user;
   const action = req.body.action || 'preview';
-  const provider = user.streamcheckProvider || '';
+  const tables = streamcheckTablesFor(user);
 
   // Asked for explicitly here rather than left to whatever happens to be
   // in memory. Everything on this screen is a judgement about published
   // readings, and a page that quietly showed "no data" because nobody had
   // triggered a load yet would be telling the user something false about
   // their provider.
-  if (provider && !streamcheck.isLoaded(provider)) {
-    await streamcheck.ensureProvider(provider);
-  }
+  await Promise.all(tables
+    .filter(table => !streamcheck.isLoaded(table))
+    .map(table => streamcheck.ensureProvider(table)));
 
   if (action === 'save') {
     user.autoPick = {
@@ -1648,7 +1842,7 @@ app.post('/api/networks/autopick', async (req, res) => {
       user.autoPick = {
         ...readAutoPick(user),
         lastRun: new Date().toISOString(),
-        lastRunDate: streamcheckRunDate(provider),
+        lastRunDate: accountRunDate(user),
       };
       await saveUserConfigs();
     }
@@ -1673,9 +1867,20 @@ app.post('/api/networks/autopick', async (req, res) => {
 
   return res.json({
     success: true,
-    provider,
-    loaded: !!provider && streamcheck.isLoaded(provider),
-    runDate: streamcheckRunDate(provider),
+    // Per provider, because an account can have published data for one
+    // service and none for the other, and a single "loaded" flag would
+    // have to lie about one of them. `loaded` stays as the answer to "is
+    // there anything at all to judge by", which is what gates the panel.
+    providers: providersOf(user).map(entry => ({
+      id: entry.id,
+      label: entry.label,
+      table: entry.streamcheckProvider || '',
+      loaded: !!entry.streamcheckProvider && streamcheck.isLoaded(entry.streamcheckProvider),
+      runDate: streamcheckRunDate(entry.streamcheckProvider),
+    })),
+    perProviderLimit: autoPickLimitFor(providersOf(user).length),
+    loaded: tables.some(table => streamcheck.isLoaded(table)),
+    runDate: accountRunDate(user),
     enabled: settings.networks,
     lastRun: settings.lastRun,
     lastRunDate: settings.lastRunDate,
@@ -3212,8 +3417,8 @@ async function fetchGamesForSport(sport, hostUrl, userTimeZone = 'America/New_Yo
   }));
 }
 
-async function fetchXtreamCategories(user) {
-  const { url, username, password } = user.xtream;
+async function fetchXtreamCategories(provider) {
+  const { url, username, password } = provider;
   const baseUrl = url.replace(/\/+$/, '');
   const apiUrl = `${baseUrl}/player_api.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}&action=get_live_categories`;
   try {
@@ -3243,9 +3448,9 @@ function buildCategoryNameLookup(categories) {
   };
 }
 
-async function fetchXtreamLiveStreams(user, categoryIds = []) {
+async function fetchXtreamLiveStreams(provider, categoryIds = []) {
   if (!categoryIds || categoryIds.length === 0) return [];
-  const { url, username, password } = user.xtream;
+  const { url, username, password } = provider;
   const baseUrl = url.replace(/\/+$/, '');
 
   let allStreams = [];
@@ -3274,8 +3479,8 @@ async function fetchXtreamLiveStreams(user, categoryIds = []) {
 // point: an automatic search with no group filter is asking about the
 // whole service by definition. Omitting category_id is how Xtream serves
 // that - one response, not one request per category.
-async function fetchAllXtreamLiveStreams(user) {
-  const { url, username, password } = user.xtream;
+async function fetchAllXtreamLiveStreams(provider) {
+  const { url, username, password } = provider;
   const baseUrl = url.replace(/\/+$/, '');
   const apiUrl = `${baseUrl}/player_api.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}&action=get_live_streams`;
   try {
@@ -3302,18 +3507,32 @@ async function fetchAllXtreamLiveStreams(user) {
 //
 // So it is per account rather than per instance: it describes the
 // provider, and every account here brings its own. Defaults to m3u8, so
-// nothing changes for anyone already working.
-const XTREAM_STREAM_FORMATS = ['m3u8', 'ts'];
+// nothing changes for anyone already working. XTREAM_STREAM_FORMATS
+// itself is declared up with the provider model, because normaliseProvider
+// reads it while users.json is still being loaded.
 
-function xtreamStreamFormat(user) {
-  const configured = user && user.xtream && user.xtream.streamFormat;
+function xtreamStreamFormat(provider) {
+  const configured = provider && provider.streamFormat;
   return XTREAM_STREAM_FORMATS.includes(configured) ? configured : 'm3u8';
 }
 
-function buildXtreamStreamUrl(user, streamId) {
-  const baseUrl = user.xtream.url.replace(/\/+$/, '');
-  const ext = xtreamStreamFormat(user);
-  return `${baseUrl}/live/${encodeURIComponent(user.xtream.username)}/${encodeURIComponent(user.xtream.password)}/${streamId}.${ext}`;
+// Takes a provider rather than an account. Which one a stream id belongs
+// to is now a real question - ids collide across services - and passing
+// the account would leave every call site silently answering it with
+// whichever provider happened to be first.
+function buildXtreamStreamUrl(provider, streamId) {
+  const baseUrl = String(provider.url || '').replace(/\/+$/, '');
+  const ext = xtreamStreamFormat(provider);
+  return `${baseUrl}/live/${encodeURIComponent(provider.username)}/${encodeURIComponent(provider.password)}/${streamId}.${ext}`;
+}
+
+// The same URL, addressed the way most callers have it: an account and
+// the providerId stored on a link. Returns '' when the account has no
+// provider that could serve it.
+function buildStreamUrlFor(user, providerId, streamId) {
+  const provider = providerFor(user, providerId);
+  if (!provider || provider.kind !== 'xtream' || !provider.url) return '';
+  return buildXtreamStreamUrl(provider, streamId);
 }
 
 // ---------------------------------------------------------------------
@@ -3350,20 +3569,20 @@ const XTREAM_SOURCE_TTL_MS = 30 * 60 * 1000;
 const xtreamSourceCache = new Map();   // key -> { streams, categories, fetchedAt }
 const xtreamSourceInFlight = new Map(); // key -> Promise
 
-function xtreamCacheKey(user) {
-  const baseUrl = String(user.xtream.url || '').replace(/\/+$/, '');
-  return `${baseUrl}|${user.xtream.username}`;
+function xtreamCacheKey(provider) {
+  const baseUrl = String(provider.url || '').replace(/\/+$/, '');
+  return `${baseUrl}|${provider.username}`;
 }
 
-async function fetchXtreamCatalog(user) {
+async function fetchXtreamCatalog(provider) {
   const [categories, streams] = await Promise.all([
-    fetchXtreamCategories(user),
-    fetchAllXtreamLiveStreams(user)
+    fetchXtreamCategories(provider),
+    fetchAllXtreamLiveStreams(provider)
   ]);
   return { categories, streams, fetchedAt: Date.now() };
 }
 
-function buildXtreamChannelSource(user, catalog) {
+function buildXtreamChannelSource(provider, catalog) {
   const { categories, streams } = catalog;
 
   const getCategoryName = buildCategoryNameLookup(categories);
@@ -3375,7 +3594,12 @@ function buildXtreamChannelSource(user, catalog) {
     name: s.name || '',
     logo: s.stream_icon || '',
     streamId: String(s.stream_id),
-    streamUrl: buildXtreamStreamUrl(user, s.stream_id),
+    streamUrl: buildXtreamStreamUrl(provider, s.stream_id),
+    // Carried on the channel itself, because once an account holds more
+    // than one service every downstream consumer - the picker, the
+    // searches, auto-pick, the quality lookup - has to know which one a
+    // channel came from, and the URL is not a reliable way back to it.
+    providerId: provider.id,
     categories: [getCategoryName(s)]
   })).filter(c => c.name && c.streamId);
 
@@ -3400,13 +3624,13 @@ function buildXtreamChannelSource(user, catalog) {
 // provider. The dashboard alone fires /suggest and /status together on
 // load, so without the in-flight map below one page view would fetch the
 // entire service twice, in parallel, for no gain.
-async function getXtreamChannelSource(user) {
-  if (!user.xtream || !user.xtream.url) return null;
-  const key = xtreamCacheKey(user);
+async function getProviderChannelSource(provider) {
+  if (!provider || provider.kind !== 'xtream' || !provider.url) return null;
+  const key = xtreamCacheKey(provider);
 
   const cached = xtreamSourceCache.get(key);
   if (cached && Date.now() - cached.fetchedAt < XTREAM_SOURCE_TTL_MS) {
-    return buildXtreamChannelSource(user, cached);
+    return buildXtreamChannelSource(provider, cached);
   }
 
   // Deduplicated, not just cached. The dashboard fires /suggest and
@@ -3416,7 +3640,7 @@ async function getXtreamChannelSource(user) {
   const pending = inFlight || (async () => {
     try {
       const startedAt = Date.now();
-      const catalog = await fetchXtreamCatalog(user);
+      const catalog = await fetchXtreamCatalog(provider);
       // An empty list means the provider answered with nothing useful -
       // down, rate limiting, credentials rejected. Serving that as the
       // truth would empty the picker and read as "your channels are
@@ -3440,7 +3664,102 @@ async function getXtreamChannelSource(user) {
   if (!inFlight) xtreamSourceInFlight.set(key, pending);
 
   const catalog = await pending;
-  return catalog ? buildXtreamChannelSource(user, catalog) : null;
+  return catalog ? buildXtreamChannelSource(provider, catalog) : null;
+}
+
+// Every provider on the account, as one channel list.
+//
+// The rest of the app asks an account for "its channels" in a dozen
+// places - suggestions, search, the category picker, auto-pick, the
+// team-search fallback - and none of them wants to know how many services
+// are behind the answer. So the join happens here, once, and each channel
+// carries the providerId that says where it came from.
+//
+// Categories are merged by name and their counts summed. Two services
+// commonly use the same folder names, and an account's category allowlist
+// is a list of names, so keeping them separate would mean ticking "USA
+// SPORTS" twice to mean one thing.
+//
+// A provider that cannot be reached is reported rather than thrown: one
+// service being down is not a reason to empty the picker of the other's
+// channels, and `providers` below is what lets the dashboard say which
+// half of the list is missing.
+function mergeChannelSources(parts) {
+  const channels = [];
+  const counts = new Map();
+
+  for (const part of parts) {
+    if (!part.source) continue;
+    for (const channel of part.source.channels || []) channels.push(channel);
+    for (const category of part.source.categoryList || []) {
+      counts.set(category.name, (counts.get(category.name) || 0) + category.channelCount);
+    }
+  }
+
+  return {
+    channels,
+    categoryList: [...counts.entries()]
+      .map(([name, channelCount]) => ({ name, channelCount }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    providers: parts.map(part => ({
+      id: part.provider.id,
+      label: part.provider.label,
+      kind: part.provider.kind,
+      ok: !!part.source,
+      channelCount: part.source ? part.source.channels.length : 0,
+    })),
+    // Per provider, so a link is healed against the service it was saved
+    // from rather than against whichever one happens to have a channel of
+    // the same name. See networks.resolveNetworkLinks.
+    byProvider: new Map(parts.map(part => [part.provider.id, part.source])),
+  };
+}
+
+// An M3U source is parsed once on a schedule and shared by every account
+// pointing at that playlist, so its channels arrive without a providerId
+// and cannot simply be mutated to carry one. Stamping a copy per request
+// would mean rebuilding forty thousand objects on every dashboard load,
+// so the copy is memoised against the parsed source itself: it lives
+// exactly as long as that parse does and is dropped the moment a refresh
+// replaces it.
+const stampedM3uSources = new WeakMap();
+
+function stampProviderId(source, providerId) {
+  if (!source) return null;
+  let byProvider = stampedM3uSources.get(source);
+  if (!byProvider) {
+    byProvider = new Map();
+    stampedM3uSources.set(source, byProvider);
+  }
+  let stamped = byProvider.get(providerId);
+  if (!stamped) {
+    stamped = { ...source, channels: (source.channels || []).map(c => ({ ...c, providerId })) };
+    byProvider.set(providerId, stamped);
+  }
+  return stamped;
+}
+
+// The account's whole channel list, however many providers are behind it.
+// Returns null only when nothing at all could be reached - a partial
+// answer is still a usable one.
+async function getAccountChannelSource(user) {
+  const providers = providersOf(user);
+  if (providers.length === 0) return null;
+
+  const parts = await Promise.all(providers.map(async (provider) => ({
+    provider,
+    source: provider.kind === 'm3u'
+      ? (provider.playlistUrl ? m3u.getCachedM3USource(provider.playlistUrl) : null)
+      : await getProviderChannelSource(provider),
+  })));
+
+  for (const part of parts) {
+    if (part.provider.kind !== 'm3u') continue;
+    part.source = stampProviderId(part.source, part.provider.id);
+  }
+
+  if (parts.every(part => !part.source)) return null;
+  return mergeChannelSources(parts);
 }
 
 // Runs a sport's standing search (networks.AUTO_SEARCH) against whichever
@@ -3562,6 +3881,7 @@ function teamSearchFor(user, game, channels) {
         url: hit.url,
         groups: hit.groups || [],
         terms: [term],
+        providerId: providerIdFor(user, hit.providerId),
       });
     }
   }
@@ -3585,13 +3905,24 @@ function teamSearchFor(user, game, channels) {
       b.terms.length - a.terms.length
       || (b.probedScore || 0) - (a.probedScore || 0));
 
+  // Counted over everything that matched, not over the capped slice, for
+  // the same reason the term chips are: a chip labelled with the slice
+  // would report the cap rather than what switching the provider off
+  // would actually remove.
+  const providerCounts = new Map();
+  for (const entry of ranked) {
+    providerCounts.set(entry.providerId, (providerCounts.get(entry.providerId) || 0) + 1);
+  }
+
   const results = ranked
     .slice(0, TEAM_SEARCH_TOTAL)
     .map(entry => ({
       name: entry.name,
       url: entry.url,
       terms: entry.terms,
-      title: `\u{1F50D} ${entry.terms.join(', ')}  \u{1F4C1} ${(entry.groups || []).join(' | ')}`,
+      providerId: entry.providerId,
+      title: `\u{1F50D} ${entry.terms.join(', ')}  \u{1F4C1} ${(entry.groups || []).join(' | ')}`
+        + providerSuffix(user, entry.providerId),
       // The published reading rides along, which matters more here than
       // anywhere else in the panel: these are guesses, there can be
       // eighty of them, and "which of these is alive and watchable" is
@@ -3603,19 +3934,27 @@ function teamSearchFor(user, game, channels) {
       streamStatus: entry.streamStatus || null,
     }));
 
-  return { terms: counts, results };
+  // Every provider the account holds, not only the ones that matched.
+  // A chip reading "Provider B · 0" is the answer to "why is nothing from
+  // B in here"; omitting it leaves that looking like a bug in the search.
+  const providers = providersOf(user).map(provider => ({
+    id: provider.id,
+    label: provider.label,
+    count: providerCounts.get(provider.id) || 0,
+  }));
+
+  return { terms: counts, providers, results };
 }
 
-async function fetchAutoSearchChannels(user, config, m3uSource) {
-  if (!config) return [];
-
-  if (user.connectionType === 'm3u') {
-    return networks.autoSearchChannels(m3uSource?.channels || [], config);
+async function fetchAutoSearchChannelsFrom(provider, config, m3uSource) {
+  if (provider.kind === 'm3u') {
+    const channels = (m3uSource?.channels || []);
+    return networks.autoSearchChannels(channels, config);
   }
 
-  if (!user.xtream || !user.xtream.url) return [];
+  if (!provider.url) return [];
 
-  const categories = await fetchXtreamCategories(user);
+  const categories = await fetchXtreamCategories(provider);
   const hasGroupFilter = Array.isArray(config.groups) && config.groups.length > 0;
 
   let streams;
@@ -3629,9 +3968,9 @@ async function fetchAutoSearchChannels(user, config, m3uSource) {
     // matches nothing would produce exactly the results it was written to
     // prevent.
     if (wantedIds.length === 0) return [];
-    streams = await fetchXtreamLiveStreams(user, wantedIds);
+    streams = await fetchXtreamLiveStreams(provider, wantedIds);
   } else {
-    streams = await fetchAllXtreamLiveStreams(user);
+    streams = await fetchAllXtreamLiveStreams(provider);
   }
 
   // Normalised into the M3U parser's own channel shape, so the matching
@@ -3639,11 +3978,30 @@ async function fetchAutoSearchChannels(user, config, m3uSource) {
   const getCategoryName = buildCategoryNameLookup(categories);
   const channels = streams.map(s => ({
     name: s.name,
-    streamUrl: buildXtreamStreamUrl(user, s.stream_id),
+    streamUrl: buildXtreamStreamUrl(provider, s.stream_id),
+    providerId: provider.id,
     categories: [getCategoryName(s)]
   }));
 
   return networks.autoSearchChannels(channels, config);
+}
+
+// The standing search, run once per provider and concatenated.
+//
+// Every provider is asked, and the results stay in provider order rather
+// than being interleaved or re-ranked. This search exists for events that
+// only ever appear as a throwaway per-card channel, where there is no
+// published reading to rank by and no basis for preferring one service's
+// listing to another's - so the account's own provider order is the
+// order, and it is at least predictable.
+async function fetchAutoSearchChannels(user, config, sourceFor) {
+  if (!config) return [];
+
+  const perProvider = await Promise.all(providersOf(user)
+    .map(provider => fetchAutoSearchChannelsFrom(
+      provider, config, typeof sourceFor === 'function' ? sourceFor(provider.id) : sourceFor)));
+
+  return perProvider.flat().slice(0, networks.MAX_AUTO_SEARCH_RESULTS);
 }
 
 app.post('/api/xtream/categories', async (req, res) => {
@@ -3719,8 +4077,14 @@ const m3uWarmAttempts = new Map(); // playlistUrl -> last attempt timestamp
 const M3U_WARM_COOLDOWN_MS = 2 * 60 * 1000;
 
 function warmM3uSourceInBackground(user) {
-  const playlistUrl = user && user.m3u && user.m3u.playlistUrl;
-  const epgUrl = user && user.m3u && user.m3u.epgUrl;
+  for (const provider of providersOf(user)) {
+    if (provider.kind === 'm3u') warmM3uPlaylistInBackground(provider);
+  }
+}
+
+function warmM3uPlaylistInBackground(provider) {
+  const playlistUrl = provider && provider.playlistUrl;
+  const epgUrl = provider && provider.epgUrl;
   // The playlist is the only thing required. This used to refuse to warm
   // without an EPG URL as well, which made an account that had none sit
   // on "your playlist is still loading" permanently - the cache could
@@ -3773,38 +4137,30 @@ async function authenticateForChannels(req, res) {
   clearFailedAttempts(ip);
 
   // Xtream reaches the same features through its own channel list rather
-  // than a parsed playlist. Both arrive here in the same shape, so
-  // everything downstream - suggestions, search, probing, link healing -
-  // is one implementation serving both.
-  if (user.connectionType !== 'm3u') {
-    if (!user.xtream || !user.xtream.url) {
-      res.status(400).json({ error: 'No Xtream connection is configured on this account.' });
-      return null;
-    }
-    const xtreamSource = await getXtreamChannelSource(user);
-    if (!xtreamSource) {
-      res.status(503).json({
-        error: 'Could not reach your Xtream provider. This usually clears on its own - try again in a moment.',
-        notReady: true
-      });
-      return null;
-    }
-    return { user, source: xtreamSource };
-  }
-
-  if (!user.m3u || !user.m3u.playlistUrl) {
-    res.status(400).json({ error: 'No M3U playlist is configured on this account.' });
+  // than a parsed playlist. Both arrive here in the same shape, and so do
+  // all of an account's providers, so everything downstream -
+  // suggestions, search, probing, link healing - is one implementation
+  // serving every combination.
+  const providers = providersOf(user);
+  if (providers.length === 0) {
+    res.status(400).json({
+      error: user.connectionType === 'm3u'
+        ? 'No M3U playlist is configured on this account.'
+        : 'No Xtream connection is configured on this account.'
+    });
     return null;
   }
 
-  const source = m3u.getCachedM3USource(user.m3u.playlistUrl);
+  const source = await getAccountChannelSource(user);
   if (!source) {
-    warmM3uSourceInBackground(user);
+    if (user.connectionType === 'm3u') warmM3uSourceInBackground(user);
     // notReady distinguishes "still loading" from a real failure, so the
     // dashboard can say which and offer a retry rather than rendering an
     // empty picker that looks broken.
     res.status(503).json({
-      error: 'Your playlist is still loading. This can take a minute after a restart.',
+      error: user.connectionType === 'm3u'
+        ? 'Your playlist is still loading. This can take a minute after a restart.'
+        : 'Could not reach your provider. This usually clears on its own - try again in a moment.',
       notReady: true
     });
     return null;
@@ -3879,14 +4235,55 @@ function readQualityFilter(user) {
 // Nothing is filtered while the provider's table is not loaded either.
 // The alternative is judging every channel on an absence of data and
 // hiding the lot, which looks exactly like the playlist having broken.
+// A reading for one channel, link or search hit, from the published
+// table belonging to ITS provider.
+//
+// This is the whole reason a link carries a providerId. streamcheck.pro
+// publishes one table per service and stream ids are assigned per
+// service, so id 1568650 exists in several of them and describes a
+// different channel in each. Looking one up in the wrong table does not
+// come back empty - it comes back confidently wrong, which is the failure
+// mode worth spending a field to avoid.
+//
+// Returns null when NO provider on the account has a table in memory, so
+// the ordinary case - published data switched off - costs one call rather
+// than a closure per channel.
+function streamcheckLookup(user) {
+  const providers = providersOf(user);
+  const tables = new Map(providers.map(provider => [
+    provider.id,
+    (provider.streamcheckProvider && streamcheck.isLoaded(provider.streamcheckProvider))
+      ? provider.streamcheckProvider : '',
+  ]));
+  if (![...tables.values()].some(Boolean)) return null;
+
+  // Links saved before the account had a second provider carry no
+  // providerId, and the primary is the only service they could have come
+  // from. An id naming a provider since deleted lands here too, which is
+  // the same guess and the only one available.
+  const fallback = providers.length > 0 ? tables.get(providers[0].id) : '';
+
+  return (entry) => {
+    // streamUrl on a catalog channel, url on an entry that has already
+    // been through makeLinkEntry. This runs over both, and reading only
+    // one of them fails silently: every channel comes back unjudged and
+    // whatever is built on it looks switched off.
+    const url = entry && (entry.streamUrl || entry.url);
+    if (!url) return null;
+    const table = entry.providerId ? tables.get(entry.providerId) : fallback;
+    if (!table) return null;
+    return streamcheck.lookupCached(table, networks.streamIdFromUrl(url));
+  };
+}
+
 function publishedQualityFilter(user) {
   const f = readQualityFilter(user);
   const active = f.statuses.length || f.tiers.length || f.formats.length
     || f.minBpp || f.requireData;
   if (!active) return null;
 
-  const provider = user.streamcheckProvider;
-  if (!provider || !streamcheck.isLoaded(provider)) return null;
+  const lookup = streamcheckLookup(user);
+  if (!lookup) return null;
 
   const statuses = new Set(f.statuses);
   const tiers = new Set(f.tiers);
@@ -3897,13 +4294,7 @@ function publishedQualityFilter(user) {
   const needsScore = tiers.size > 0 || f.minBpp > 0;
 
   return (channel) => {
-    // streamUrl on a catalog channel, url on an entry that has already
-    // been through makeLinkEntry. This runs over both, and reading only
-    // one of them fails silently: every channel comes back unjudged and
-    // the filter looks like it is off.
-    const url = channel && (channel.streamUrl || channel.url);
-    if (!url) return !f.requireData;
-    const record = streamcheck.lookupCached(provider, networks.streamIdFromUrl(url));
+    const record = lookup(channel);
     if (!record) return !f.requireData;
 
     if (statuses.size && !statuses.has(record.status || '')) return false;
@@ -3998,10 +4389,11 @@ app.post('/api/networks/quality-filter', async (req, res) => {
   if (!auth) return;
 
   const user = auth.user;
-  const provider = user.streamcheckProvider || '';
   const saved = readQualityFilter(user);
+  const lookup = streamcheckLookup(user);
+  const provider = accountTables(user);
 
-  if (!provider || !streamcheck.isLoaded(provider)) {
+  if (!lookup) {
     return res.json({
       success: true, provider, loaded: false, selected: saved,
       statuses: [], formats: [], tiers: [], total: 0, unknown: 0,
@@ -4020,10 +4412,7 @@ app.post('/api/networks/quality-filter', async (req, res) => {
   const bump = (map, key) => map.set(key, (map.get(key) || 0) + 1);
 
   for (const channel of inCategories) {
-    const url = channel && (channel.streamUrl || channel.url);
-    const record = url
-      ? streamcheck.lookupCached(provider, networks.streamIdFromUrl(url))
-      : null;
+    const record = lookup(channel);
     if (!record) { unknown++; continue; }
     bump(statuses, record.status || 'Unknown');
     const key = formatKey(record);
@@ -4147,13 +4536,12 @@ function describeQuality(quality) {
 }
 
 function enrichWithStreamcheck(user, entries) {
-  const provider = user.streamcheckProvider;
-  if (!provider || !streamcheck.isLoaded(provider)) return entries;
+  const lookup = streamcheckLookup(user);
+  if (!lookup) return entries;
 
   return entries.map(entry => {
     if (!entry || !entry.url) return entry;
-    const record = streamcheck.lookupCached(provider, networks.streamIdFromUrl(entry.url));
-    const quality = qualityFromStreamcheck(record);
+    const quality = qualityFromStreamcheck(lookup(entry));
     if (!quality) return entry;
     return {
       ...entry,
@@ -4175,29 +4563,39 @@ function enrichWithStreamcheck(user, entries) {
 // dashboard actually draws. Without this, picking a provider appeared to
 // do nothing until a channel was checked by hand, because every badge on
 // screen was drawn from a link that nobody had enriched.
-function publishedQualityFor(user, urls) {
-  const provider = user.streamcheckProvider;
-  if (!provider || !streamcheck.isLoaded(provider)) return {};
+//
+// Keyed by URL, which is what the dashboard has in hand when it draws a
+// badge. Two providers cannot produce the same URL - the host and the
+// credentials in the path differ - so the key stays unambiguous even
+// though the readings behind it now come from different tables.
+function publishedQualityFor(user, entries) {
+  const lookup = streamcheckLookup(user);
+  if (!lookup) return {};
 
   const out = {};
-  for (const url of urls) {
-    if (!url || out[url]) continue;
-    const quality = qualityFromStreamcheck(
-      streamcheck.lookupCached(provider, networks.streamIdFromUrl(url)));
-    if (quality) out[url] = { ...quality, detail: describeQuality(quality) };
+  for (const entry of entries) {
+    if (!entry || !entry.url || out[entry.url]) continue;
+    const quality = qualityFromStreamcheck(lookup(entry));
+    if (quality) out[entry.url] = { ...quality, detail: describeQuality(quality) };
   }
   return out;
 }
 
-function configuredUrlsFor(user) {
-  const urls = [];
+// Every configured link and saved channel, as { url, providerId } - the
+// pair a published lookup needs. It used to be a bare list of URLs, which
+// stopped being enough the moment an account could hold two services
+// numbering their channels independently.
+function configuredEntriesFor(user) {
+  const entries = [];
   for (const links of Object.values(user.networkLinks || {})) {
-    if (Array.isArray(links)) for (const link of links) if (link && link.url) urls.push(link.url);
+    if (Array.isArray(links)) {
+      for (const link of links) if (link && link.url) entries.push(link);
+    }
   }
   for (const channel of user.savedChannels || []) {
-    if (channel && channel.url) urls.push(channel.url);
+    if (channel && channel.url) entries.push(channel);
   }
-  return urls;
+  return entries;
 }
 
 // ---------------------------------------------------------------------
@@ -4212,6 +4610,45 @@ function configuredUrlsFor(user) {
 // allowed to be written where.
 
 const AUTO_PICK_LIMIT = 5;
+
+// How many slots each provider gets to fill.
+//
+// Five each is the whole point of picking per provider: one service's
+// worth of links is one service's worth of outage, and a network with
+// five from each still has half a list when one of them goes down. A
+// single-provider account keeps the five it always had rather than
+// suddenly filling all ten - nothing about that account changed.
+//
+// Above two providers the network ceiling is what gives, not the
+// redundancy: three providers get three slots each rather than one of
+// them being left out.
+function autoPickLimitFor(providerCount) {
+  if (providerCount <= 1) return AUTO_PICK_LIMIT;
+  return Math.max(1, Math.min(
+    AUTO_PICK_LIMIT,
+    Math.floor(networks.MAX_LINKS_PER_NETWORK / providerCount)));
+}
+
+// The account's channel list, split back into one list per provider.
+//
+// Everything upstream works on the merged list, which is right for
+// searching - the user is looking for a channel, not for a service. Auto-
+// pick is the one place that needs the split back, because its answer is
+// explicitly "the best few from each".
+function channelsByProvider(user, channels) {
+  const groups = providersOf(user).map(provider => ({ providerId: provider.id, channels: [] }));
+  if (groups.length === 0) return [];
+  const byId = new Map(groups.map(group => [group.providerId, group]));
+
+  for (const channel of channels) {
+    // A channel with no providerId predates the split, or came from a
+    // source that could not be stamped; it belongs to the primary, which
+    // is the only provider such an account ever had.
+    const group = byId.get(channel.providerId) || groups[0];
+    group.channels.push(channel);
+  }
+  return groups;
+}
 
 // Which networks an account has handed over, and any rule text it has
 // edited. Normalised on read rather than trusted, like every other stored
@@ -4262,8 +4699,29 @@ function readAutoPick(user) {
 // surprising result can be traced to the run that produced it, and stored
 // after a run so a later one can tell whether anything is new.
 function streamcheckRunDate(provider) {
+  if (!provider) return '';
   const entry = streamcheck.describeCache().find(c => c.provider === provider);
   return entry ? (entry.runDate || '') : '';
+}
+
+// The account's published tables as one label, for panels with a single
+// line to name them in. Reads "provider-a + provider-b" when there are
+// two, and stays exactly as it was for an account with one.
+function accountTables(user) {
+  return streamcheckTablesFor(user).join(' + ');
+}
+
+// One sweep date for a whole account, for the places that have room to
+// print exactly one - the auto-pick panel's header, and the stamp stored
+// after a run.
+//
+// The OLDEST of the account's sweeps, not the newest. It answers "how
+// stale might any of this be", and the newest would let a service swept
+// this morning speak for one last swept in March.
+function accountRunDate(user) {
+  const dates = streamcheckTablesFor(user).map(streamcheckRunDate).filter(Boolean);
+  if (dates.length === 0) return '';
+  return dates.sort()[0];
 }
 
 // Readings for one account's provider, in the shape autopick.js expects.
@@ -4273,13 +4731,11 @@ function streamcheckRunDate(provider) {
 // data would mean replacing links that are known to work with links
 // nothing has ever measured.
 function autoPickReader(user) {
-  const provider = user.streamcheckProvider;
-  if (!provider || !streamcheck.isLoaded(provider)) return null;
+  const lookup = streamcheckLookup(user);
+  if (!lookup) return null;
 
   return (channel) => {
-    const url = channel.streamUrl || channel.url;
-    if (!url) return null;
-    const record = streamcheck.lookupCached(provider, networks.streamIdFromUrl(url));
+    const record = lookup(channel);
     if (!record) return null;
     const measured = qualityFromStreamcheck(record);
     return {
@@ -4311,6 +4767,7 @@ function autoPickEntry(pick) {
       name: channel.name,
       group: (channel.categories || [])[0] || '',
       streamId: channel.streamId,
+      providerId: pick.providerId || channel.providerId,
       probedQuality: pick.reading.label || '',
     }),
     band: autopick.BANDS[pick.band].name,
@@ -4342,11 +4799,12 @@ function computeAutoPick(user, channels, options = {}) {
     return { ready: false, reason: 'no-published-data', settings, results: [] };
   }
 
+  const groups = channelsByProvider(user, channels);
+  const limit = options.limit || autoPickLimitFor(groups.length);
+  const labels = Object.fromEntries(providersOf(user).map(pr => [pr.id, pr.label]));
+
   const results = keys.map((key) => {
-    const outcome = autopick.pickForNetwork(key, channels, read, {
-      rules,
-      limit: options.limit || AUTO_PICK_LIMIT,
-    });
+    const outcome = autopick.pickAcrossProviders(key, groups, read, { rules, limit });
     const current = (user.networkLinks || {})[key] || [];
     const entries = outcome.picks.map(autoPickEntry);
 
@@ -4355,8 +4813,14 @@ function computeAutoPick(user, channels, options = {}) {
     // channels in the same order is a no-op, and saying so is what stops
     // a weekly job from looking like it churns an account's links every
     // time it runs.
-    const before = current.map(l => l.streamId || l.url).join('|');
-    const after = entries.map(l => l.streamId || l.url).join('|');
+    //
+    // The provider is part of that identity now. Two services numbering
+    // their channels independently can both hold a stream 1568650, and
+    // without this a pick that moved a network from one provider to the
+    // other would compare equal and never be written.
+    const identity = (l) => `${l.providerId || ''}:${l.streamId || l.url}`;
+    const before = current.map(identity).join('|');
+    const after = entries.map(identity).join('|');
 
     return {
       networkKey: key,
@@ -4365,6 +4829,9 @@ function computeAutoPick(user, channels, options = {}) {
       considered: outcome.considered,
       rejected: outcome.rejected,
       usedSlow: outcome.usedSlow,
+      perProvider: outcome.perProvider.map(entry => ({
+        ...entry, label: labels[entry.providerId] || '',
+      })),
       currentCount: current.length,
       changed: before !== after,
     };
@@ -4429,9 +4896,47 @@ app.post('/api/streamcheck/providers', async (req, res) => {
 
   return res.json({
     success: true,
+    // What streamcheck.pro publishes tables for.
     providers: await streamcheck.listProviders(),
-    selected: auth.user.streamcheckProvider || '',
+    // What this account has chosen, one table per provider it holds.
+    // `selected` remains as the primary provider's choice so a dashboard
+    // that has not been updated still shows something true.
+    accountProviders: providersOf(auth.user).map(entry => describeProvider(entry)),
+    selected: (providersOf(auth.user)[0] || {}).streamcheckProvider || '',
     cached: streamcheck.describeCache(),
+  });
+});
+
+// Points one of the account's providers at a published table.
+//
+// Separate from /api/user/update because it has to WAIT for the table to
+// download before answering: the dashboard redraws its badges from the
+// response, and answering early meant every badge came back blank and
+// the choice looked like it had not taken.
+app.post('/api/streamcheck/select', async (req, res) => {
+  const auth = await authenticateForChannels(req, res);
+  if (!auth) return;
+
+  const { providerId, table } = req.body;
+  const provider = providersOf(auth.user).find(entry => entry.id === providerId);
+  if (!provider) return res.status(400).json({ error: 'No such provider on this account.' });
+  if (typeof table !== 'string') {
+    return res.status(400).json({ error: 'A published table name is required.' });
+  }
+
+  provider.streamcheckProvider = table.trim();
+  await saveUserConfigs();
+
+  if (provider.streamcheckProvider) {
+    await streamcheck.ensureProvider(provider.streamcheckProvider);
+  }
+
+  return res.json({
+    success: true,
+    providers: providersOf(auth.user).map(entry => describeProvider(entry)),
+    loaded: !!provider.streamcheckProvider && streamcheck.isLoaded(provider.streamcheckProvider),
+    runDate: streamcheckRunDate(provider.streamcheckProvider),
+    linkQuality: publishedQualityFor(auth.user, configuredEntriesFor(auth.user)),
   });
 });
 
@@ -4443,9 +4948,8 @@ app.post('/api/networks/suggest', async (req, res) => {
   // dashboard's own first request, it happens at most once every few
   // hours, and paying it here is what lets every other endpoint enrich
   // from memory without stalling.
-  if (auth.user.streamcheckProvider) {
-    await streamcheck.ensureProvider(auth.user.streamcheckProvider);
-  }
+  await Promise.all(streamcheckTablesFor(auth.user)
+    .map(table => streamcheck.ensureProvider(table)));
 
   // What every saved preset pins, resolved against this playlist. Not
   // proposals any more - the guessing is gone - so this is only ever the
@@ -4463,7 +4967,7 @@ app.post('/api/networks/suggest', async (req, res) => {
     presets: describePresets(),
     // Everything already configured, measured. Keyed by URL because that
     // is what the dashboard draws its badges against.
-    linkQuality: publishedQualityFor(auth.user, configuredUrlsFor(auth.user)),
+    linkQuality: publishedQualityFor(auth.user, configuredEntriesFor(auth.user)),
   });
 });
 
@@ -4494,7 +4998,15 @@ app.post('/api/networks/search', async (req, res) => {
     query, channelsForSearch(auth.user, auth.source.channels), { limit: 50, excludeGroups }
   );
   return res.json({
-    success: true, channels: enrichWithStreamcheck(auth.user, channels), groups, truncated,
+    success: true,
+    channels: enrichWithStreamcheck(auth.user, channels),
+    // So a result list drawn from several services can say which one each
+    // channel is on. Sent with every search rather than fetched once,
+    // because it is four short strings and the alternative is a second
+    // endpoint the page has to remember to call.
+    providers: providersOf(auth.user).map(entry => describeProvider(entry)),
+    groups,
+    truncated,
   });
 });
 
@@ -4506,11 +5018,12 @@ app.post('/api/networks/saved', async (req, res) => {
   if (!auth) return;
 
   const { resolved, problems } = networks.resolveSavedChannels(
-    auth.user.savedChannels, auth.source
+    auth.user.savedChannels, linkResolvers(auth.user, auth.source).sourceFor
   );
   return res.json({
     success: true,
     channels: enrichWithStreamcheck(auth.user, resolved).map(withQualityTier),
+    providers: providersOf(auth.user).map(entry => describeProvider(entry)),
     problems,
   });
 });
@@ -4604,6 +5117,23 @@ app.post('/api/networks/defaults', async (req, res) => {
   return res.json({ success: true, presets: describePresets() });
 });
 
+// The two things networks.resolveNetworkLinks needs from an account that
+// holds several providers: which playlist to heal a link against, and
+// whose credentials to rebuild an Xtream URL from. Both keyed by the
+// link's own providerId, because getting either wrong produces a URL that
+// looks fine and plays somebody else's channel.
+function linkResolvers(user, source) {
+  const byProvider = (source && source.byProvider) || new Map();
+  return {
+    sourceFor: (providerId) => {
+      if (byProvider.size === 0) return source || null;
+      const provider = providerFor(user, providerId);
+      return provider ? (byProvider.get(provider.id) || null) : null;
+    },
+    buildUrl: (streamId, providerId) => buildStreamUrlFor(user, providerId, streamId) || null,
+  };
+}
+
 // Resolves the user's SAVED links against the current playlist, so the
 // dashboard can show which ones still point at a live channel, which
 // silently moved and got healed, and which are gone. This is the only
@@ -4617,14 +5147,12 @@ app.post('/api/networks/status', async (req, res) => {
   // resolveNetworkLinks has nothing to resolve it to and reports every
   // one of them as "no Xtream credentials configured" - the whole picker
   // showing broken while being perfectly healthy.
-  const buildXtreamUrl = (auth.user.xtream && auth.user.xtream.url)
-    ? (streamId) => buildXtreamStreamUrl(auth.user, streamId)
-    : null;
+  const { sourceFor, buildUrl } = linkResolvers(auth.user, auth.source);
 
   const status = {};
   for (const network of networks.NETWORKS) {
     const { resolved, problems } = networks.resolveNetworkLinks(
-      auth.user.networkLinks, network.key, auth.source, buildXtreamUrl
+      auth.user.networkLinks, network.key, sourceFor, buildUrl
     );
     if (resolved.length === 0 && problems.length === 0) continue;
     status[network.key] = {
@@ -4641,7 +5169,7 @@ app.post('/api/user/register', async (req, res) => {
   if (!ENCRYPTION_KEY_CONFIGURED) {
     return res.status(503).json({ error: 'Encryption key not configured yet. See the homepage for setup instructions.' });
   }
-  const { xtream, m3u, connectionType, selectedSports, password, timeZone, sportOrder, networkLinks, savedChannels, searchCategories, streamcheckProvider } = req.body;
+  const { xtream, m3u, connectionType, selectedSports, password, timeZone, sportOrder, networkLinks, savedChannels, searchCategories, streamcheckProvider, providers } = req.body;
   if (!password || typeof password !== 'string' || password.length === 0) {
     return res.status(400).json({ error: 'A password is required.' });
   }
@@ -4669,14 +5197,39 @@ app.post('/api/user/register', async (req, res) => {
     searchCategories: Array.isArray(searchCategories) ? searchCategories : [],
     // Which provider on streamcheck.pro this account's stream ids belong
     // to. Ids are not unique across providers, so without this a lookup
-    // would sometimes describe a different service's channel.
+    // would sometimes describe a different service's channel. Kept for
+    // the setup wizard, which configures one service; a second is added
+    // from the dashboard and lands in `providers` below.
     streamcheckProvider: typeof streamcheckProvider === 'string' ? streamcheckProvider : '',
+    providers: Array.isArray(providers) ? providers : undefined,
     createdAt: new Date().toISOString()
   };
+  migrateAccountProviders(userConfigs[uuid]);
   saveUserConfigs();
 
-  return res.json({ success: true, uuid, manifestUrl: `/user/${uuid}/manifest.json` });
+  return res.json({
+    success: true,
+    uuid,
+    // The wizard sent one connection; this is it with an id, which the
+    // dashboard needs before it can offer to add a second.
+    providers: providersOf(userConfigs[uuid]).map(entry => describeProvider(entry, { withSecrets: true })),
+    maxProviders: MAX_PROVIDERS,
+    manifestUrl: `/user/${uuid}/manifest.json`
+  });
 });
+
+// The first provider in the pre-providers shape, for the parts of the
+// dashboard that still speak it. Derived rather than stored, so the two
+// cannot drift: there is one place an account's credentials live now, and
+// this is a view of it.
+function legacyConnectionFields(user, kind) {
+  const provider = providersOf(user).find(entry => entry.kind === kind);
+  if (!provider) return undefined;
+  return kind === 'm3u'
+    ? { playlistUrl: provider.playlistUrl, epgUrl: provider.epgUrl || '' }
+    : { url: provider.url, username: provider.username, password: provider.password,
+        streamFormat: provider.streamFormat || 'm3u8' };
+}
 
 // Attaches a tier to a quality that was measured in an earlier session.
 //
@@ -4724,8 +5277,13 @@ app.post('/api/user/login', async (req, res) => {
     success: true, 
     uuid: user.uuid, 
     connectionType: user.connectionType || 'xtream',
-    xtream: user.xtream, 
-    m3u: user.m3u,
+    // Both shapes. `providers` is the real one; `xtream`/`m3u` describe
+    // the first of them and exist so the setup wizard, which knows about
+    // exactly one connection, keeps working unchanged.
+    providers: providersOf(user).map(entry => describeProvider(entry, { withSecrets: true })),
+    maxProviders: MAX_PROVIDERS,
+    xtream: legacyConnectionFields(user, 'xtream'),
+    m3u: legacyConnectionFields(user, 'm3u'),
     selectedSports: user.selectedSports, 
     timeZone: user.timeZone || 'America/New_York',
     sportOrder: user.sportOrder || [],
@@ -4741,7 +5299,7 @@ app.post('/api/user/login', async (req, res) => {
 });
 
 app.post('/api/user/update', async (req, res) => {
-  const { uuid, password, xtream, m3u, selectedSports, timeZone, sportOrder, networkLinks, savedChannels, searchCategories, streamcheckProvider, qualityFilter, searchTerms } = req.body;
+  const { uuid, password, xtream, m3u, selectedSports, timeZone, sportOrder, networkLinks, savedChannels, searchCategories, streamcheckProvider, qualityFilter, searchTerms, providers } = req.body;
   const ip = req.ip;
 
   if (isRateLimited(ip)) {
@@ -4756,11 +5314,70 @@ app.post('/api/user/update', async (req, res) => {
     return res.status(401).json({ error: 'Invalid UUID or password.' });
   }
   clearFailedAttempts(ip);
-  if (xtream !== undefined) user.xtream = xtream;
-  if (m3u !== undefined) user.m3u = m3u;
+  // The whole provider list, replaced at once.
+  //
+  // Not a set of add/remove/rename endpoints, because the order is itself
+  // a setting - it decides which service's block of auto-picked links
+  // goes first when two are indistinguishable - and there is no way to
+  // express a reorder as a series of single-item edits without the list
+  // being briefly wrong in between.
+  //
+  // Credentials are optional per entry: the dashboard sends a provider
+  // back with an empty password when the user did not retype it, and
+  // blanking a working connection because a form field was left alone is
+  // not something to make anyone recover from.
+  if (providers !== undefined) {
+    if (!Array.isArray(providers) || providers.length === 0) {
+      return res.status(400).json({ error: 'An account needs at least one provider.' });
+    }
+    if (providers.length > MAX_PROVIDERS) {
+      return res.status(400).json({ error: `At most ${MAX_PROVIDERS} providers per account.` });
+    }
+    const kind = user.connectionType === 'm3u' ? 'm3u' : 'xtream';
+    const existing = new Map(providersOf(user).map(entry => [entry.id, entry]));
+    const next = [];
+    for (const [index, raw] of providers.entries()) {
+      const previous = existing.get(raw && raw.id);
+      const merged = previous ? { ...previous, ...raw } : raw;
+      if (previous && kind === 'xtream' && !raw.password) merged.password = previous.password;
+      const normalised = normaliseProvider(merged, kind, index);
+      if (!normalised) {
+        return res.status(400).json({
+          error: kind === 'm3u'
+            ? `Provider ${index + 1} needs a playlist URL.`
+            : `Provider ${index + 1} needs a server URL.`
+        });
+      }
+      next.push(normalised);
+    }
+    if (new Set(next.map(entry => entry.id)).size !== next.length) {
+      return res.status(400).json({ error: 'Two providers cannot share an id.' });
+    }
+    user.providers = next;
+  }
+
+  // The pre-providers fields, still accepted so the setup wizard keeps
+  // working. They edit the FIRST provider rather than a parallel copy of
+  // it - two places holding one account's credentials is exactly the
+  // drift this array was meant to end.
+  if (xtream !== undefined || m3u !== undefined) {
+    const kind = m3u !== undefined ? 'm3u' : 'xtream';
+    const list = providersOf(user);
+    const updated = normaliseProvider(
+      { ...(list[0] || {}), ...(kind === 'm3u' ? m3u : xtream), id: list[0] && list[0].id },
+      kind, 0);
+    if (updated) user.providers = [updated, ...list.slice(1)];
+    user.connectionType = kind;
+  }
   if (selectedSports !== undefined) user.selectedSports = selectedSports;
   if (streamcheckProvider !== undefined) {
-    user.streamcheckProvider = typeof streamcheckProvider === 'string' ? streamcheckProvider : '';
+    // Names the FIRST provider's table. The per-provider control is
+    // /api/streamcheck/select; this is the setup wizard's single-service
+    // version of the same choice.
+    const first = providersOf(user)[0];
+    const table = typeof streamcheckProvider === 'string' ? streamcheckProvider : '';
+    user.streamcheckProvider = table;
+    if (first) first.streamcheckProvider = table;
   }
   if (searchTerms !== undefined) {
     user.searchTerms = readSearchTerms({ searchTerms });
@@ -4815,7 +5432,15 @@ app.post('/api/user/update', async (req, res) => {
 
   saveUserConfigs();
 
-  return res.json({ success: true, uuid: user.uuid, manifestUrl: `/user/${uuid}/manifest.json` });
+  return res.json({
+    success: true,
+    uuid: user.uuid,
+    // Echoed back with ids filled in, so a dashboard that has just added
+    // a provider knows what to key its edits to without guessing or
+    // re-fetching the whole account.
+    providers: providersOf(user).map(entry => describeProvider(entry)),
+    manifestUrl: `/user/${uuid}/manifest.json`
+  });
 });
 
 // Permanently removes a user's entire record - their Xtream credentials,
@@ -4975,6 +5600,10 @@ app.post('/api/admin/users', async (req, res) => {
   const users = Object.values(userConfigs).map(user => ({
     uuid: user.uuid,
     connectionType: user.connectionType || 'xtream',
+    // How many services the account carries. A count, not the services
+    // themselves: the same reasoning that keeps credentials out of this
+    // list keeps their hostnames out of it too.
+    providerCount: providersOf(user).length,
     createdAt: user.createdAt || null,
     lastAccessedAt: user.lastAccessedAt || null
   }));
@@ -5096,17 +5725,18 @@ function qualityLabelForLink(user, link) {
   // really "the freshest copy" rather than two competing opinions - it
   // matters after a restart, when the provider table has not been
   // pulled yet and the stored label is all there is.
-  const published = publishedLabelFor(user, link.url);
+  const published = publishedLabelFor(user, link);
   return published || link.probedQuality || '';
 }
 
 // One channel's published label, from whatever is already in memory.
 // Never loads a provider table: this runs on every stream request, and
 // a catalog click is not the place to wait twenty megabytes.
-function publishedLabelFor(user, url) {
-  if (!user || !user.streamcheckProvider || !url) return '';
-  const record = streamcheck.lookupCached(
-    user.streamcheckProvider, networks.streamIdFromUrl(url));
+function publishedLabelFor(user, link) {
+  const table = streamcheckTableFor(user, link && link.providerId);
+  const url = link && (link.url || link.streamUrl);
+  if (!table || !url) return '';
+  const record = streamcheck.lookupCached(table, networks.streamIdFromUrl(url));
   const reading = qualityFromStreamcheck(record);
   return reading ? reading.label : '';
 }
@@ -5116,7 +5746,8 @@ function publishedLabelFor(user, url) {
 function buildLinkTitle(user, networkKey, link) {
   const label = qualityLabelForLink(user, link);
   const networkPart = `📡 ${networks.getNetworkLabel(networkKey)}${label ? ` · ${label}` : ''}`;
-  return link.group ? `${networkPart}  📁 ${link.group}` : networkPart;
+  const groupPart = link.group ? `  📁 ${link.group}` : '';
+  return `${networkPart}${groupPart}${providerSuffix(user, link.providerId)}`;
 }
 
 // The same shape as buildLinkTitle, with a different lead icon because
@@ -5130,9 +5761,24 @@ function buildLinkTitle(user, networkKey, link) {
 // store one against. It fills in once the channel is checked in the watch
 // portal.
 function buildAutoSearchTitle(user, channel) {
-  const label = publishedLabelFor(user, channel.url);
+  const label = publishedLabelFor(user, channel);
   const searchPart = `🔎 Auto${label ? ` · ${label}` : ''}`;
-  return channel.group ? `${searchPart}  📁 ${channel.group}` : searchPart;
+  const groupPart = channel.group ? `  📁 ${channel.group}` : '';
+  return `${searchPart}${groupPart}${providerSuffix(user, channel.providerId)}`;
+}
+
+// Which service a stream came from, appended to its title - but only for
+// an account that has more than one.
+//
+// Once ten slots hold five channels from each of two services, "the first
+// two did not play, try further down" needs a way to tell whether further
+// down is even a different service. A single-provider account already
+// knows the answer and does not need it taking up room in the row.
+function providerSuffix(user, providerId) {
+  const list = providersOf(user);
+  if (list.length < 2) return '';
+  const label = providerLabelFor(user, providerId);
+  return label ? `  🛰️ ${label}` : '';
 }
 
 // Poster/background for a network block. Deliberately generated rather
@@ -5465,7 +6111,7 @@ app.get('/user/:uuid/meta/sports/:id.json', async (req, res) => {
     // Looked up in the cached channel source rather than by fetching the
     // categories this sport was mapped to - there are no such mappings
     // now, and the cache already holds every channel the account can see.
-    const source = await getXtreamChannelSource(user);
+    const source = await getAccountChannelSource(user);
     const channel = (source ? source.channels : []).find(c => c.streamId === String(idVal));
 
     return res.json({
@@ -5510,12 +6156,11 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     // broken card rather than as a cache that has not warmed up yet.
     let netSource = null;
     if (user.connectionType === 'm3u') {
-      const playlistUrl = user.m3u && user.m3u.playlistUrl;
-      netSource = playlistUrl ? m3u.getCachedM3USource(playlistUrl) : null;
+      netSource = await getAccountChannelSource(user);
       if (!netSource) {
         return res.json({ streams: [{
           name: '\u26A0\uFE0F Playlist not loaded',
-          title: playlistUrl
+          title: providersOf(user).length > 0
             ? 'Your playlist is still being fetched - try again in a moment.'
             : 'No playlist configured - add one in the Sportio dashboard.',
           url: ''
@@ -5523,11 +6168,9 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
       }
     }
 
+    const netResolvers = linkResolvers(user, netSource);
     const { resolved, problems } = networks.resolveNetworkLinks(
-      user.networkLinks, networkKey, netSource,
-      (streamId) => (user.xtream && user.xtream.url)
-        ? buildXtreamStreamUrl(user, streamId)
-        : null
+      user.networkLinks, networkKey, netResolvers.sourceFor, netResolvers.buildUrl
     );
 
     const netStreams = resolved.map(link => ({
@@ -5566,13 +6209,16 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   const hostUrl = `${req.protocol}://${req.get('host')}`;
   const isM3u = user.connectionType === 'm3u';
 
-  let m3uSource = null;
+  if (providersOf(user).length === 0) return res.json({ streams: [] });
+
+  // Resolved once and reused by the link lookup, the standing search and
+  // the team-search fallback below. All three need every provider's
+  // channels, and fetching them three times over would turn one catalog
+  // click into three full passes of each service.
+  let accountSource = null;
   if (isM3u) {
-    if (!user.m3u || !user.m3u.playlistUrl) return res.json({ streams: [] });
-    m3uSource = m3u.getCachedM3USource(user.m3u.playlistUrl);
-    if (!m3uSource) return res.json({ streams: [] });
-  } else {
-    if (!user.xtream || !user.xtream.url) return res.json({ streams: [] });
+    accountSource = await getAccountChannelSource(user);
+    if (!accountSource) return res.json({ streams: [] });
   }
 
   const userTz = user.timeZone || 'America/New_York';
@@ -5603,14 +6249,12 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   let linkStreams = [];
   let linkProblems = [];
   if (networkKey) {
+    // Xtream links rebuild their URL from the account's credentials
+    // rather than storing it, and which provider's credentials is what
+    // the link's providerId answers - only this route has them in hand.
+    const { sourceFor, buildUrl } = linkResolvers(user, accountSource);
     const { resolved, problems } = networks.resolveNetworkLinks(
-      user.networkLinks, networkKey, m3uSource,
-      // Xtream links rebuild their URL from the account's credentials
-      // rather than storing it, so the builder is passed in - only this
-      // route has the credentials in hand.
-      (streamId) => (user.xtream && user.xtream.url)
-        ? buildXtreamStreamUrl(user, streamId)
-        : null
+      user.networkLinks, networkKey, sourceFor, buildUrl
     );
     linkProblems = problems;
 
@@ -5648,7 +6292,8 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   const autoSearch = promotion ? promotion.autoSearch : autoSearchFor(user, searchKey, sportKey);
   let autoStreams = [];
   if (autoSearch) {
-    const autoChannels = await fetchAutoSearchChannels(user, autoSearch, m3uSource);
+    const autoChannels = await fetchAutoSearchChannels(
+      user, autoSearch, linkResolvers(user, accountSource).sourceFor);
     autoStreams = autoChannels.map(channel => ({
       name: channel.name,
       title: buildAutoSearchTitle(user, channel),
@@ -5694,7 +6339,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   // eighty unfiltered rows it cannot narrow.
   let teamSearch = null;
   if (!finalStreams.some(s => s.url)) {
-    const source = isM3u ? m3uSource : await getXtreamChannelSource(user);
+    const source = accountSource || await getAccountChannelSource(user);
     if (source) {
       // Through the account's own category and quality filters, exactly
       // as the manual search box in the watch portal is - a channel
@@ -5755,8 +6400,9 @@ app.listen(PORT, '0.0.0.0', () => {
 // refreshAllM3USources itself, not here.
 function getActiveM3uSources() {
   return Object.values(userConfigs)
-    .filter(u => u.connectionType === 'm3u' && u.m3u)
-    .map(u => ({ playlistUrl: u.m3u.playlistUrl, epgUrl: u.m3u.epgUrl }));
+    .flatMap(user => providersOf(user))
+    .filter(provider => provider.kind === 'm3u' && provider.playlistUrl)
+    .map(provider => ({ playlistUrl: provider.playlistUrl, epgUrl: provider.epgUrl }));
 }
 
 m3u.startM3uScheduler(getActiveM3uSources, () => m3uSettings);
@@ -5784,8 +6430,7 @@ const EVERY_DAY = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 // other fifteen on that dashboard.
 function providersInUse() {
   return [...new Set(Object.values(userConfigs)
-    .map(u => u.streamcheckProvider)
-    .filter(Boolean))];
+    .flatMap(user => streamcheckTablesFor(user)))];
 }
 
 // Which leagues anyone actually watches, and in which timezone. Both
@@ -5849,46 +6494,49 @@ async function warmGameCaches() {
 // replaced before it can expire under somebody's request.
 const CHANNEL_SOURCE_WARM_MS = 25 * 60 * 1000;
 
-// One account per provider. Several accounts commonly share one service,
-// and the cache is keyed by provider rather than by account, so warming
-// each account separately would fetch the same catalog several times.
-function accountsToWarm() {
-  const byProvider = new Map();
+// One entry per distinct service, across every account.
+//
+// Deduplicated because the cache is keyed by the service rather than by
+// the account holding it: several accounts commonly share one, and an
+// account can now list the same service twice by accident. Warming each
+// occurrence separately would pull the same catalog down several times
+// for one cached copy.
+function providersToWarm() {
+  const seen = new Map();
   for (const user of Object.values(userConfigs)) {
-    if (user.connectionType === 'm3u') {
-      const url = user.m3u && user.m3u.playlistUrl;
-      if (url && !byProvider.has(`m3u|${url}`)) byProvider.set(`m3u|${url}`, user);
-      continue;
+    for (const provider of providersOf(user)) {
+      const key = provider.kind === 'm3u'
+        ? `m3u|${provider.playlistUrl}`
+        : `xtream|${xtreamCacheKey(provider)}`;
+      if (provider.kind === 'm3u' ? !provider.playlistUrl : !provider.url) continue;
+      if (!seen.has(key)) seen.set(key, provider);
     }
-    if (!user.xtream || !user.xtream.url) continue;
-    const key = `xtream|${xtreamCacheKey(user)}`;
-    if (!byProvider.has(key)) byProvider.set(key, user);
   }
-  return [...byProvider.values()];
+  return [...seen.values()];
 }
 
 async function warmChannelSources() {
-  const users = accountsToWarm();
-  if (users.length === 0) return;
+  const providers = providersToWarm();
+  if (providers.length === 0) return;
 
   let warmed = 0;
-  for (const user of users) {
+  for (const provider of providers) {
     try {
-      if (user.connectionType === 'm3u') {
+      if (provider.kind === 'm3u') {
         // M3U already has its own refresh schedule; this only covers the
         // case where that has not run yet, and it declines to refetch
         // something recent on its own.
-        warmM3uSourceInBackground(user);
+        warmM3uPlaylistInBackground(provider);
         warmed++;
         continue;
       }
-      const source = await getXtreamChannelSource(user);
+      const source = await getProviderChannelSource(provider);
       if (source) warmed++;
     } catch (err) {
       console.error(`[Warm] Could not warm a channel source: ${err.message}`);
     }
   }
-  console.log(`[Warm] Channel source ready for ${warmed}/${users.length} provider(s).`);
+  console.log(`[Warm] Channel source ready for ${warmed}/${providers.length} provider(s).`);
 }
 
 function scheduleChannelSourceWarm() {
@@ -5905,22 +6553,6 @@ function scheduleGameCacheWarm() {
   // dashboard loading a playlist, and there is no reason to make it
   // queue behind a round of ESPN fetches.
   setTimeout(() => { warmGameCaches(); }, 15 * 1000).unref();
-}
-
-// An account's playlist outside a request.
-//
-// The scheduled run has no req to authenticate, so it reaches the same
-// two sources authenticateForChannels does. An M3U playlist is taken from
-// cache only and never fetched: the playlist refresher owns that
-// schedule, and a second thing pulling playlists on its own timer is how
-// a provider starts rate-limiting an account.
-async function channelSourceFor(user) {
-  if (user.connectionType === 'm3u') {
-    const url = user.m3u && user.m3u.playlistUrl;
-    return url ? m3u.getCachedM3USource(url) : null;
-  }
-  if (!user.xtream || !user.xtream.url) return null;
-  return getXtreamChannelSource(user);
 }
 
 // Re-pick every account's channels after a provider publishes a new
@@ -5944,15 +6576,24 @@ function accountTag(user) {
   return String(user.uuid || '').slice(0, 8);
 }
 
+// Every account with a provider pointed at this table, not only those
+// pointed at it exclusively. An account holding two services gets re-
+// picked when either one publishes: the other's readings are still in
+// memory, so the run produces a complete answer rather than half of one.
 async function autoPickAfterSweep(provider, runDate) {
   const accounts = Object.values(userConfigs).filter(user =>
-    user.streamcheckProvider === provider && readAutoPick(user).networks.length > 0);
+    streamcheckTablesFor(user).includes(provider) && readAutoPick(user).networks.length > 0);
   if (accounts.length === 0) return;
 
   let touched = 0;
   for (const user of accounts) {
     try {
-      const source = await channelSourceFor(user);
+      // The same channel list authenticateForChannels builds, reached
+      // without a request to authenticate. An M3U playlist comes from
+      // cache only and is never fetched here: the playlist refresher owns
+      // that schedule, and a second thing pulling playlists on its own
+      // timer is how a provider starts rate-limiting an account.
+      const source = await getAccountChannelSource(user);
       if (!source) {
         console.error(`[Auto-pick] ${accountTag(user)}: no playlist available, leaving links alone.`);
         continue;
@@ -5969,7 +6610,14 @@ async function autoPickAfterSweep(provider, runDate) {
       const outcome = applyAutoPick(user, channels);
       if (!outcome.ready || outcome.applied.length === 0) continue;
 
-      user.autoPick = { ...readAutoPick(user), lastRun: new Date().toISOString(), lastRunDate: runDate || '' };
+      // The account's own oldest sweep, not the run that triggered this.
+      // For an account holding two services the triggering run describes
+      // half the picks, and the stamp is read as "how old is this set".
+      user.autoPick = {
+        ...readAutoPick(user),
+        lastRun: new Date().toISOString(),
+        lastRunDate: accountRunDate(user) || runDate || '',
+      };
       touched++;
       for (const change of outcome.applied) {
         console.log(`[Auto-pick] ${accountTag(user)}: ${change.label} now ${change.count} channel(s) (was ${change.was}).`);
