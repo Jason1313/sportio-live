@@ -275,7 +275,19 @@ function wrapToWidth(text, perLine, maxLines) {
 // width so that difference changes the letterforms and not the layout.
 // The fighters' names cannot be handled that way - they are arbitrary
 // text - so they are wrapped and left to the local font.
-function buildEventPoster({ code, title, place, accent = '#C8102E' }) {
+// The wrestling card, laid out for the square.
+//
+// It carried six things when it was 600x900: the mark, the promotion's
+// full name, the card number, the headline, the venue and the
+// broadcaster. On a card 190 pixels wide that is about 9 pixels a line
+// for the small ones, which is not reading, it is knowing what it says
+// because you wrote it.
+//
+// Three things survive, because three is what fits at that size: whose
+// promotion it is, which card, and who is on it. The venue and the
+// broadcaster moved to the description, which is where somebody who
+// wants them is already looking.
+function buildEventPoster({ code, title, accent = '#C8102E' }) {
   const ground = '#0B1B2B';
   const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
 
@@ -286,19 +298,18 @@ function buildEventPoster({ code, title, place, accent = '#C8102E' }) {
     `>${escapeXml(body)}</text>`;
 
   // Two mat circles, which is what a wrestling surface looks like from
-  // above, sized and placed so they read as a watermark rather than as
-  // a diagram.
+  // above, centred on the card and sized to read as a watermark rather
+  // than as a diagram.
   const mat =
     `<g fill="none" stroke="${accent}" stroke-opacity="0.16">` +
-      `<circle cx="${SQ / 2}" cy="235" r="205" stroke-width="22"/>` +
-      `<circle cx="${SQ / 2}" cy="235" r="123" stroke-width="12"/>` +
+      `<circle cx="${SQ / 2}" cy="${SQ / 2}" r="236" stroke-width="26"/>` +
+      `<circle cx="${SQ / 2}" cy="${SQ / 2}" r="142" stroke-width="14"/>` +
     '</g>';
 
-  // Two lines rather than three, and narrower. The square has a third
-  // less height to spend and the promotion's own mark is the thing worth
-  // spending it on.
-  const nameLines = wrapToWidth(title, 20, 2);
-  const nameTop = 452 - (nameLines.length - 1) * 19;
+  // The headline, at a size worth setting: two lines of sixteen, which
+  // is what "Chimaev vs Woodley" and "Covington vs Muhammad" both need.
+  const nameLines = wrapToWidth(title, 16, 2);
+  const nameTop = 442 - (nameLines.length - 1) * 24;
 
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${SQ} ${SQ}" width="${SQ}" height="${SQ}">` +
     '<defs>' +
@@ -308,21 +319,19 @@ function buildEventPoster({ code, title, place, accent = '#C8102E' }) {
     '</defs>' +
     `<rect width="${SQ}" height="${SQ}" fill="url(#ground)"/>` +
     mat +
-    `<rect y="0" width="${SQ}" height="10" fill="${accent}"/>` +
+    `<rect y="0" width="${SQ}" height="12" fill="${accent}"/>` +
 
     // The mark: initials over the full name, the way the promotion
-    // writes itself.
-    text('RAF', { y: 278, size: 132, weight: 800, spacing: 5, length: 254 }) +
-    `<rect x="${(SQ - 240) / 2}" y="306" width="240" height="3" fill="${accent}"/>` +
-    text('REAL AMERICAN FREESTYLE', { y: 336, size: 17, weight: 700, spacing: 3, fill: '#ffffffcc', length: 316 }) +
+    // writes itself. It owns the top half.
+    text('RAF', { y: 214, size: 152, weight: 800, spacing: 6, length: 300 }) +
+    `<rect x="${(SQ - 268) / 2}" y="246" width="268" height="4" fill="${accent}"/>` +
+    text('REAL AMERICAN FREESTYLE', { y: 282, size: 20, weight: 700, spacing: 4, fill: '#ffffffcc', length: 368 }) +
 
-    // The card's own number, then its headline.
-    (code ? text(code.toUpperCase(), { y: 396, size: 25, weight: 800, spacing: 4, fill: accent }) : '') +
-    nameLines.map((line, i) => text(line, { y: nameTop + i * 38, size: 30, weight: 700 })).join('') +
-    (place ? text(place, { y: 524, size: 19, weight: 600, fill: '#ffffff8c' }) : '') +
+    // Which card, then who is on it.
+    (code ? text(code.toUpperCase(), { y: 356, size: 30, weight: 800, spacing: 5, fill: accent }) : '') +
+    nameLines.map((line, i) => text(line, { y: nameTop + i * 48, size: 40, weight: 700 })).join('') +
 
-    text('FOX NATION', { y: 570, size: 16, weight: 700, spacing: 4, fill: '#ffffff73', length: 168 }) +
-    `<rect y="${SQ - 10}" width="${SQ}" height="10" fill="${accent}"/>` +
+    `<rect y="${SQ - 12}" width="${SQ}" height="12" fill="${accent}"/>` +
     '</svg>';
 }
 

@@ -1495,20 +1495,19 @@ const mmaPosterHandler = async (req, res) => {
   const leagueLogoUrl = await getRealLeagueLogoUrl(leagueKey);
   const leagueLogoData = leagueLogoUrl ? await getBase64Image(leagueLogoUrl) : null;
 
-  // Square, like every other card. It was 600x900 when a poster here was
-  // always a drawn one; a match card is ESPN's square artwork now, and a
-  // row that mixes the two shapes leaves one caption sitting lower than
-  // its neighbours' for no reason the reader can see.
+  // Two halves: the league's mark above, the card's name below.
   //
-  // Re-laid rather than scaled. Multiplying every y by two thirds would
-  // have kept the proportions and lost the point of them: the logo and
-  // the text each need room to be read at, not a share of the height.
+  // The first pass at squaring this kept the tall poster's proportions
+  // and shrank everything into them, which left the logo small and high
+  // with a band of empty gradient under it. Halves instead - the mark
+  // centred in the top 300, the text centred in the bottom 300 - because
+  // at the size a card is actually looked at there are two things on it.
   //
-  // The logo sits in the upper half, scaled proportionately inside its
-  // box rather than filling it - league marks are wildly different shapes
-  // (the UFC's is wide, the generic MMA icon is square) and stretching
-  // any of them to a fixed box would be worse than leaving air.
-  const LOGO = { x: 110, y: 74, width: 380, height: 216 };
+  // The logo is scaled proportionately inside its box rather than filling
+  // it: league marks are wildly different shapes (the UFC's is wide, the
+  // generic MMA icon is square) and stretching any of them to a fixed box
+  // would be worse than leaving air.
+  const LOGO = { x: 120, y: 76, width: 360, height: 178 };
   const logoMarkup = leagueLogoData
     ? `<image href="${leagueLogoData}" x="${LOGO.x}" y="${LOGO.y}" width="${LOGO.width}" height="${LOGO.height}" preserveAspectRatio="xMidYMid meet" />`
     : buildLogoFallback(LOGO.x, LOGO.y, LOGO.width, leagueKey, theme.secondary);
@@ -1516,10 +1515,10 @@ const mmaPosterHandler = async (req, res) => {
   // Text occupies the lower half, as one block centred within it, so a
   // one-line name and a four-line one both sit level rather than one
   // hugging the logo and the other the poster's foot.
-  const TEXT = { top: 340, bottom: 566, width: 480 };
-  const head = fitTextBlock(headline, { boxWidth: TEXT.width, maxLines: 2, maxFontSize: 62 });
+  const TEXT = { top: 316, bottom: 572, width: 496 };
+  const head = fitTextBlock(headline, { boxWidth: TEXT.width, maxLines: 2, maxFontSize: 72 });
   const sub = detail
-    ? fitTextBlock(detail, { boxWidth: TEXT.width, maxLines: 2, maxFontSize: 32 })
+    ? fitTextBlock(detail, { boxWidth: TEXT.width, maxLines: 2, maxFontSize: 36 })
     : { lines: [], fontSize: 0 };
 
   const headLine = head.fontSize * 1.12;
@@ -1545,10 +1544,10 @@ const mmaPosterHandler = async (req, res) => {
       </radialGradient>
     </defs>
     <rect width="600" height="600" fill="url(#mmaBg)" />
-    <rect x="0" y="0" width="600" height="8" fill="${theme.secondary}" />
-    <rect x="0" y="592" width="600" height="8" fill="${theme.secondary}" />
+    <rect x="0" y="0" width="600" height="12" fill="${theme.secondary}" />
+    <rect x="0" y="588" width="600" height="12" fill="${theme.secondary}" />
     ${logoMarkup}
-    <rect x="240" y="316" width="120" height="3" fill="${theme.secondary}" fill-opacity="0.85" />
+    <rect x="232" y="292" width="136" height="4" fill="${theme.secondary}" fill-opacity="0.85" />
     ${headMarkup}
     ${subMarkup}
   </svg>`;
@@ -1936,7 +1935,6 @@ app.get('/poster/wrestling/:promotion.svg', (req, res) => {
   return res.send(posters.buildEventPoster({
     code: req.query.code || '',
     title: req.query.title || '',
-    place: req.query.place || '',
     accent: SPORT_THEMES[WRESTLING_SPORT].secondary,
   }));
 });
@@ -6148,15 +6146,30 @@ function buildNetworkArtSvg(label, width, height) {
   // Two competing limits: the box, and the text. Take whichever is
   // smaller so a long name shrinks to fit while a short one doesn't
   // balloon to fill the poster.
+  //
+  // The height caps are a share of the SHORTER side rather than of the
+  // height. They were tuned against a 900-tall poster, where 0.13 was a
+  // generous 117; on a 600 square the same fraction is 78, and a name set
+  // at 78 in a 600 box looks lost in it.
+  const shortSide = Math.min(width, height);
   const maxByBox = lines.length > 1
-    ? Math.min(width * 0.17, height * 0.11)
-    : Math.min(width * 0.20, height * 0.13);
+    ? Math.min(width * 0.17, shortSide * 0.15)
+    : Math.min(width * 0.22, shortSide * 0.20);
   const maxByWidth = (width * 0.82) / Math.max(1, longest.length * NETWORK_LABEL_CHAR_RATIO);
   const fontSize = Math.round(Math.max(14, Math.min(maxByBox, maxByWidth)));
 
   const lineHeight = fontSize * 1.12;
-  // Vertically centre the block of lines on the poster's midpoint.
-  const firstBaseline = height / 2 - ((lines.length - 1) * lineHeight) / 2 + fontSize * 0.34;
+  const subtitleSize = Math.max(9, Math.round(fontSize * 0.24));
+  const subtitleGap = fontSize * 0.92;
+
+  // The WHOLE group is centred, name and subtitle together.
+  //
+  // Only the name lines used to be, with "LIVE CHANNEL" then drawn below
+  // them - so the thing a reader sees as one block sat half the subtitle's
+  // height below the middle of the square, which is exactly the "not
+  // centred" it looked like.
+  const blockHeight = (lines.length - 1) * lineHeight + subtitleGap;
+  const firstBaseline = height / 2 - blockHeight / 2 + fontSize * 0.34;
 
   const labelMarkup = lines.map((line, i) =>
     `<text x="${width / 2}" y="${firstBaseline + i * lineHeight}"
@@ -6164,7 +6177,7 @@ function buildNetworkArtSvg(label, width, height) {
            font-weight="800" fill="#f8fafc" text-anchor="middle">${escapeXml(line)}</text>`
   ).join('');
 
-  const subtitleY = firstBaseline + (lines.length - 1) * lineHeight + fontSize * 0.95;
+  const subtitleY = firstBaseline + (lines.length - 1) * lineHeight + subtitleGap;
 
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
     <defs>
@@ -6176,7 +6189,7 @@ function buildNetworkArtSvg(label, width, height) {
     <rect width="${width}" height="${height}" fill="url(#netBg)" />
     ${labelMarkup}
     <text x="${width / 2}" y="${subtitleY}"
-          font-family="'Trebuchet MS', Verdana, sans-serif" font-size="${Math.round(fontSize * 0.26)}"
+          font-family="'Trebuchet MS', Verdana, sans-serif" font-size="${subtitleSize}"
           font-weight="600" fill="#5aa8d1" text-anchor="middle" letter-spacing="3">LIVE CHANNEL</text>
   </svg>`;
 }
@@ -6189,12 +6202,24 @@ function buildNetworkArtSvg(label, width, height) {
 // URL for a day. Observed exactly that, where a wrapping fix deployed
 // correctly but every poster still rendered clipped.
 //
-// Derived from the source of the render function rather than a manual
-// version constant, so it changes automatically whenever the artwork
-// logic does and there is nothing to remember to bump.
+// Derived from what the renderer actually PRODUCES, not from its source.
+//
+// It used to hash the function body, which missed the change that mattered
+// most: the poster went from 600x900 to 600x600 by editing the size the
+// route asks for, not a line inside the function. The hash was identical,
+// the URL was identical, and every client kept serving the tall poster out
+// of its own cache into a square box - which is what "the text is not
+// centred" looked like from the outside.
+//
+// Rendering a sample of each size covers both: change the drawing or
+// change the box it is drawn in, and this moves.
+const NETWORK_POSTER = { width: 600, height: 600 };
+const NETWORK_BACKDROP = { width: 1920, height: 1080 };
+
 const NETWORK_ART_VERSION = crypto
   .createHash('sha1')
-  .update(buildNetworkArtSvg.toString())
+  .update(buildNetworkArtSvg('Sample Network', NETWORK_POSTER.width, NETWORK_POSTER.height))
+  .update(buildNetworkArtSvg('Sample Network', NETWORK_BACKDROP.width, NETWORK_BACKDROP.height))
   .digest('hex')
   .slice(0, 8);
 
@@ -6215,16 +6240,21 @@ app.get('/watch', (req, res) => {
 // Square, like every other poster. The background below stays landscape:
 // it is a Stremio backdrop rather than a card, and the two are different
 // jobs that happen to share a renderer.
+//
+// Both sizes come from the constants the cache-buster hashes, so the URL
+// cannot go on claiming a shape the route has stopped serving.
 app.get('/network/:key/poster.svg', (req, res) => {
   res.setHeader('Content-Type', 'image/svg+xml');
   res.setHeader('Cache-Control', 'public, max-age=86400');
-  res.send(buildNetworkArtSvg(networks.getNetworkLabel(req.params.key), 600, 600));
+  res.send(buildNetworkArtSvg(networks.getNetworkLabel(req.params.key),
+    NETWORK_POSTER.width, NETWORK_POSTER.height));
 });
 
 app.get('/network/:key/background.svg', (req, res) => {
   res.setHeader('Content-Type', 'image/svg+xml');
   res.setHeader('Cache-Control', 'public, max-age=86400');
-  res.send(buildNetworkArtSvg(networks.getNetworkLabel(req.params.key), 1920, 1080));
+  res.send(buildNetworkArtSvg(networks.getNetworkLabel(req.params.key),
+    NETWORK_BACKDROP.width, NETWORK_BACKDROP.height));
 });
 
 app.get('/user/:uuid/manifest.json', (req, res) => {
