@@ -4227,7 +4227,14 @@ function formatKey(record) {
   return `${record.height}p${Math.round(record.fps)}`;
 }
 
-const QUALITY_TIERS = ['great', 'good', 'okay', 'bad'];
+const QUALITY_TIERS = ['good', 'okay', 'low'];
+
+// Tiers that existed under the old four-band rating, mapped onto the
+// three that replaced them. A saved filter says what somebody wanted to
+// see, and dropping an unrecognised tier silently would not narrow their
+// filter - it would WIDEN it, because an empty list means no restriction.
+// Great became the upper half of Good, and Bad became Low Quality.
+const RETIRED_TIERS = { great: 'good', bad: 'low' };
 
 function readQualityFilter(user) {
   const raw = (user && user.qualityFilter) || {};
@@ -4235,7 +4242,9 @@ function readQualityFilter(user) {
   const minBpp = Number(raw.minBpp);
   return {
     statuses: list(raw.statuses),
-    tiers: list(raw.tiers).filter(t => QUALITY_TIERS.includes(t)),
+    tiers: [...new Set(list(raw.tiers)
+      .map(t => RETIRED_TIERS[t] || t)
+      .filter(t => QUALITY_TIERS.includes(t)))],
     formats: list(raw.formats),
     minBpp: Number.isFinite(minBpp) && minBpp > 0 ? minBpp : 0,
     requireData: raw.requireData === true,
@@ -4498,7 +4507,7 @@ function qualityFromStreamcheck(record) {
       bpp,
       runDate: record.runDate,
       score: 0,
-      tier: 'bad',
+      tier: 'low',
       label: `${record.status}${format}`,
     };
   }
@@ -5259,7 +5268,18 @@ function legacyConnectionFields(user, kind) {
 function withQualityTier(entry) {
   if (!entry || !entry.probedQuality) return entry;
   const scored = quality.scoreQualityLabel(entry.probedQuality);
-  return scored ? { ...entry, probedScore: scored.score, probedTier: scored.tier } : entry;
+  if (!scored) return entry;
+  return {
+    ...entry,
+    // Restated as well as re-rated. The stored string was written when
+    // the rating had four bands, so a link saved months ago still spells
+    // out a verdict this system no longer has - and a badge reading
+    // "Great" next to one reading "Good" invites the reader to believe
+    // there is a difference between them.
+    probedQuality: quality.restateQualityLabel(entry.probedQuality),
+    probedScore: scored.score,
+    probedTier: scored.tier,
+  };
 }
 
 function tierNetworkLinks(networkLinks) {
@@ -5746,7 +5766,7 @@ function qualityLabelForLink(user, link) {
   // matters after a restart, when the provider table has not been
   // pulled yet and the stored label is all there is.
   const published = publishedLabelFor(user, link);
-  return published || link.probedQuality || '';
+  return published || quality.restateQualityLabel(link.probedQuality) || '';
 }
 
 // One channel's published label, from whatever is already in memory.

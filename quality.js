@@ -59,27 +59,44 @@ function bitsPerPixel({ bitrate, width, height, fps }) {
 // Quality rating
 // ---------------------------------------------------------------------
 //
-// The rating is bits per pixel, and nothing else.
+// Three verdicts, from bpp read against the resolution it was spent on.
 //
-// Earlier versions weighed a resolution ceiling against how close the
-// bitrate came to filling it. That needed a table of what each
-// resolution "wants" - a table that had to be tuned, was wrong twice,
-// and decided outcomes for reasons nobody could see. bpp already carries
-// resolution and frame rate inside it: a 1080p60 feed needs 2.25x the
-// bitrate of a 720p60 one to reach the same figure, so spending the same
-// bitrate on more pixels shows up as the lower number it honestly is.
-// One measure, and the bands are read straight off it.
-const BPP_BANDS = [
-  [0.10, 'great'],
-  [0.07, 'good'],
-  [0.05, 'okay'],
-  [0, 'bad'],
+//   1080p60/50 over 0.060 bpp, or 720p60/50 over 0.080  ->  Good
+//   1080p60/50 over 0.040 bpp, or 720p60/50 over 0.060  ->  Okay
+//   anything below                                      ->  Low Quality
+//
+// The two thresholds per row are not a mistake: the same bpp is harder to
+// reach at 1080p, which is 2.25x the pixels, so 0.060 there is the
+// equivalent standard to 0.080 at 720p.
+//
+// This used to be one bpp ladder with no resolution in it, on the
+// reasoning that bpp already carries resolution inside it. It does, but
+// not the standard being asked of it - a 720p feed and a 1080p feed at
+// the same bpp are not equally well served, and one flat set of cutoffs
+// had to be wrong for one of them. It was also quietly disagreeing with
+// autopick.js, whose top two bands are exactly the Good thresholds
+// above: a channel the picker rated best-in-class could show a middling
+// badge. Same numbers in both places now, so the badge explains the pick.
+//
+// Ordered by minHeight, first match wins. Above 1080p uses the 1080p row
+// - a 4K feed is judged by the strictest standard here, not excluded from
+// judgement - and below 720p there is no row, which is Low Quality
+// whatever the bitrate.
+const TIER_THRESHOLDS = [
+  { minHeight: 1080, good: 0.060, okay: 0.040 },
+  { minHeight: 720,  good: 0.080, okay: 0.060 },
 ];
 
-// Below this the stream is Bad whatever its bpp. Sport is motion, and
-// half the frames of it is not something a generous bitrate buys back -
-// a 30fps feed with beautiful still frames is still a 30fps feed of a
-// fast-moving game.
+function thresholdsFor(height) {
+  return TIER_THRESHOLDS.find(row => height >= row.minHeight) || null;
+}
+
+// Below this the stream is Low Quality whatever its bpp. Sport is
+// motion, and
+// half the frames of it is not something a generous bitrate buys back - a
+// 30fps feed with beautiful still frames is still a 30fps feed of a
+// fast-moving game. This is why the rule reads "60/50" and not a bpp
+// figure on its own.
 //
 // Applied to the rate the badge shows, which for an interlaced mode is
 // its field rate: 1080i60 carries sixty distinct samples of motion a
@@ -89,21 +106,32 @@ const BPP_BANDS = [
 const MIN_SMOOTH_FPS = 50;
 
 const TIER_DISPLAY_NAMES = {
-  great: 'Great',
   good: 'Good',
   okay: 'Okay',
-  bad: 'Bad',
+  low: 'Low Quality',
 };
+
+// Words this module used to write into labels, so a quality saved under
+// the old four-band system is still recognised as a verdict rather than
+// mistaken for a codec. The word itself is discarded either way - the
+// tier is always recomputed from the numbers beside it - but a label has
+// to be parsed correctly before it can be re-rated.
+const LEGACY_TIER_WORDS = new Set(['great', 'bad']);
 
 function tierDisplayName(tier) {
   return TIER_DISPLAY_NAMES[tier] || '';
 }
 
-function tierForBpp(bpp) {
-  for (const [floor, tier] of BPP_BANDS) {
-    if (bpp >= floor) return tier;
-  }
-  return 'bad';
+// The verdict for one reading. Height and frame rate decide which
+// standard applies; bpp is measured against it.
+function tierFor({ height, bpp, rate }) {
+  if (!height || !bpp) return 'low';
+  if (rate != null && rate < MIN_SMOOTH_FPS) return 'low';
+  const bar = thresholdsFor(height);
+  if (!bar) return 'low';
+  if (bpp >= bar.good) return 'good';
+  if (bpp >= bar.okay) return 'okay';
+  return 'low';
 }
 
 // The rate the badge shows, and the one the smoothness rule is applied
@@ -114,39 +142,42 @@ function displayedRate(fps, interlaced) {
 }
 
 // A 0-100 figure used ONLY for ordering one stream against another. The
-// tier is what anybody reads and it comes from bpp alone; this exists so
-// two streams inside one band can still be told apart, and so the better
-// of two near-identical readings is the one with more pixels behind it.
+// tier is what anybody reads; this exists so two streams inside one band
+// can still be told apart, and so the better of two near-identical
+// readings is the one with more pixels behind it.
 //
-// Piecewise across the band edges, so 0.05, 0.07 and 0.10 always land on
-// the same scores whatever else is changed.
-const SCORE_POINTS = [
-  [0, 0], [0.05, 40], [0.07, 60], [0.10, 80], [0.20, 100],
-];
-
-// The score interval each band owns, matching the band edges in
-// SCORE_POINTS. A stream can move within its own interval and never out
-// of it.
+// Each tier owns an interval and a stream never leaves its own, so the
+// ordering can never contradict the badge - a Good stream always sorts
+// above every Okay one, whatever their raw bpp figures are. That matters
+// now that the thresholds differ by resolution: 0.075 bpp is Good at
+// 1080p and merely Okay at 720p, and a single bpp-to-score curve would
+// have put the Okay one first.
 const TIER_SCORE_RANGE = {
-  bad: [0, 39.9],
-  okay: [40, 59.9],
-  good: [60, 79.9],
-  great: [80, 100],
+  low: [0, 39.9],
+  okay: [40, 69.9],
+  good: [70, 100],
 };
 
-function bppScore(bpp) {
-  if (bpp <= 0) return 0;
-  for (let i = 1; i < SCORE_POINTS.length; i++) {
-    const [x1, y1] = SCORE_POINTS[i - 1];
-    const [x2, y2] = SCORE_POINTS[i];
-    if (bpp <= x2) return y1 + ((bpp - x1) / (x2 - x1)) * (y2 - y1);
-  }
-  return 100;
+// How far through its own tier a reading sits, 0 to 1.
+//
+// Measured against the same thresholds the tier came from, so the two
+// cannot disagree. Good runs from its floor to twice that floor, which
+// is where the scale tops out - past roughly 0.12 bpp at 1080p the
+// picture stops visibly improving and there is nothing left to rank on.
+function tierProgress(tier, bpp, bar) {
+  if (!bar) return 0;
+  if (tier === 'good') return clamp01((bpp - bar.good) / bar.good);
+  if (tier === 'okay') return clamp01((bpp - bar.okay) / (bar.good - bar.okay));
+  return clamp01(bpp / bar.okay);
 }
 
-// Small enough that it can never move a stream between bands - those are
-// 20 points apart and this is worth at most 2.4 - and large enough to
-// settle a tie. At the same bpp, more pixels is more picture.
+function clamp01(value) {
+  return Math.max(0, Math.min(1, value));
+}
+
+// Small enough that it can never move a stream between bands - the
+// narrowest is 30 points and this is worth at most 2.4 - and large enough
+// to settle a tie. At the same bpp, more pixels is more picture.
 function resolutionNudge(height, interlaced) {
   const byHeight = height >= 2160 ? 2.4
     : height >= 1440 ? 2.2
@@ -179,22 +210,28 @@ function scoreQuality(reading) {
   const rate = displayedRate(fps, interlaced);
   const tooSlow = rate != null && rate < MIN_SMOOTH_FPS;
 
-  const tier = tooSlow ? 'bad' : tierForBpp(bpp);
+  const tier = tierFor({ height, bpp, rate });
 
-  // A stream failing the smoothness rule sorts below everything that
-  // passes it, however many bits it spends on its few frames.
-  if (tooSlow) {
-    return { score: Math.round(Math.min(39, bppScore(bpp) * 0.4) * 10) / 10, tier, tooSlow };
-  }
+  // Below 720p there is no standard to measure against, so a reading
+  // still needs somewhere to sort. The 720p bar stands in - it is the
+  // lowest real one - and everything here is Low Quality anyway, so this
+  // only decides the order among streams nobody should be picking.
+  const bar = thresholdsFor(height) || TIER_THRESHOLDS[TIER_THRESHOLDS.length - 1];
 
   // The nudge is kept INSIDE the band. Added freely it could carry a
-  // 1080p feed at 0.099bpp above a 720p one at 0.101 - two points of
-  // resolution beating the band boundary itself, so a Good stream would
-  // outrank a Great one in a list sorted by score. bpp decides the band
-  // and decides the order between bands; resolution only ever settles
+  // 1080p feed just under a threshold above a 720p one just over it -
+  // two points of resolution beating the boundary itself, so an Okay
+  // stream would outrank a Good one in a list sorted by score. The tier
+  // decides the order between bands; resolution only ever settles
   // position within one.
   const [floor, ceiling] = TIER_SCORE_RANGE[tier];
-  const nudged = bppScore(bpp) + resolutionNudge(height, interlaced);
+  const span = ceiling - floor;
+
+  // A stream failing the smoothness rule sits at the bottom of Low
+  // Quality, however many bits it spends on its few frames - the bitrate
+  // is not the problem with it.
+  const progress = tooSlow ? 0 : tierProgress(tier, bpp, bar);
+  const nudged = floor + progress * span + resolutionNudge(height, interlaced);
   const score = Math.min(ceiling, Math.max(floor, nudged));
 
   return { score: Math.round(score * 10) / 10, tier, tooSlow };
@@ -248,6 +285,8 @@ function parseQualityLabel(label) {
     if (/^[\d.]+(Mbps|kbps)$/.test(part)) continue;
     const tierKey = part.toLowerCase();
     if (TIER_DISPLAY_NAMES[tierKey]) { out.tier = tierKey; continue; }
+    if (tierKey === 'low quality') { out.tier = 'low'; continue; }
+    if (LEGACY_TIER_WORDS.has(tierKey)) continue;
     // Labels written before this format carried the codec; keep it.
     if (/^[a-z][a-z0-9]*$/i.test(part) && !out.codec) out.codec = part;
   }
@@ -260,14 +299,33 @@ function scoreQualityLabel(label) {
   return reading ? scoreQuality(reading) : null;
 }
 
+// A label written under an older rating system, restated under the
+// current one.
+//
+// The tier is always recomputed from the numbers, so an old reading is
+// already RATED correctly wherever a score is used - but the stored
+// string still spells out a verdict that no longer exists, and a badge
+// reading "Great" beside a system that has no Great is worse than one
+// that simply reads "Good". Returns the label unchanged when there is
+// nothing to restate.
+function restateQualityLabel(label) {
+  const reading = parseQualityLabel(label);
+  if (!reading) return label || '';
+  const scored = scoreQuality(reading);
+  if (!scored) return label || '';
+  return formatQualityLabel({ ...reading, tier: scored.tier });
+}
+
 module.exports = {
   bitsPerPixel,
   scoreQuality,
   scoreQualityLabel,
   formatQualityLabel,
   parseQualityLabel,
-  tierForBpp,
+  restateQualityLabel,
+  tierFor,
   tierDisplayName,
+  TIER_DISPLAY_NAMES,
   displayCodec,
   formatBitrate,
   MIN_SMOOTH_FPS,

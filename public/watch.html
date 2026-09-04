@@ -1816,12 +1816,15 @@
 
   // Tier colours, from the score in probe.js. Lets a list of ten feeds be
   // scanned rather than read - green is worth watching, red is not.
-  // Four bands, matching probe.js. Green down to red, so a list can be
-  // read by colour before it is read by word.
+  // Three verdicts, matching quality.js. Green, yellow, red - so a list
+  // can be read by colour before it is read by word. The two retired
+  // names stay as aliases so a not-yet-re-rated reading is never painted
+  // by the green fallback.
   const QUALITY_TIER_CLASSES = {
-    great: 'bg-[#2f7d3a]/35 text-[#8ce09a]',
     good:  'bg-[#4a9d52]/25 text-[#7fc98a]',
     okay:  'bg-[#c9992e]/25 text-[#e0be6a]',
+    low:   'bg-[#c0392b]/30 text-[#f08b8b]',
+    great: 'bg-[#4a9d52]/25 text-[#7fc98a]',
     bad:   'bg-[#c0392b]/30 text-[#f08b8b]',
   };
 

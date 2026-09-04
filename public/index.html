@@ -2409,12 +2409,18 @@
     // fact you have to interpret and becomes one you can scan: green is
     // worth watching, red is not, and the ordering within a list is the
     // score behind it.
-    // Four bands, matching probe.js. Green down to red, so a list can be
-    // read by colour before it is read by word.
+    // Three verdicts, matching quality.js. Green, yellow, red - so a list
+    // can be read by colour before it is read by word.
+    //
+    // The two retired names are kept as aliases rather than deleted: a
+    // link saved under the old rating can still be holding one of them
+    // until it is next re-rated, and an unrecognised tier falls back to
+    // the green default, which would paint a Bad channel as a good one.
     const QUALITY_TIER_CLASSES = {
-      great: 'bg-[#2f7d3a]/35 text-[#8ce09a]',
       good:  'bg-[#4a9d52]/25 text-[#7fc98a]',
       okay:  'bg-[#c9992e]/25 text-[#e0be6a]',
+      low:   'bg-[#c0392b]/30 text-[#f08b8b]',
+      great: 'bg-[#4a9d52]/25 text-[#7fc98a]',
       bad:   'bg-[#c0392b]/30 text-[#f08b8b]',
     };
     const DEFAULT_QUALITY_CLASSES = 'bg-[#4a9d52]/25 text-[#7fc98a]';
@@ -2779,7 +2785,7 @@
     let qualityFilterOptions = null;
     let qualityFilterDraft = { statuses: [], tiers: [], formats: [], minBpp: 0, requireData: false };
 
-    const TIER_LABELS = { great: 'Great', good: 'Good', okay: 'Okay', bad: 'Bad' };
+    const TIER_LABELS = { good: 'Good', okay: 'Okay', low: 'Low Quality' };
 
     function toggleQualityFilterPanel() {
       const panel = document.getElementById('quality-filter-panel');
