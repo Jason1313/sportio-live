@@ -2572,12 +2572,13 @@
 
     // Folds the server's provider list onto the one this page is holding.
     //
-    // Credentials travel exactly twice - on register and on login - and
-    // every other response describes a provider without them. Assigning
-    // those responses straight over activeUser.providers would silently
-    // empty the password the Edit panel prefills from, so the server's
-    // copy wins on everything it actually carries and the secrets already
-    // in hand are kept for providers it still lists.
+    // The password is the one field no response carries back except login
+    // and register - the panel shows it blank and means "unchanged", so
+    // there is no reason to put it on the wire again. Everything else
+    // does come back, which matters for a provider added by the request
+    // being answered: it has no local entry to merge onto, so anything
+    // the server left out would render as an empty field in the form that
+    // was just submitted.
     function mergeProviders(serverList) {
       const held = new Map((activeUser.providers || []).map(pr => [pr.id, pr]));
       activeUser.providers = (serverList || []).map(pr => {

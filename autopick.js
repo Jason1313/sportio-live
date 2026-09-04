@@ -779,11 +779,28 @@ function pickAcrossProviders(networkKey, channelsByProvider, read, options = {})
     outcome: pickForNetwork(networkKey, group.channels, read, options),
   }));
 
+  // A block that fell back to 30fps always sits below one that did not,
+  // whatever the readings say.
+  //
+  // pickForNetwork's fallback is a per-provider escape hatch: when a
+  // network has nothing at 60fps on THIS service, a 30fps channel beats
+  // no channel. Across providers that reasoning does not hold - the
+  // alternative is no longer nothing, it is the other service's 60fps
+  // feed - and the ladder cannot see the difference, because it ranks on
+  // resolution and bitrate and a starved 60fps stream scores below a
+  // well-fed 30fps one. Measured on ESPN2: 720p30 at 0.117 bpp lands two
+  // bands above 720p60 at 0.064, and took the top slot from it.
+  //
+  // Frame rate is not a thing to trade bitrate against here. It is the
+  // hard requirement rankCandidates already enforces inside a provider,
+  // and this is the same rule applied between them.
+  //
   // Stable within a tie, so two providers whose best channels read
   // identically stay in the order the account lists them and a re-run
   // does not shuffle every slot for no reason.
   const ordered = [...blocks].sort((a, b) =>
-    comparePicks(a.outcome.picks[0], b.outcome.picks[0]));
+    (a.outcome.usedSlow ? 1 : 0) - (b.outcome.usedSlow ? 1 : 0)
+    || comparePicks(a.outcome.picks[0], b.outcome.picks[0]));
 
   const rejected = { unmeasured: 0, notAlive: 0, slow: 0 };
   for (const block of blocks) {

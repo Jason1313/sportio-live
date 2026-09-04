@@ -336,7 +336,26 @@ function streamcheckTablesFor(user) {
 // Credentials never leave the server for any provider but the account's
 // own, and even then the dashboard is the only caller - so passwords ride
 // along there and nowhere else.
-function describeProvider(provider, { withSecrets = false } = {}) {
+// Three levels, because three different things ask.
+//
+//   default          - id and label only, for lists that merely need to
+//                      say which service a row came from.
+//   withConnection   - everything the Providers panel puts in a field.
+//                      The password is not one of those: the panel shows
+//                      it blank and means "unchanged", so it never has to
+//                      travel back. For M3U this is the same as
+//                      withSecrets, because the playlist URL carries the
+//                      credentials in its own path and is also the thing
+//                      the field displays.
+//   withSecrets      - the above plus the password, for login and
+//                      register, where the Edit panel prefills it.
+//
+// The panel MUST get withConnection on a save. It renders its fields from
+// whatever comes back, and a newly added provider has no local copy to
+// fall back on - it was created by that very request - so answering with
+// the label-only form blanked the URL and username of the row that had
+// just been saved.
+function describeProvider(provider, { withConnection = false, withSecrets = false } = {}) {
   const base = {
     id: provider.id,
     label: provider.label,
@@ -344,14 +363,14 @@ function describeProvider(provider, { withSecrets = false } = {}) {
     streamcheckProvider: provider.streamcheckProvider || '',
   };
   if (provider.kind === 'm3u') {
-    return withSecrets
+    return (withConnection || withSecrets)
       ? { ...base, playlistUrl: provider.playlistUrl, epgUrl: provider.epgUrl || '' }
       : base;
   }
-  return withSecrets
-    ? { ...base, url: provider.url, username: provider.username, password: provider.password,
-        streamFormat: provider.streamFormat || 'm3u8' }
-    : { ...base, streamFormat: provider.streamFormat || 'm3u8' };
+  base.streamFormat = provider.streamFormat || 'm3u8';
+  if (!withConnection && !withSecrets) return base;
+  const connection = { ...base, url: provider.url, username: provider.username };
+  return withSecrets ? { ...connection, password: provider.password } : connection;
 }
 
 const app = express();
@@ -4901,7 +4920,7 @@ app.post('/api/streamcheck/providers', async (req, res) => {
     // What this account has chosen, one table per provider it holds.
     // `selected` remains as the primary provider's choice so a dashboard
     // that has not been updated still shows something true.
-    accountProviders: providersOf(auth.user).map(entry => describeProvider(entry)),
+    accountProviders: providersOf(auth.user).map(entry => describeProvider(entry, { withConnection: true })),
     selected: (providersOf(auth.user)[0] || {}).streamcheckProvider || '',
     cached: streamcheck.describeCache(),
   });
@@ -4933,7 +4952,7 @@ app.post('/api/streamcheck/select', async (req, res) => {
 
   return res.json({
     success: true,
-    providers: providersOf(auth.user).map(entry => describeProvider(entry)),
+    providers: providersOf(auth.user).map(entry => describeProvider(entry, { withConnection: true })),
     loaded: !!provider.streamcheckProvider && streamcheck.isLoaded(provider.streamcheckProvider),
     runDate: streamcheckRunDate(provider.streamcheckProvider),
     linkQuality: publishedQualityFor(auth.user, configuredEntriesFor(auth.user)),
@@ -5435,10 +5454,11 @@ app.post('/api/user/update', async (req, res) => {
   return res.json({
     success: true,
     uuid: user.uuid,
-    // Echoed back with ids filled in, so a dashboard that has just added
-    // a provider knows what to key its edits to without guessing or
-    // re-fetching the whole account.
-    providers: providersOf(user).map(entry => describeProvider(entry)),
+    // Echoed back in full - ids, and the fields the panel puts on screen.
+    // A provider added by this very request has no local copy to fall
+    // back on, so anything left out here comes back blank in the form the
+    // user just filled in.
+    providers: providersOf(user).map(entry => describeProvider(entry, { withConnection: true })),
     manifestUrl: `/user/${uuid}/manifest.json`
   });
 });
