@@ -70,6 +70,14 @@
        every other width is "not shown". */
     .row-copy { display: none; }
 
+    /* On iOS it is shown at every width, not only phone ones.
+       An Android intent link carries a fallback URL, so a missing player
+       sends you to the Play Store; an iOS scheme link has no such thing
+       and a missing player gets a Safari error instead. The copy button
+       is the way out of that, and an iPad in landscape is wider than the
+       mobile breakpoint. */
+    body.is-ios .row-copy { display: inline-flex; }
+
     /* ==================================================================
        Mobile
 
@@ -366,6 +374,78 @@
     </div>
   </div>
 
+  <!-- iOS. Like Android in that there is nothing to install but a player,
+       and unlike it in every mechanical detail: no intent system, no
+       fallback URL, and a link that names the app by the scheme it
+       registered rather than by its package. -->
+  <div id="setup-ios" class="hidden">
+    <p class="text-xs text-[#e6e6e6]/55 mb-5 leading-relaxed">
+      On iPhone and iPad there is no script to install and nothing to register. A stream link addresses the player
+      by the URL scheme that player claims when you install it, so the only thing that has to exist on the device is
+      the player &mdash; and it has to be installed <em>before</em> the link will do anything.
+    </p>
+
+    <ol class="text-xs text-[#e6e6e6]/70 space-y-5 leading-relaxed">
+      <li>
+        <span class="font-bold text-[#e6e6e6]">1. Install a player</span>
+        <span class="text-[#e6e6e6]/45">&mdash; either of these. VLC is free outright and is the same player the
+        Android side uses. Infuse is free to install with a paid unlock; it tends to be steadier on the awkward
+        streams IPTV providers serve, and it shows the channel name while it loads instead of the address.</span>
+        <div class="mt-2 flex flex-wrap gap-2">
+          <a href="https://apps.apple.com/app/vlc-media-player/id650377962" target="_blank" rel="noopener"
+             class="inline-flex items-center gap-2 bg-[#3f5460] hover:bg-[#56707d] border border-white/10 text-[11px] font-bold py-1.5 px-3 rounded-lg transition">
+            <i class="fa-brands fa-app-store-ios"></i>VLC on the App Store
+          </a>
+          <a href="https://apps.apple.com/app/infuse/id1136220934" target="_blank" rel="noopener"
+             class="inline-flex items-center gap-2 bg-[#3f5460] hover:bg-[#56707d] border border-white/10 text-[11px] font-bold py-1.5 px-3 rounded-lg transition">
+            <i class="fa-brands fa-app-store-ios"></i>Infuse on the App Store
+          </a>
+        </div>
+      </li>
+
+      <li>
+        <span class="font-bold text-[#e6e6e6]">2. Pick it above</span>
+        <span class="text-[#e6e6e6]/45">&mdash; under <span class="font-semibold text-[#e6e6e6]/70">What streams
+        open in</span>, choose the one you installed. This is stored in this browser, so it is set once per device.
+        Getting it wrong is the usual reason a tap appears to do nothing: the link is addressed to an app that is
+        not there.</span>
+      </li>
+
+      <li>
+        <span class="font-bold text-[#e6e6e6]">3. Tap any stream</span>
+        <span class="text-[#e6e6e6]/45">&mdash; the browser asks whether to open the player; allow it. If the
+        player then sits on a black screen for more than a few seconds, that stream is probably down &mdash;
+        use <span class="font-semibold text-[#e6e6e6]/70">Check quality</span> in the picker to find one that
+        is not.</span>
+      </li>
+    </ol>
+
+    <div class="bg-[#1f2b36] border border-white/10 rounded-lg p-4 mt-6">
+      <p class="text-[11px] text-[#e6e6e6]/60 leading-relaxed">
+        <span class="font-bold text-[#e6e6e6]/80">If a tap does nothing.</span>
+        On Android a link can name a web page to fall back to, so a missing player sends you to the store instead.
+        <span class="text-[#c9992e]">iOS has no equivalent</span> &mdash; a link to an app that is not installed
+        just fails, and Safari may say nothing at all about it. So if nothing happens, the player named above is
+        either missing or is not the one you picked. The <i class="fa-regular fa-copy mx-0.5"></i> button on every
+        stream row is the way round it: copy the address and paste it into the player by hand &mdash; in VLC under
+        <span class="font-semibold">Network &rsaquo; Open Network Stream</span>. That button is shown at every
+        window size on iOS for exactly this reason.
+      </p>
+      <p class="text-[11px] text-[#e6e6e6]/60 leading-relaxed mt-3">
+        <span class="font-bold text-[#e6e6e6]/80">Which browsers this works in.</span>
+        Safari, Chrome, Edge and Firefox on iOS all follow these links. There is no equivalent here of the Android
+        tab's warning about Firefox &mdash; opening an installed app by its URL scheme is something every iOS
+        browser does.
+      </p>
+      <p class="text-[11px] text-[#e6e6e6]/60 leading-relaxed mt-3">
+        <span class="font-bold text-[#e6e6e6]/80">One thing worth knowing.</span>
+        A stream address contains your IPTV username and password, the same as it does everywhere else in this app.
+        The copy button puts it on the clipboard in full, so treat a pasted link the way you would the credentials
+        themselves.
+      </p>
+    </div>
+  </div>
+
   <button onclick="toggleSetup()" class="mt-6 bg-[#3f5460] hover:bg-[#56707d] text-xs font-bold py-2 px-4 rounded-lg transition">
     Back to browsing
   </button>
@@ -538,19 +618,66 @@
   const VLC_PACKAGE = 'org.videolan.vlc';
   const VLC_STORE_URL = `https://play.google.com/store/apps/details?id=${VLC_PACKAGE}`;
 
+  // iOS has neither mechanism. There is no protocol registry to write to
+  // and no intent system, but an installed app can claim a URL scheme, and
+  // both players below implement x-callback-url - a small convention for
+  // handing one app a job and getting control back afterwards.
+  //
+  // The stream address goes in as a query PARAMETER rather than as the
+  // rest of the path, and is percent-encoded whole. That is what the
+  // x-callback-url spec asks for, and it is not optional here: these
+  // addresses carry the account password and can contain any character at
+  // all, including the '?' and '&' that would otherwise cut the link in
+  // half. Firecore's own documentation says the same.
+  function iosCallbackLink(streamUrl, name, app) {
+    const url = encodeURIComponent(String(streamUrl || ''));
+    if (app === 'infuse') {
+      // Shown in place of the address while it plays, so the password is
+      // not on screen - the same job S.title does on Android. VLC's
+      // stream action takes no equivalent; its filename parameter applies
+      // to downloads only.
+      const title = name ? `&filename=${encodeURIComponent(name)}` : '';
+      return `infuse://x-callback-url/play?url=${url}${title}`;
+    }
+    return `vlc-x-callback://x-callback-url/stream?url=${url}`;
+  }
+
+  // `platform` is what the link needs to be followed on, and is why the
+  // list can hold five entries that would each fail on the other two
+  // kinds of device - see effectivePlayTarget.
   const PLAY_TARGETS = {
     desktop: {
       label: 'Desktop helper',
-      hint: 'The sportio: link and script set up under Windows.'
+      hint: 'The sportio: link and script set up under Windows.',
+      platform: 'desktop'
     },
     vlc: {
       label: 'VLC for Android',
-      hint: 'Opens VLC directly. Nothing to install but VLC itself.'
+      hint: 'Opens VLC directly. Nothing to install but VLC itself.',
+      platform: 'android'
     },
     choose: {
       label: 'Ask Android',
-      hint: 'Android offers whichever players you have. Useful for MX Player, Just Player and the rest.'
+      hint: 'Android offers whichever players you have. Useful for MX Player, Just Player and the rest.',
+      platform: 'android'
+    },
+    'ios-vlc': {
+      label: 'VLC for iOS',
+      hint: 'Free, and the same player as the Android side. Install it from the App Store first.',
+      platform: 'ios'
+    },
+    'ios-infuse': {
+      label: 'Infuse',
+      hint: 'Free to install, paid to unlock. Steadier on awkward streams, and shows the channel name while it loads.',
+      platform: 'ios'
     }
+  };
+
+  // What each platform's links need, said the way it reads in a sentence.
+  const PLATFORM_NEEDS = {
+    android: 'an Android browser',
+    ios: 'an iPhone or iPad',
+    desktop: 'a desktop browser'
   };
 
   // One line for every target. It used to name the player - "Opening in
@@ -561,7 +688,25 @@
 
   const isAndroid = () => /android/i.test(navigator.userAgent);
 
-  let playTarget = localStorage.getItem(PLAY_TARGET_KEY) || (isAndroid() ? 'vlc' : 'desktop');
+  // iPadOS reports itself as a Mac.
+  //
+  // Since iPadOS 13 the default is desktop-class Safari, whose user agent
+  // says Macintosh and contains no "iPad" at all - so the obvious test
+  // misses every iPad and hands it desktop links that cannot do anything.
+  // The touch count is what separates them: no Mac has one, and every
+  // iPad does.
+  const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+  function devicePlatform() {
+    if (isAndroid()) return 'android';
+    if (isIOS()) return 'ios';
+    return 'desktop';
+  }
+
+  const DEFAULT_TARGET_FOR = { android: 'vlc', ios: 'ios-vlc', desktop: 'desktop' };
+
+  let playTarget = localStorage.getItem(PLAY_TARGET_KEY) || DEFAULT_TARGET_FOR[devicePlatform()];
   if (!PLAY_TARGETS[playTarget]) playTarget = 'desktop';
 
   // Which target applies, as against which one is stored.
@@ -579,8 +724,11 @@
   // work.
   function effectivePlayTarget() {
     const stored = PLAY_TARGETS[playTarget] ? playTarget : 'desktop';
-    if (!isAndroid() && (stored === 'vlc' || stored === 'choose')) return 'desktop';
-    return stored;
+    // Every target now declares the platform its links can be followed
+    // on, so this is one comparison rather than a condition per target -
+    // which is what stopped it from silently missing the iOS ones when
+    // they were added.
+    return PLAY_TARGETS[stored].platform === devicePlatform() ? stored : 'desktop';
   }
 
   // An Android intent: URI. VLC's manifest matches a VIEW intent that
@@ -623,6 +771,8 @@
     const target = effectivePlayTarget();
     if (target === 'vlc') return androidIntentLink(streamUrl, name, VLC_PACKAGE);
     if (target === 'choose') return androidIntentLink(streamUrl, name, '');
+    if (target === 'ios-vlc') return iosCallbackLink(streamUrl, name, 'vlc');
+    if (target === 'ios-infuse') return iosCallbackLink(streamUrl, name, 'infuse');
     return `${PROTOCOL}:${toBase64Url(streamUrl)}`;
   }
 
@@ -808,17 +958,19 @@
   // rather than always landing on Windows: a phone opening this page to
   // three PowerShell listings has to work out that none of it applies
   // before it can find the part that does.
-  let setupPlatform = isAndroid() ? 'android' : 'windows';
+  let setupPlatform = { android: 'android', ios: 'ios' }[devicePlatform()] || 'windows';
 
   const SETUP_PLATFORMS = [
     { id: 'windows', label: 'Windows', icon: 'fa-brands fa-windows' },
-    { id: 'android', label: 'Android', icon: 'fa-brands fa-android' }
+    { id: 'android', label: 'Android', icon: 'fa-brands fa-android' },
+    { id: 'ios', label: 'iPhone / iPad', icon: 'fa-brands fa-apple' }
   ];
 
   function showSetupPlatform(id) {
     setupPlatform = id;
     document.getElementById('setup-windows').classList.toggle('hidden', id !== 'windows');
     document.getElementById('setup-android').classList.toggle('hidden', id !== 'android');
+    document.getElementById('setup-ios').classList.toggle('hidden', id !== 'ios');
     document.getElementById('setup-platform-tabs').innerHTML = SETUP_PLATFORMS.map(p => `
       <button onclick="showSetupPlatform('${p.id}')"
               class="flex items-center gap-2 text-xs font-bold px-3.5 py-2 rounded-lg border transition ${p.id === id
@@ -860,8 +1012,10 @@
       box.insertAdjacentHTML('beforeend', `
         <p class="text-[11px] text-[#c9992e] leading-snug pt-1">
           <i class="fa-solid fa-circle-info mr-1"></i>Not in effect here &mdash;
-          ${escapeHtml(PLAY_TARGETS[playTarget].label)} needs an Android browser, so this device is using
-          ${escapeHtml(PLAY_TARGETS[effective].label)}. The choice is kept for the devices that can use it.
+          ${escapeHtml(PLAY_TARGETS[playTarget].label)} needs
+          ${escapeHtml(PLATFORM_NEEDS[PLAY_TARGETS[playTarget].platform] || 'another device')},
+          so this device is using ${escapeHtml(PLAY_TARGETS[effective].label)}.
+          The choice is kept for the devices that can use it.
         </p>`);
     }
   }
@@ -987,6 +1141,10 @@
 
   // --- Browsing ------------------------------------------------------
   async function boot() {
+    // Drives the copy button's visibility - see the .row-copy rules. Set
+    // here rather than in CSS because there is no media query for "this
+    // is an iPhone", and the iPadOS user agent actively says otherwise.
+    document.body.classList.toggle('is-ios', isIOS());
     renderLogoutButton(false);
     if (!uuid) { show('gate'); return; }
     try {
