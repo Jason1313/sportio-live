@@ -1495,11 +1495,20 @@ const mmaPosterHandler = async (req, res) => {
   const leagueLogoUrl = await getRealLeagueLogoUrl(leagueKey);
   const leagueLogoData = leagueLogoUrl ? await getBase64Image(leagueLogoUrl) : null;
 
+  // Square, like every other card. It was 600x900 when a poster here was
+  // always a drawn one; a match card is ESPN's square artwork now, and a
+  // row that mixes the two shapes leaves one caption sitting lower than
+  // its neighbours' for no reason the reader can see.
+  //
+  // Re-laid rather than scaled. Multiplying every y by two thirds would
+  // have kept the proportions and lost the point of them: the logo and
+  // the text each need room to be read at, not a share of the height.
+  //
   // The logo sits in the upper half, scaled proportionately inside its
   // box rather than filling it - league marks are wildly different shapes
   // (the UFC's is wide, the generic MMA icon is square) and stretching
   // any of them to a fixed box would be worse than leaving air.
-  const LOGO = { x: 90, y: 150, width: 420, height: 300 };
+  const LOGO = { x: 110, y: 74, width: 380, height: 216 };
   const logoMarkup = leagueLogoData
     ? `<image href="${leagueLogoData}" x="${LOGO.x}" y="${LOGO.y}" width="${LOGO.width}" height="${LOGO.height}" preserveAspectRatio="xMidYMid meet" />`
     : buildLogoFallback(LOGO.x, LOGO.y, LOGO.width, leagueKey, theme.secondary);
@@ -1507,10 +1516,10 @@ const mmaPosterHandler = async (req, res) => {
   // Text occupies the lower half, as one block centred within it, so a
   // one-line name and a four-line one both sit level rather than one
   // hugging the logo and the other the poster's foot.
-  const TEXT = { top: 520, bottom: 830, width: 480 };
-  const head = fitTextBlock(headline, { boxWidth: TEXT.width, maxLines: 2, maxFontSize: 78 });
+  const TEXT = { top: 340, bottom: 566, width: 480 };
+  const head = fitTextBlock(headline, { boxWidth: TEXT.width, maxLines: 2, maxFontSize: 62 });
   const sub = detail
-    ? fitTextBlock(detail, { boxWidth: TEXT.width, maxLines: 2, maxFontSize: 40 })
+    ? fitTextBlock(detail, { boxWidth: TEXT.width, maxLines: 2, maxFontSize: 32 })
     : { lines: [], fontSize: 0 };
 
   const headLine = head.fontSize * 1.12;
@@ -1528,18 +1537,18 @@ const mmaPosterHandler = async (req, res) => {
     `<text x="300" y="${cursor + i * subLine}" font-family="'Trebuchet MS', Verdana, sans-serif" font-size="${sub.fontSize.toFixed(1)}" font-weight="600" fill="#e6e6e6" fill-opacity="0.82" text-anchor="middle">${escapeXml(line)}</text>`
   ).join('');
 
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 600 900" width="600" height="900">
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 600 600" width="600" height="600">
     <defs>
       <radialGradient id="mmaBg" cx="50%" cy="38%" r="78%">
         <stop offset="0%" stop-color="${theme.primary}" />
         <stop offset="100%" stop-color="#000000" />
       </radialGradient>
     </defs>
-    <rect width="600" height="900" fill="url(#mmaBg)" />
+    <rect width="600" height="600" fill="url(#mmaBg)" />
     <rect x="0" y="0" width="600" height="8" fill="${theme.secondary}" />
-    <rect x="0" y="892" width="600" height="8" fill="${theme.secondary}" />
+    <rect x="0" y="592" width="600" height="8" fill="${theme.secondary}" />
     ${logoMarkup}
-    <rect x="240" y="486" width="120" height="3" fill="${theme.secondary}" fill-opacity="0.85" />
+    <rect x="240" y="316" width="120" height="3" fill="${theme.secondary}" fill-opacity="0.85" />
     ${headMarkup}
     ${subMarkup}
   </svg>`;
@@ -3167,6 +3176,15 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
           { id: String(homeTeam.id || ''), name: homeTeam.displayName || '', abbr: homeAbbr, rank: homeRank || null },
           { id: String(awayTeam.id || ''), name: awayTeam.displayName || '', abbr: awayAbbr, rank: awayRank || null },
         ].filter(team => team.id),
+        // Which shape this game's poster comes back as, decided here
+        // because this is where the league is actually known.
+        //
+        // The catalog it ends up in is not a reliable stand-in: the five
+        // soccer competitions are listed under one SOCCER catalog but
+        // their posters are drawn per competition, so asking the catalog
+        // gave every fixture "portrait" while the route rendered a
+        // square - and the grid cropped the logos off to fit.
+        posterShape: DRAWN_POSTER_SPORTS.has(sport.toUpperCase()) ? 'square' : 'portrait',
         // Just the nickname (e.g. "Suns"), not the full "Phoenix Suns" -
         // needed for tier 4's city/state exclusion rule in stream ranking.
         homeNick,
@@ -3351,6 +3369,7 @@ async function fetchTodayLeagueEvents(league, hostUrl, userTimeZone = 'America/N
         broadcastNames,
         nationalBroadcasts,
         network,
+        posterShape: 'square',
         poster,
         background,
         logo,
@@ -3488,6 +3507,7 @@ async function fetchWrestlingEvents(hostUrl, userTimeZone) {
       // wrestling section will hold more than one promotion, so the
       // event names its own rather than the sport standing in for it.
       searchKey: 'RAF',
+      posterShape: 'square',
       poster: `${hostUrl}/poster/wrestling/raf.svg?${art}`,
       background: `${hostUrl}/landscape/wrestling.svg`,
       logo: `${hostUrl}/logo/wrestling.svg`,
@@ -6192,10 +6212,13 @@ app.get('/watch', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'watch.html'));
 });
 
+// Square, like every other poster. The background below stays landscape:
+// it is a Stremio backdrop rather than a card, and the two are different
+// jobs that happen to share a renderer.
 app.get('/network/:key/poster.svg', (req, res) => {
   res.setHeader('Content-Type', 'image/svg+xml');
   res.setHeader('Cache-Control', 'public, max-age=86400');
-  res.send(buildNetworkArtSvg(networks.getNetworkLabel(req.params.key), 600, 900));
+  res.send(buildNetworkArtSvg(networks.getNetworkLabel(req.params.key), 600, 600));
 });
 
 app.get('/network/:key/background.svg', (req, res) => {
@@ -6297,6 +6320,7 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
       id: `net:${network.key}`,
       type: 'sports',
       name: network.label,
+      posterShape: 'square',
       ...networkArtUrls(hostUrl, network.key)
     }));
 
@@ -6337,13 +6361,9 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
     isToday: game.isToday !== false,
     // Which shape the poster comes back as, so the grid can reserve the
     // right box before the image arrives rather than cropping it to a
-    // frame it was never drawn for.
-    //
-    // Derived from the league rather than from the artwork, so it can be
-    // answered without fetching anything: both renderers for these
-    // leagues are square, the stitched one and the drawn fallback, so a
-    // game whose artwork is missing still fills the same slot.
-    posterShape: DRAWN_POSTER_SPORTS.has(sport.toUpperCase()) ? 'square' : 'portrait',
+    // frame it was never drawn for. Set by whichever builder made the
+    // game, which is the only place that knows.
+    posterShape: game.posterShape || 'square',
     conferences: game.conferences || [],
     // Read by the portal's ranked-only default and its pinned teams. Only
     // the leagues that build a game from ESPN competitors carry it; every
@@ -6369,6 +6389,7 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
     type: 'sports',
     name: network.label,
     ...networkArtUrls(hostUrl, network.key),
+    posterShape: 'square',
     pinned: true,
     // Present so the card carries the same fields as a game and no
     // consumer has to special-case a missing one. There is no kickoff to

@@ -115,18 +115,15 @@ function splitColors(awayColor, homeColor, homeAltColor) {
 }
 
 // ------------------------------------------------------------------- art
-const W = 600, H = 900;
-const MID = H / 2;
-
-// The matchup poster is square, and the wrestling one below is not.
+// Every poster this file draws is square, and so is every other poster
+// in the app.
 //
-// Both used to be 2:3, which is the shape a poster is when it is drawn
-// from nothing. A matchup card is not that any more - it is ESPN's
-// square artwork - and a tall frame around a square picture is two bands
-// of filler. The drawn matchup poster is square for the same reason: it
-// only ever stands in for the artwork, and a fallback that changed the
-// card's shape would announce itself more loudly than the picture it was
-// standing in for.
+// They were all 2:3, which is the shape a poster is when it is drawn from
+// nothing. A match card is not that any more - it is ESPN's square
+// artwork - and a tall frame around a square picture is two bands of
+// filler. Once the match cards were square the rest had to follow, or a
+// row mixing a fixture with a fight card would sit one caption lower
+// than the other for no reason a reader could see.
 const SQ = 600;
 const SQ_MID = SQ / 2;
 // A hairline of white across the join. Two halves that came out close to
@@ -283,7 +280,7 @@ function buildEventPoster({ code, title, place, accent = '#C8102E' }) {
   const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
 
   const text = (body, { y, size, weight = 700, fill = '#ffffff', spacing = 0, length = null }) =>
-    `<text x="${W / 2}" y="${y}" text-anchor="middle" font-family="${FONT}"` +
+    `<text x="${SQ / 2}" y="${y}" text-anchor="middle" font-family="${FONT}"` +
     ` font-size="${size}" font-weight="${weight}" letter-spacing="${spacing}" fill="${fill}"` +
     (length ? ` textLength="${length}" lengthAdjust="spacingAndGlyphs"` : '') +
     `>${escapeXml(body)}</text>`;
@@ -293,36 +290,39 @@ function buildEventPoster({ code, title, place, accent = '#C8102E' }) {
   // a diagram.
   const mat =
     `<g fill="none" stroke="${accent}" stroke-opacity="0.16">` +
-      `<circle cx="${W / 2}" cy="330" r="250" stroke-width="26"/>` +
-      `<circle cx="${W / 2}" cy="330" r="150" stroke-width="14"/>` +
+      `<circle cx="${SQ / 2}" cy="235" r="205" stroke-width="22"/>` +
+      `<circle cx="${SQ / 2}" cy="235" r="123" stroke-width="12"/>` +
     '</g>';
 
-  const nameLines = wrapToWidth(title, 22, 3);
-  const nameTop = 620 - (nameLines.length - 1) * 21;
+  // Two lines rather than three, and narrower. The square has a third
+  // less height to spend and the promotion's own mark is the thing worth
+  // spending it on.
+  const nameLines = wrapToWidth(title, 20, 2);
+  const nameTop = 452 - (nameLines.length - 1) * 19;
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">` +
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${SQ} ${SQ}" width="${SQ}" height="${SQ}">` +
     '<defs>' +
       `<linearGradient id="ground" x1="0" y1="0" x2="0" y2="1">` +
         `<stop offset="0" stop-color="#14304a"/><stop offset="1" stop-color="${ground}"/>` +
       '</linearGradient>' +
     '</defs>' +
-    `<rect width="${W}" height="${H}" fill="url(#ground)"/>` +
+    `<rect width="${SQ}" height="${SQ}" fill="url(#ground)"/>` +
     mat +
-    `<rect y="0" width="${W}" height="10" fill="${accent}"/>` +
+    `<rect y="0" width="${SQ}" height="10" fill="${accent}"/>` +
 
     // The mark: initials over the full name, the way the promotion
     // writes itself.
-    text('RAF', { y: 372, size: 172, weight: 800, spacing: 6, length: 330 }) +
-    `<rect x="${(W - 300) / 2}" y="410" width="300" height="3" fill="${accent}"/>` +
-    text('REAL AMERICAN FREESTYLE', { y: 452, size: 22, weight: 700, spacing: 4, fill: '#ffffffcc', length: 400 }) +
+    text('RAF', { y: 278, size: 132, weight: 800, spacing: 5, length: 254 }) +
+    `<rect x="${(SQ - 240) / 2}" y="306" width="240" height="3" fill="${accent}"/>` +
+    text('REAL AMERICAN FREESTYLE', { y: 336, size: 17, weight: 700, spacing: 3, fill: '#ffffffcc', length: 316 }) +
 
     // The card's own number, then its headline.
-    (code ? text(code.toUpperCase(), { y: 556, size: 30, weight: 800, spacing: 5, fill: accent }) : '') +
-    nameLines.map((line, i) => text(line, { y: nameTop + i * 42, size: 34, weight: 700 })).join('') +
-    (place ? text(place, { y: 742, size: 22, weight: 600, fill: '#ffffff8c' }) : '') +
+    (code ? text(code.toUpperCase(), { y: 396, size: 25, weight: 800, spacing: 4, fill: accent }) : '') +
+    nameLines.map((line, i) => text(line, { y: nameTop + i * 38, size: 30, weight: 700 })).join('') +
+    (place ? text(place, { y: 524, size: 19, weight: 600, fill: '#ffffff8c' }) : '') +
 
-    text('FOX NATION', { y: 836, size: 19, weight: 700, spacing: 5, fill: '#ffffff73', length: 200 }) +
-    `<rect y="${H - 10}" width="${W}" height="10" fill="${accent}"/>` +
+    text('FOX NATION', { y: 570, size: 16, weight: 700, spacing: 4, fill: '#ffffff73', length: 168 }) +
+    `<rect y="${SQ - 10}" width="${SQ}" height="10" fill="${accent}"/>` +
     '</svg>';
 }
 
@@ -334,5 +334,5 @@ module.exports = {
   // Exported for the tests, which check the colour rules directly rather
   // than by reading them out of finished markup.
   splitColors, backdrop, colorGap, luminance, normalizeColor, darken, lighten,
-  POSTER_WIDTH: W, POSTER_HEIGHT: H,
+  POSTER_WIDTH: SQ, POSTER_HEIGHT: SQ,
 };
