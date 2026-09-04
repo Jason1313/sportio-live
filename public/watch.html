@@ -1374,22 +1374,22 @@
   }
 
   // Every live game across every configured league, on one page.
-  // Home's version of the league tab's opening lens. It has no filter bar
-  // of its own - it is a mixed page and a conference chip would mean
-  // nothing across five leagues - so this is the default and the only
-  // view: hidden conferences dropped, and for a league with a Power 4,
-  // those games plus the pinned teams.
+  // Home shows exactly what the league tab's Featured chip shows, pooled
+  // across leagues. It has no filter bar of its own - it is a mixed page
+  // and a conference chip would mean nothing across five leagues - so
+  // this is the default and the only view.
   //
-  // The Power 4 rather than the poll, because Home is answering "what is
-  // on" and not "what is important". A 2-3 Michigan is still the game
-  // somebody opened this page for, and it is not in the top 25.
+  // Same predicate as the chip rather than its own copy, so the two
+  // cannot drift: a game on Home is a game the league tab opens with.
   function homeLensFor(sport, metas) {
     const pinned = pinnedTeamIds(sport);
     const hidden = hiddenConferenceIds(sport);
     const p4 = p4ConferenceIds(sport);
     const shown = metas.filter(m => isPinnedGame(m, pinned) || inShownConference(m, hidden));
-    if (p4.size === 0) return shown;
-    return shown.filter(m => isP4Game(m, p4) || isPinnedGame(m, pinned));
+    // A league with neither a Power 4 nor a poll has nothing to feature,
+    // so everything it has on today is what is on today.
+    if (p4.size === 0 && !POLL_LEAGUES.has(sport)) return shown;
+    return shown.filter(m => isFeaturedGame(m, { p4, pinned }));
   }
 
   async function loadHome() {
@@ -1510,19 +1510,28 @@
     return list.length === 0 || list.some(c => !hidden.has(c.id));
   }
 
-  // The four lenses, applied over the same base:
+  // Whether a game belongs in the featured set: a Power 4 team, a pinned
+  // team, or a ranked one.
+  //
+  // The three used to be two chips - Power 4 and the poll - which was one
+  // chip too many. They are not competing answers to the same question,
+  // they are three reasons the same game is worth leading with, and
+  // making the reader pick between them meant a #9 Boise State was on one
+  // list and an unranked Michigan on the other, with no view holding
+  // both. The union is what anyone actually wants on screen.
+  function isFeaturedGame(meta, { p4, pinned }) {
+    return isP4Game(meta, p4) || isPinnedGame(meta, pinned) || isRankedGame(meta);
+  }
+
+  // The three lenses, applied over the same base:
   //
   //   hidden conferences   - always, except for a pinned team, which is
   //                          an explicit "show me this" and outranks a
   //                          blanket "not this conference"
-  //   p4                   - the opening view. Every Power 4 game whether
-  //                          ranked or not, plus whatever is pinned. A
-  //                          September Saturday is ninety-nine games and
-  //                          this is the half of it anyone came for.
-  //   top                  - the poll instead, which is a different
-  //                          question: it reaches a ranked Boise State
-  //                          that P4 does not, and drops the P4 games
-  //                          nobody is watching.
+  //   featured             - the opening view, and the same set Home
+  //                          shows. A September Saturday is ninety-nine
+  //                          games and this is the two thirds of it
+  //                          anyone came for.
   //   all / one conference - everything, or a deliberate single choice.
   //                          The conference lens is hard: picking the ACC
   //                          and still being shown a pinned Sun Belt game
@@ -1532,31 +1541,30 @@
     const hidden = hiddenConferenceIds();
     const shown = metas.filter(m => isPinnedGame(m, pinned) || inShownConference(m, hidden));
 
-    if (mode === 'p4') {
-      const p4 = p4ConferenceIds();
-      return shown.filter(m => isP4Game(m, p4) || isPinnedGame(m, pinned));
+    if (mode === 'featured') {
+      return shown.filter(m => isFeaturedGame(m, { p4: p4ConferenceIds(), pinned }));
     }
-    if (mode === 'top') return shown.filter(m => isRankedGame(m) || isPinnedGame(m, pinned));
     if (mode === 'all') return shown;
     return shown.filter(m => (m.conferences || []).some(c => c.id === mode));
   }
 
-  // A catalog's opening lens: the Power 4 where that means something,
+  // A catalog's opening lens: the featured set where that means anything,
   // everything where it does not. Kept per catalog so switching to
   // another tab and back does not silently reset it.
   function lensFor(catalogId) {
     if (!catalogLens[catalogId]) {
-      catalogLens[catalogId] = leagueHasP4(catalogId) ? 'p4' : 'all';
+      catalogLens[catalogId] = leagueIsFeaturable(catalogId) ? 'featured' : 'all';
     }
     return catalogLens[catalogId];
   }
 
-  function leagueHasP4(catalogId) {
-    return p4ConferenceIds(sportOfCatalog(catalogId)).size > 0;
-  }
-
-  function leagueHasPoll(catalogId) {
-    return POLL_LEAGUES.has(sportOfCatalog(catalogId));
+  // A league where featuring means something: it has a Power 4 to lead
+  // with, or a poll to rank by. Soccer has neither, so its tab opens on
+  // its whole fixture list and never offers a chip that would filter to
+  // nothing.
+  function leagueIsFeaturable(catalogId) {
+    return p4ConferenceIds(sportOfCatalog(catalogId)).size > 0
+      || POLL_LEAGUES.has(sportOfCatalog(catalogId));
   }
 
   function renderConferenceFilter() {
@@ -1564,19 +1572,17 @@
     if (!box) return;
     const conferences = conferencesIn(catalogMetas);
     const mode = lensFor(activeCatalog);
-    const hasP4 = leagueHasP4(activeCatalog);
-    const hasPoll = leagueHasPoll(activeCatalog);
+    const featurable = leagueIsFeaturable(activeCatalog);
 
-    // Nothing to choose between with one conference and no lenses, and
-    // nothing to offer at all for a league that has neither.
-    if (conferences.length < 2 && !hasP4 && !hasPoll) {
+    // Nothing to choose between with one conference and no featured set,
+    // and nothing to offer at all for a league that has neither.
+    if (conferences.length < 2 && !featurable) {
       box.classList.add('hidden'); box.innerHTML = ''; return;
     }
 
     // Games only. A pinned network card belongs to no conference and is
     // shown under every chip, so counting it would overstate All by one.
     const games = catalogMetas.filter(m => !m.pinned);
-    const pinnedCount = pinnedTeamIds().size;
 
     const chip = (label, count, on, onclick) =>
       `<button onclick="${onclick}"
@@ -1585,22 +1591,21 @@
                  : 'border-white/15 bg-[#1f2b36] text-[#e6e6e6]/65 hover:text-[#e6e6e6] hover:border-white/30'}">
          ${escapeHtml(label)} <span class="opacity-60">${count}</span></button>`;
 
-    // Named for what each actually holds. With teams pinned the opening
-    // view is the Power 4 plus those, and a chip reading "P4" over a list
-    // containing James Madison would be lying about its own contents.
-    const p4Chip = hasP4
-      ? chip(pinnedCount > 0 ? 'P4 + Pinned' : 'P4',
-             gamesForLens(games, 'p4').length, mode === 'p4', 'chooseLens(&quot;p4&quot;)')
-      : '';
-    const topChip = hasPoll
-      ? chip('Top 25', gamesForLens(games, 'top').length, mode === 'top', 'chooseLens(&quot;top&quot;)')
+    // "Featured" rather than spelling out its three ingredients. The set
+    // is Power 4 plus pinned plus ranked, and a chip naming all of that
+    // is longer than the row it sits in - and would have to change label
+    // as teams are pinned. Not "Home" either, which is what the tab above
+    // it is called: two controls one line apart with the same name, doing
+    // different things, is worse than a word that needs learning once.
+    const featuredChip = featurable
+      ? chip('Featured', gamesForLens(games, 'featured').length,
+             mode === 'featured', 'chooseLens(&quot;featured&quot;)')
       : '';
 
     box.classList.remove('hidden');
     box.innerHTML = `<div class="flex flex-wrap items-center gap-1.5">
         <span class="text-[10px] uppercase tracking-wider text-[#e6e6e6]/35 mr-1">Show</span>
-        ${p4Chip}
-        ${topChip}
+        ${featuredChip}
         ${chip('All', gamesForLens(games, 'all').length, mode === 'all', 'chooseLens(&quot;all&quot;)')}
         ${conferences.map(c => chip(c.name, c.count, mode === c.id,
                `chooseLens(${quoteAttr(c.id)})`)).join('')}
@@ -1617,7 +1622,7 @@
   // nothing, so there is always something on screen.
   function chooseLens(id) {
     catalogLens[activeCatalog] = (catalogLens[activeCatalog] === id && id !== 'all')
-      ? (leagueHasP4(activeCatalog) ? 'p4' : 'all')
+      ? (leagueIsFeaturable(activeCatalog) ? 'featured' : 'all')
       : id;
     applyConferenceFilter();
   }
@@ -1640,8 +1645,7 @@
     // replacing them.
     showEmpty(shownGames.length > 0
       ? ''
-      : mode === 'p4' ? 'No Power 4 or pinned games in this round. Choose All to see the rest.'
-      : mode === 'top' ? 'Nothing ranked in this round. Choose All to see the rest.'
+      : mode === 'featured' ? 'Nothing featured in this round. Choose All to see the rest.'
       : mode === 'all' ? 'Nothing scheduled.'
       : 'No games for that conference in this round.');
     renderGameGrid([...pinnedCards, ...shownGames]);
