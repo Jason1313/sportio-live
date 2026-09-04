@@ -1536,11 +1536,25 @@
     }
 
     // A string safe to drop into an inline handler as an argument -
-    // JSON-quoted so the value survives, then attribute-escaped so the
-    // quotes do not end the attribute early. Ids are generated here and
-    // are tame, but the same helper is used for labels the user typed.
+    // JSON-quoted so the value survives, then attribute-escaped so its
+    // quotes cannot end the attribute early.
+    //
+    // Deliberately NOT built on escapeHtml. That one sets textContent and
+    // reads innerHTML back, which is text-node serialisation: it escapes
+    // &, < and > and leaves " alone, because a quote means nothing in
+    // text. Inside an attribute it means everything - the value ends
+    // there - so escapeHtml here produced oninput="fn(1, "url", x)",
+    // which the parser truncates to invalid JS and silently never runs.
+    // Every field in the Providers panel was inert because of it.
+    //
+    // Ampersand first, so the entities introduced below are not
+    // re-escaped into literal text.
     function quoteAttr(value) {
-      return escapeHtml(JSON.stringify(value == null ? '' : String(value)));
+      return JSON.stringify(value == null ? '' : String(value))
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
     }
 
     // --- Dashboard: Change Timezone editor ---
