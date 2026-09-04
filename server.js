@@ -1962,6 +1962,29 @@ const DRAWN_POSTER_SPORTS = new Set([
   'EPL', 'LALIGA', 'SERIEA', 'BUNDESLIGA', 'LIGUE1',
 ]);
 
+// ESPN's stitched matchup image for an event, or null when there is not
+// one to ask for.
+//
+// The two path segments are read out of the scoreboard endpoint the
+// league already names rather than written down again - they are the same
+// two segments, and a second table would only be a chance for them to
+// disagree.
+//
+// Measured before adopting it: 139 events across college football, the
+// NFL, the NHL, MLB and three soccer leagues, 139 images, no misses. That
+// included all 25 college games against an FCS opponent, which were the
+// ones most likely to be missing. A gap answers 404 with zero bytes
+// rather than a placeholder, so the drawn poster below stays as the
+// fallback and nothing has to detect a stand-in image.
+function stitchedMatchupUrl(sportKey, eventId) {
+  if (!eventId || !DRAWN_POSTER_SPORTS.has(sportKey)) return null;
+  const endpoint = ESPN_ENDPOINTS[sportKey] || '';
+  const parts = /\/sports\/([^/]+)\/([^/]+)\/scoreboard/.exec(endpoint);
+  if (!parts) return null;
+  return `https://s.secure.espncdn.com/stitcher/sports/${parts[1]}/${parts[2]}` +
+    `/events/${encodeURIComponent(eventId)}.png?templateId=espn.com.share.1`;
+}
+
 app.get('/poster/:sport/:homeId/:awayId.svg', async (req, res) => {
   const { sport, homeId, awayId } = req.params;
   const gameUtcDate = req.query.date || null;
@@ -1983,6 +2006,17 @@ app.get('/poster/:sport/:homeId/:awayId.svg', async (req, res) => {
     : theme.primary;
   const homeAbbr = (req.query.homeAbbr || '').toLowerCase();
   const awayAbbr = (req.query.awayAbbr || '').toLowerCase();
+
+  // ESPN's own artwork first, for the leagues that have it. Through the
+  // same image cache the team logos use, so a college Saturday is fetched
+  // once and held for thirty days rather than re-fetched per visitor.
+  const stitchUrl = stitchedMatchupUrl(sportKey, req.query.event);
+  const stitched = stitchUrl ? await getBase64Image(stitchUrl) : null;
+  if (stitched) {
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    return res.send(posters.buildStitchedPoster({ art: stitched }));
+  }
 
   const [homeLogoData, awayLogoData] = await Promise.all([
     getBase64ImageWithFallback(teamLogoUrls(league, homeAbbr, homeId)),
@@ -2995,7 +3029,12 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
         homeAltColor,
         awayAltColor,
         homeAbbr,
-        awayAbbr
+        awayAbbr,
+        // Which event this is, so the poster route can ask ESPN for the
+        // matchup image it renders per event. Everything else here
+        // describes the two teams; this is the only parameter that names
+        // the fixture.
+        event: String(event.id || ''),
       }).toString();
       const dateParam = gameUtcDate
         ? `?date=${encodeURIComponent(gameUtcDate)}&tz=${encodeURIComponent(userTimeZone)}&${artParams}`

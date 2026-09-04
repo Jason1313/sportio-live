@@ -191,6 +191,51 @@ function buildMatchupPoster({
     '</svg>';
 }
 
+// A matchup poster built on ESPN's own stitched artwork.
+//
+// ESPN renders one of these for every event: a square split on the
+// diagonal, each half in that team's colour with its logo already drawn
+// to read on it. That last part is the whole reason to use it. The
+// drawn poster above has to solve the same problem itself, from two
+// published colours and two logos it has never seen together, and
+// splitColors exists because that goes wrong often enough to need
+// rescuing.
+//
+// The art is square and this frame is 2:3, so the remaining sixth top
+// and bottom is filled from the artwork rather than left as letterbox.
+//
+// Not from the team colours the API publishes: those are not the colours
+// ESPN drew with. UTEP publishes #ff8200 and its half of the artwork is
+// navy, because the stitcher picks whichever of a team's colours its
+// logo reads on - exactly the judgement we are adopting it for. So the
+// strips are two hugely magnified copies of the same image, clipped and
+// anchored at opposite corners so each samples only the flat corner its
+// triangle ends in. The colour is then the artwork's own by construction
+// and the seam cannot be seen.
+function buildStitchedPoster({ art }) {
+  const STRIP = (H - W) / 2;
+  // Enough magnification that a strip samples only the corner: at 30x a
+  // 600-wide strip reads 20 source pixels across and 5 down, well inside
+  // the flat triangle.
+  const ZOOM = 30;
+  const BIG = W * ZOOM;
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
+    `viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">` +
+    '<defs>' +
+      `<clipPath id="sp-top"><rect width="${W}" height="${STRIP}"/></clipPath>` +
+      `<clipPath id="sp-bottom"><rect y="${H - STRIP}" width="${W}" height="${STRIP}"/></clipPath>` +
+    '</defs>' +
+    `<g clip-path="url(#sp-top)">` +
+      `<image xlink:href="${art}" x="0" y="0" width="${BIG}" height="${BIG}" preserveAspectRatio="none"/>` +
+    '</g>' +
+    `<g clip-path="url(#sp-bottom)">` +
+      `<image xlink:href="${art}" x="${W - BIG}" y="${H - BIG}" width="${BIG}" height="${BIG}" preserveAspectRatio="none"/>` +
+    '</g>' +
+    `<image xlink:href="${art}" x="0" y="${STRIP}" width="${W}" height="${W}" preserveAspectRatio="none"/>` +
+    '</svg>';
+}
+
 // ------------------------------------------------------------ wrestling
 //
 // A promotion's card has no two teams to split a poster between - it has
@@ -284,6 +329,7 @@ function buildEventPoster({ code, title, place, accent = '#C8102E' }) {
 
 module.exports = {
   buildMatchupPoster,
+  buildStitchedPoster,
   buildEventPoster,
   // Exported for the tests, which check the colour rules directly rather
   // than by reading them out of finished markup.
