@@ -162,14 +162,39 @@ const cache = new Map();
 const inFlight = new Map();
 
 let summaryCache = null; // { providers, runDates, fetchedAt }
+let summaryInFlight = null;
 
+// The shortest a forced check will still reuse an answer for.
+//
+// `force` means "do not trust the six-hour interval", not "ask again
+// within the same second". Both callers that force walk a list of
+// providers - the boot warmer and the daily refresh - and the sweep
+// dates cannot change between two providers of one pass, so asking once
+// per provider was the same 7KB question repeated for one answer. At a
+// second a time that is most of what a two-provider warm spends outside
+// the tables themselves.
+const FORCED_SUMMARY_FLOOR_MS = 60 * 1000;
+
+// Deduplicated as well as cached, because the interesting caller asks
+// with `force`: concurrent callers share one request rather than opening
+// two.
 async function getSummary(force) {
-  if (!force && summaryCache && Date.now() - summaryCache.fetchedAt < FRESHNESS_CHECK_MS) {
+  const interval = force ? FORCED_SUMMARY_FLOOR_MS : FRESHNESS_CHECK_MS;
+  if (summaryCache && Date.now() - summaryCache.fetchedAt < interval) {
     return summaryCache;
   }
-  const summary = await fetchSummary();
-  summaryCache = { ...summary, fetchedAt: Date.now() };
-  return summaryCache;
+  if (summaryInFlight) return summaryInFlight;
+
+  summaryInFlight = (async () => {
+    try {
+      const summary = await fetchSummary();
+      summaryCache = { ...summary, fetchedAt: Date.now() };
+      return summaryCache;
+    } finally {
+      summaryInFlight = null;
+    }
+  })();
+  return summaryInFlight;
 }
 
 // Every provider the dashboard covers, for the account setting to choose

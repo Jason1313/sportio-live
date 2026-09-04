@@ -6592,6 +6592,48 @@ async function warmChannelSources() {
   console.log(`[Warm] Channel source ready for ${warmed}/${providers.length} provider(s).`);
 }
 
+// The published tables, pulled before anybody asks for one.
+//
+// This is the slowest thing the dashboard waits on and the only one a
+// restart empties: streamcheck's cache is in memory, so a reboot means
+// the first person to open Network Links pays for the whole table. It is
+// about 20MB and 27,000 channels per provider - measured at 9.1s each on
+// a warm connection, and an account with two providers waits for both
+// before a single link is drawn.
+//
+// Nothing was warming it. The daily refresh runs at 07:00 and the
+// channel-source warmer covers playlists, so this fell between the two.
+//
+// One at a time, matching refreshProviders: this is somebody else's
+// public dashboard and a pair of 20MB queries fired at once is not a
+// reasonable way to treat it. A request that arrives mid-warm joins the
+// in-flight fetch rather than starting a second one.
+async function warmStreamcheckTables() {
+  const tables = providersInUse();
+  if (tables.length === 0) return;
+
+  let warmed = 0;
+  for (const table of tables) {
+    try {
+      if (await streamcheck.ensureProvider(table)) warmed++;
+    } catch (err) {
+      console.error(`[Warm] Could not warm published data for ${table}: ${err.message}`);
+    }
+  }
+  console.log(`[Warm] Published quality data ready for ${warmed}/${tables.length} provider table(s).`);
+}
+
+// After the channel sources are under way rather than before. Both are
+// wanted by the same first page load, but the channel list gates every
+// endpoint on it - a dashboard that cannot authenticate yet has nothing
+// to draw badges on. Overridable the same way SPORTIO_DATA_DIR is, so a
+// test run does not have to wait half a minute to watch this happen.
+const STREAMCHECK_WARM_DELAY_MS = Number(process.env.SPORTIO_WARM_STREAMCHECK_MS) || 30 * 1000;
+
+function scheduleStreamcheckWarm() {
+  setTimeout(() => { warmStreamcheckTables(); }, STREAMCHECK_WARM_DELAY_MS).unref();
+}
+
 function scheduleChannelSourceWarm() {
   setInterval(() => { warmChannelSources(); }, CHANNEL_SOURCE_WARM_MS).unref();
   // Shortly after boot, not at it: a restart should have the catalog in
@@ -6736,3 +6778,4 @@ function scheduleStreamcheckRefresh() {
 scheduleStreamcheckRefresh();
 scheduleGameCacheWarm();
 scheduleChannelSourceWarm();
+scheduleStreamcheckWarm();
