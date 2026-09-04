@@ -1717,11 +1717,26 @@ function getPosterTemplateInline() {
   return getInlineSvgOverlay(filePath, 'poster-template');
 }
 
-// Football only, for now. The new art was designed against NFL and
-// college marks and checked against the pairs those two leagues break
-// on; the other sports keep the template until their own marks have been
-// looked at the same way.
-const DRAWN_POSTER_SPORTS = new Set(['NFL', 'NCAAFB']);
+// Every team sport with two sides. Football first, then the rest once
+// their own marks had been looked at the same way - which was the
+// condition this list used to state.
+//
+// That look was an audit of every fixture these leagues are actually
+// playing, run through splitColors: 201 MLB, 124 NHL and 109 across the
+// five soccer competitions. Every team in all seven has a published
+// colour, so none of them falls through to the sport's generic theme,
+// and after the split no pair is left too close to read as two halves.
+//
+// The one thing that differs by sport is the rescue. MLB and soccer
+// publish an alternate colour for every club, so a clash resolves to a
+// real team colour. NHL publishes none at all - 124 of 124 fixtures - so
+// there it is the shade step alone that separates the halves, which is
+// why that step now keeps going until it works rather than taking one
+// swing (see splitColors).
+const DRAWN_POSTER_SPORTS = new Set([
+  'NFL', 'NCAAFB', 'MLB', 'NHL',
+  'EPL', 'LALIGA', 'SERIEA', 'BUNDESLIGA', 'LIGUE1',
+]);
 
 app.get('/poster/:sport/:homeId/:awayId.svg', async (req, res) => {
   const { sport, homeId, awayId } = req.params;

@@ -83,8 +83,33 @@ function splitColors(awayColor, homeColor, homeAltColor) {
       && luminance(alt) > 0.03 && luminance(alt) < 0.75
       && colorGap(away, backdrop(alt)) >= 90;
 
-    home = usable ? backdrop(alt)
-      : (luminance(away) > 0.25 ? darken(home, 0.5) : lighten(home, 0.26));
+    if (usable) {
+      home = backdrop(alt);
+    } else {
+      // No usable alternate, so the home side is shaded away from the
+      // other one instead. Stepped until it clears rather than swung once.
+      //
+      // One step was enough while this was football only, where a team
+      // without a usable alternate is the exception. It is the rule in
+      // hockey: not one of 124 NHL fixtures had an alternate colour
+      // published for the home side, so the shade is the whole mechanism
+      // there - and one swing left Chicago's red against Detroit's a
+      // hair under the threshold, two reds with nothing but the seam
+      // between them.
+      //
+      // The first amount is the one football was tuned on, so every pair
+      // that already cleared it comes out of here unchanged.
+      const goLighter = luminance(away) <= 0.25;
+      const steps = goLighter ? [0.26, 0.40, 0.55, 0.70] : [0.50, 0.65, 0.78, 0.88];
+      // Each step shades the ORIGINAL colour further, never the result of
+      // the step before - compounding would run away from the team's
+      // colour far faster than the numbers here suggest.
+      const base = home;
+      for (const amount of steps) {
+        home = goLighter ? lighten(base, amount) : darken(base, amount);
+        if (colorGap(away, home) >= TOO_CLOSE) break;
+      }
+    }
   }
   return { away, home };
 }
