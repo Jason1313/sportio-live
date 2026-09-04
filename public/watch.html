@@ -1304,7 +1304,7 @@
       <button class="card text-left${metaPhase(m, now) === 2 ? ' finished' : ''}"
               onclick="openStreams('${encodeURIComponent(m.id)}')">
         <img class="poster w-full rounded-lg border border-white/10 bg-[#1f2b36] object-cover" loading="lazy"
-             style="aspect-ratio: 2 / 3"
+             style="aspect-ratio: ${m.posterShape === 'square' ? '1 / 1' : '2 / 3'}"
              src="${escapeHtml(m.poster || '')}" alt="">
         ${m.league ? `<span class="card-league block text-[11px] uppercase tracking-wider text-[#5aa8d1] mt-2">${escapeHtml(m.league)}</span>` : ''}
         <span class="card-title block text-sm ${m.league ? 'mt-0.5' : 'mt-2'} leading-snug">${escapeHtml(m.name || '')}</span>

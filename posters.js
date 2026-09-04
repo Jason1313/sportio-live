@@ -117,12 +117,27 @@ function splitColors(awayColor, homeColor, homeAltColor) {
 // ------------------------------------------------------------------- art
 const W = 600, H = 900;
 const MID = H / 2;
+
+// The matchup poster is square, and the wrestling one below is not.
+//
+// Both used to be 2:3, which is the shape a poster is when it is drawn
+// from nothing. A matchup card is not that any more - it is ESPN's
+// square artwork - and a tall frame around a square picture is two bands
+// of filler. The drawn matchup poster is square for the same reason: it
+// only ever stands in for the artwork, and a fallback that changed the
+// card's shape would announce itself more loudly than the picture it was
+// standing in for.
+const SQ = 600;
+const SQ_MID = SQ / 2;
 // A hairline of white across the join. Two halves that came out close to
 // each other still read as two with a line between them, and it costs
 // nothing on the pairs that were never in doubt.
 const SEAM = 4;
-const CHIP = { size: 340, radius: 34, awayCy: 225, homeCy: 675 };
-const LOGO = 264;
+// Sized to the square's half rather than the tall one's: each half is
+// 300 deep, so a 236 chip leaves the same margin above and below that
+// 340 left in a 450-deep half.
+const CHIP = { size: 236, radius: 24, awayCy: SQ_MID / 2, homeCy: SQ_MID * 1.5 };
+const LOGO = 184;
 
 const escapeXml = (str) => String(str == null ? '' : str)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -153,12 +168,12 @@ function nameOnChip(cx, cy, name, color) {
 }
 
 function chip(cy, logoData, name, color) {
-  const x = (W - CHIP.size) / 2;
+  const x = (SQ - CHIP.size) / 2;
   const y = cy - CHIP.size / 2;
   const art = logoData
-    ? `<image href="${logoData}" x="${(W - LOGO) / 2}" y="${cy - LOGO / 2}"` +
+    ? `<image href="${logoData}" x="${(SQ - LOGO) / 2}" y="${cy - LOGO / 2}"` +
       ` width="${LOGO}" height="${LOGO}" preserveAspectRatio="xMidYMid meet"/>`
-    : nameOnChip(W / 2, cy, name, darken(color, 0.55));
+    : nameOnChip(SQ / 2, cy, name, darken(color, 0.55));
 
   return `<rect x="${x}" y="${y}" width="${CHIP.size}" height="${CHIP.size}"` +
     ` rx="${CHIP.radius}" fill="#ffffff" filter="url(#chip-drop)"/>${art}`;
@@ -172,7 +187,7 @@ function buildMatchupPoster({
 }) {
   const { away, home } = splitColors(awayColor, homeColor, homeAltColor);
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">` +
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${SQ} ${SQ}" width="${SQ}" height="${SQ}">` +
     '<defs>' +
       '<filter id="chip-drop" x="-25%" y="-25%" width="150%" height="150%">' +
         '<feDropShadow dx="0" dy="9" stdDeviation="13" flood-color="#000000" flood-opacity="0.4"/>' +
@@ -182,10 +197,10 @@ function buildMatchupPoster({
         '<stop offset="1" stop-color="#000000" stop-opacity="0.32"/>' +
       '</radialGradient>' +
     '</defs>' +
-    `<rect width="${W}" height="${MID}" fill="${away}"/>` +
-    `<rect y="${MID}" width="${W}" height="${MID}" fill="${home}"/>` +
-    `<rect y="${MID - SEAM / 2}" width="${W}" height="${SEAM}" fill="#ffffff" opacity="0.85"/>` +
-    `<rect width="${W}" height="${H}" fill="url(#edge-shade)"/>` +
+    `<rect width="${SQ}" height="${SQ_MID}" fill="${away}"/>` +
+    `<rect y="${SQ_MID}" width="${SQ}" height="${SQ_MID}" fill="${home}"/>` +
+    `<rect y="${SQ_MID - SEAM / 2}" width="${SQ}" height="${SEAM}" fill="#ffffff" opacity="0.85"/>` +
+    `<rect width="${SQ}" height="${SQ}" fill="url(#edge-shade)"/>` +
     chip(CHIP.awayCy, awayLogoData, awayName, away) +
     chip(CHIP.homeCy, homeLogoData, homeName, home) +
     '</svg>';
@@ -201,38 +216,23 @@ function buildMatchupPoster({
 // splitColors exists because that goes wrong often enough to need
 // rescuing.
 //
-// The art is square and this frame is 2:3, so the remaining sixth top
-// and bottom is filled from the artwork rather than left as letterbox.
+// The artwork at its own size, and nothing else.
 //
-// Not from the team colours the API publishes: those are not the colours
-// ESPN drew with. UTEP publishes #ff8200 and its half of the artwork is
-// navy, because the stitcher picks whichever of a team's colours its
-// logo reads on - exactly the judgement we are adopting it for. So the
-// strips are two hugely magnified copies of the same image, clipped and
-// anchored at opposite corners so each samples only the flat corner its
-// triangle ends in. The colour is then the artwork's own by construction
-// and the seam cannot be seen.
-function buildStitchedPoster({ art }) {
-  const STRIP = (H - W) / 2;
-  // Enough magnification that a strip samples only the corner: at 30x a
-  // 600-wide strip reads 20 source pixels across and 5 down, well inside
-  // the flat triangle.
-  const ZOOM = 30;
-  const BIG = W * ZOOM;
+// It was briefly wrapped in the 2:3 frame the drawn posters used, with
+// the extra sixth top and bottom filled by sampling the artwork's own
+// corners. That worked - the seam was invisible - and it was still the
+// wrong answer: a tall frame around a square picture is two bands of
+// filler however well their colour is matched. The card is now the shape
+// the picture is.
+//
+// 400 because that is what ESPN renders. No scaling here, so the only
+// resampling is whatever the browser does fitting it to the grid.
+const STITCH = 400;
 
+function buildStitchedPoster({ art }) {
   return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
-    `viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">` +
-    '<defs>' +
-      `<clipPath id="sp-top"><rect width="${W}" height="${STRIP}"/></clipPath>` +
-      `<clipPath id="sp-bottom"><rect y="${H - STRIP}" width="${W}" height="${STRIP}"/></clipPath>` +
-    '</defs>' +
-    `<g clip-path="url(#sp-top)">` +
-      `<image xlink:href="${art}" x="0" y="0" width="${BIG}" height="${BIG}" preserveAspectRatio="none"/>` +
-    '</g>' +
-    `<g clip-path="url(#sp-bottom)">` +
-      `<image xlink:href="${art}" x="${W - BIG}" y="${H - BIG}" width="${BIG}" height="${BIG}" preserveAspectRatio="none"/>` +
-    '</g>' +
-    `<image xlink:href="${art}" x="0" y="${STRIP}" width="${W}" height="${W}" preserveAspectRatio="none"/>` +
+    `viewBox="0 0 ${STITCH} ${STITCH}" width="${STITCH}" height="${STITCH}">` +
+    `<image xlink:href="${art}" x="0" y="0" width="${STITCH}" height="${STITCH}"/>` +
     '</svg>';
 }
 

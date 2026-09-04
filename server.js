@@ -6335,6 +6335,15 @@ app.get('/user/:uuid/catalog/sports/:id.json', async (req, res) => {
     whenLabel: game.whenLabel || '',
     finalScore: game.finalScore || '',
     isToday: game.isToday !== false,
+    // Which shape the poster comes back as, so the grid can reserve the
+    // right box before the image arrives rather than cropping it to a
+    // frame it was never drawn for.
+    //
+    // Derived from the league rather than from the artwork, so it can be
+    // answered without fetching anything: both renderers for these
+    // leagues are square, the stitched one and the drawn fallback, so a
+    // game whose artwork is missing still fills the same slot.
+    posterShape: DRAWN_POSTER_SPORTS.has(sport.toUpperCase()) ? 'square' : 'portrait',
     conferences: game.conferences || [],
     // Read by the portal's ranked-only default and its pinned teams. Only
     // the leagues that build a game from ESPN competitors carry it; every
