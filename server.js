@@ -2584,7 +2584,18 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
 
       const homeNick = homeTeam.name || homeTeam.shortDisplayName || homeTeam.displayName || 'Home';
       const awayNick = awayTeam.name || awayTeam.shortDisplayName || awayTeam.displayName || 'Away';
-      
+
+      // The half of the name that is NOT the nickname - "Miami" out of
+      // "Miami Hurricanes", "Kansas City" out of "Kansas City Chiefs".
+      // ESPN carries it as its own field, so it is read rather than
+      // sliced off the display name.
+      //
+      // Kept because a provider names a game channel by whichever half it
+      // feels like - "NCAAF 07: MIAMI vs STANFORD" uses the places, other
+      // listings use the nicknames - and the team search below needs both.
+      const homeLocation = homeTeam.location || '';
+      const awayLocation = awayTeam.location || '';
+
       const homeFull = homeTeam.displayName || 'Home';
       const awayFull = awayTeam.displayName || 'Away';
 
@@ -2751,6 +2762,8 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
         // needed for tier 4's city/state exclusion rule in stream ranking.
         homeNick,
         awayNick,
+        homeLocation,
+        awayLocation,
         homeAbbr,
         awayAbbr,
         broadcastNames,
@@ -3475,6 +3488,107 @@ function autoSearchFor(user, bucketKey, sportKey) {
   // place would serve one promotion's channels for another's card.
   if (networks.isSearchNetwork(bucketKey)) return null;
   return networks.getAutoSearch(sportKey);
+}
+
+// ---------------------------------------------------------------------
+// Team search
+// ---------------------------------------------------------------------
+//
+// The last resort for a game with nothing behind it.
+//
+// It runs only when a game has produced no playable stream at all - a
+// configured channel, a standing search and a promotion rule have all
+// come back empty - and searches the playlist for each team's name. See
+// networks.teamSearchTerms for which words and why.
+//
+// Every hit carries the terms that found it, which is what lets the watch
+// portal switch a term off without asking the server again. A common
+// nickname can easily match more than the other three terms combined -
+// "Cardinal" reaches every cardinal-anything on the service - and turning
+// it off has to be instant to be worth having.
+
+// Per term, so one broad word cannot crowd out the other three, and
+// overall, so a four-term search cannot return a page nobody will read.
+const TEAM_SEARCH_PER_TERM = 25;
+const TEAM_SEARCH_TOTAL = 80;
+
+function teamSearchFor(user, game, channels) {
+  const terms = networks.teamSearchTerms(game);
+  if (terms.length === 0) return null;
+
+  // Keyed by URL, because the same channel legitimately answers several
+  // terms - "MIAMI HURRICANES TV" is found by both - and it should be one
+  // row that survives until BOTH its terms are switched off, not two rows
+  // that half-disappear.
+  const byUrl = new Map();
+  const counts = [];
+
+  for (const term of terms) {
+    const { channels: hits, total } = networks.searchChannels(term, channels, {
+      limit: TEAM_SEARCH_PER_TERM,
+      // These words were generated from the fixture, not typed, so they
+      // have to match whole words. Without it a team called the Utes
+      // matches "60 MINUTES".
+      wholeWord: true,
+    });
+    // `total` is what the term actually matched; `hits` is the capped
+    // slice of it that gets shown. The chip is labelled with the former,
+    // so a term that matched five hundred channels does not claim 25.
+    counts.push({ term, count: total, shown: hits.length });
+
+    for (const hit of hits) {
+      const existing = byUrl.get(hit.url);
+      if (existing) {
+        if (!existing.terms.includes(term)) existing.terms.push(term);
+        continue;
+      }
+      byUrl.set(hit.url, {
+        name: hit.name || '',
+        url: hit.url,
+        groups: hit.groups || [],
+        terms: [term],
+      });
+    }
+  }
+
+  // Ordered before it is capped, so the cap takes the worst rather than
+  // whatever came last.
+  //
+  // Most terms first, and this is the whole ranking. A channel that
+  // answers BOTH teams is nearly always the game itself - "Football: UAB
+  // at Illinois Postgame Press Conference", "Indiana State at Purdue" -
+  // while a channel that answers one is usually the word doing something
+  // else entirely, as "Colorado" finding CBS News Colorado and the
+  // Avalanche. Measured on a real slate, the two-term hits were the only
+  // genuinely relevant results in the list and were being buried under
+  // twenty single-word ones.
+  //
+  // Then the published quality, which sorts dead and blackscreen
+  // channels below working ones.
+  const ranked = enrichWithStreamcheck(user, [...byUrl.values()])
+    .sort((a, b) =>
+      b.terms.length - a.terms.length
+      || (b.probedScore || 0) - (a.probedScore || 0));
+
+  const results = ranked
+    .slice(0, TEAM_SEARCH_TOTAL)
+    .map(entry => ({
+      name: entry.name,
+      url: entry.url,
+      terms: entry.terms,
+      title: `\u{1F50D} ${entry.terms.join(', ')}  \u{1F4C1} ${(entry.groups || []).join(' | ')}`,
+      // The published reading rides along, which matters more here than
+      // anywhere else in the panel: these are guesses, there can be
+      // eighty of them, and "which of these is alive and watchable" is
+      // the only way to make that list usable at a glance.
+      probedQuality: entry.probedQuality || '',
+      probedTier: entry.probedTier || null,
+      probedScore: entry.probedScore,
+      probedDetail: entry.probedDetail || '',
+      streamStatus: entry.streamStatus || null,
+    }));
+
+  return { terms: counts, results };
 }
 
 async function fetchAutoSearchChannels(user, config, m3uSource) {
@@ -5540,10 +5654,34 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     });
   }
 
-  console.log(`[Stream] ${sportKey}${promotion ? `/${promotion.key}` : ''} ${idVal} network=${networkKey || 'none'} mode=${mode} links=${linkStreams.length} auto=${autoStreams.length} -> ${finalStreams.length}`);
+  // --- Team search ---
+  //
+  // Only when everything above has come back with nothing playable. A
+  // game that already has a channel does not need forty guesses appended
+  // to it, and a term as broad as a team nickname is only worth showing
+  // when the alternative is an empty panel.
+  //
+  // Returned in its own field rather than mixed into `streams`. The two
+  // are not the same kind of answer - one is a channel someone chose, the
+  // other is whatever the team's name matched - and Stremio, which reads
+  // `streams` and has nowhere to put a filter, should not be handed
+  // eighty unfiltered rows it cannot narrow.
+  let teamSearch = null;
+  if (!finalStreams.some(s => s.url)) {
+    const source = isM3u ? m3uSource : await getXtreamChannelSource(user);
+    if (source) {
+      // Through the account's own category and quality filters, exactly
+      // as the manual search box in the watch portal is - a channel
+      // filtered out of every other search should not reappear here.
+      teamSearch = teamSearchFor(user, game, channelsForSearch(user, source.channels));
+    }
+  }
+
+  console.log(`[Stream] ${sportKey}${promotion ? `/${promotion.key}` : ''} ${idVal} network=${networkKey || 'none'} mode=${mode} links=${linkStreams.length} auto=${autoStreams.length} -> ${finalStreams.length}` +
+    (teamSearch ? ` teamSearch=${teamSearch.results.length} (${teamSearch.terms.map(t => `${t.term}:${t.count}`).join(' ')})` : ''));
 
   res.setHeader('Content-Type', 'application/json');
-  res.json({ streams: finalStreams });
+  res.json({ streams: finalStreams, teamSearch });
 });
 
 // Every MMA league must be fully wired before serving anything.

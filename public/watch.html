@@ -476,6 +476,14 @@
   let streamSearchTimer = null;
   let streamSearchNote = '';
 
+  // The automatic team search, for a game with nothing else behind it.
+  // The server sends every hit tagged with the terms that found it, so
+  // switching a term off is a redraw rather than another round trip -
+  // which matters, because a broad nickname can account for most of the
+  // list and turning it off is the first thing anyone will do.
+  let teamSearchData = null;
+  let teamSearchOff = new Set();
+
   const credentials = () => ({ uuid, password });
   let catalogs = [];
   let activeCatalog = null;
@@ -1326,6 +1334,8 @@
     streamSearchGroups = [];
     streamSearchExcluded = new Set();
     streamSearchNote = '';
+    teamSearchData = null;
+    teamSearchOff = new Set();
     clearTimeout(streamSearchTimer);
     panel.classList.remove('hidden');
     lockScroll();
@@ -1337,7 +1347,21 @@
         fetch(`/user/${encodeURIComponent(uuid)}/stream/sports/${encodeURIComponent(id)}.json`)
       ]);
       meta = (await metaRes.json()).meta || {};
-      streams = (await streamRes.json()).streams || [];
+      const streamBody = await streamRes.json();
+      streams = streamBody.streams || [];
+      // Present only when the addon found nothing playable at all - see
+      // the team search in the stream route.
+      teamSearchData = streamBody.teamSearch || null;
+      // The published readings come down with the results, so the badges
+      // are there on first paint rather than after checking eighty
+      // channels by hand.
+      for (const row of (teamSearchData && teamSearchData.results) || []) {
+        if (row.probedQuality && !probeResults[row.url]) {
+          probeResults[row.url] = { label: row.probedQuality, persisted: true,
+                                    tier: row.probedTier, score: row.probedScore,
+                                    detail: row.probedDetail || '' };
+        }
+      }
     } catch (err) {
       document.getElementById('streams-title').textContent = 'Could not load streams';
       return;
@@ -1383,7 +1407,10 @@
   // quality check works across the whole panel rather than per-section,
   // because "which of these actually plays" is one question.
   function playableStreamRows() {
-    return [...streamRows, ...streamSearchRows].filter(s => s.url);
+    // Only the team-search rows still on screen. A quality check over the
+    // panel should not go and open eighty streams the user has just
+    // filtered away.
+    return [...streamRows, ...streamSearchRows, ...visibleTeamSearchRows()].filter(s => s.url);
   }
 
   // Renders the event panel's stream list. Split out of openStreams so a
@@ -1416,8 +1443,68 @@
       sections.push(streamSearchRows.map(streamRowHtml).join(''));
     }
 
+    // The automatic team search, last. It is the weakest answer in the
+    // panel and reads as one: a heading that says what was searched for,
+    // a chip per term, and the rows those terms matched.
+    sections.push(teamSearchHtml());
+
     list.innerHTML = sections.join('');
 
+  }
+
+  // Every team-search hit still standing, given which terms are switched
+  // off. A row survives while ANY of its terms is on, because a channel
+  // found by both "Miami" and "Hurricanes" is still a Miami channel after
+  // one of them is unticked.
+  function visibleTeamSearchRows() {
+    if (!teamSearchData) return [];
+    return teamSearchData.results.filter(r => r.terms.some(t => !teamSearchOff.has(t)));
+  }
+
+  function teamSearchHtml() {
+    if (!teamSearchData || teamSearchData.terms.length === 0) return '';
+
+    const rows = visibleTeamSearchRows();
+    const chips = teamSearchData.terms.map(t => {
+      const off = teamSearchOff.has(t.term);
+      return `<button onclick="toggleTeamSearchTerm(${JSON.stringify(t.term).replace(/"/g, '&quot;')})"
+                      class="text-[10px] px-1.5 py-0.5 rounded border transition ${off
+                        ? 'border-[#c0392b]/40 bg-[#c0392b]/15 text-[#e56a6a] line-through'
+                        : 'border-[#5aa8d1]/40 bg-[#5aa8d1]/15 text-[#5aa8d1]'}">
+                ${escapeHtml(t.term)} <span class="opacity-60">${t.count}</span>
+              </button>`;
+    }).join('');
+
+    // Said plainly rather than left to be inferred from an empty panel:
+    // nothing is configured for this game, so these are guesses made from
+    // the team names.
+    const header = `
+      <div class="px-3 pt-3 pb-1.5">
+        <p class="text-[10px] uppercase tracking-wider text-[#5aa8d1]">
+          Team search (${rows.length})
+        </p>
+        <p class="text-[10px] text-[#e6e6e6]/45 mt-0.5 leading-snug">
+          No channel is configured for this game, so your playlist was searched for each team.
+          Switch a term off to drop what it found.
+        </p>
+        <div class="flex flex-wrap gap-1 mt-1.5">${chips}</div>
+      </div>`;
+
+    if (rows.length === 0) {
+      return header + `<p class="text-[11px] text-[#e6e6e6]/40 px-3 pb-2 italic">
+          ${teamSearchData.results.length === 0
+            ? 'Nothing in your playlist matched either team.'
+            : 'Every term is switched off.'}
+        </p>`;
+    }
+    return header + rows.map(streamRowHtml).join('');
+  }
+
+  function toggleTeamSearchTerm(term) {
+    if (teamSearchOff.has(term)) teamSearchOff.delete(term);
+    else teamSearchOff.add(term);
+    // Redrawn from what is already in hand - no refetch.
+    renderStreams();
   }
 
   // ------------------------------------------------------------------

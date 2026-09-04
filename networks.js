@@ -1212,6 +1212,57 @@ function presetChannelsForAll(channels, defaults = {}) {
   return out;
 }
 
+// ---------------------------------------------------------------------
+// Team search
+// ---------------------------------------------------------------------
+
+// The words worth searching a playlist for when a game has no channel.
+//
+// A configured network answers most games. What is left is the game on a
+// channel nobody pinned - a regional feed, a one-off event listing, a
+// bundle the provider spun up for one Saturday - and those are named
+// after the teams, not after the network.
+//
+// Both halves of each team's name, because providers use both and there
+// is no telling which in advance: "NCAAF 07: MIAMI vs STANFORD" uses the
+// places, "US: HURRICANES SPORTS NET" the nickname. ESPN carries them as
+// separate fields, so this is reading them rather than splitting a string
+// and hoping.
+//
+// Away side first, then home, matching the order the game is named in
+// ("Miami Hurricanes at Stanford Cardinal" -> Miami, Hurricanes,
+// Stanford, Cardinal).
+//
+// Deliberately NOT the abbreviation. Search matches on substrings, and a
+// three-letter token like MIA or CAR appears inside enough unrelated
+// words to bury the results these are meant to surface.
+const MIN_TEAM_TERM_LENGTH = 3;
+
+function teamSearchTerms(game) {
+  if (!game) return [];
+
+  const candidates = [
+    game.awayLocation, game.awayNick,
+    game.homeLocation, game.homeNick,
+  ];
+
+  const seen = new Set();
+  const terms = [];
+  for (const raw of candidates) {
+    const term = String(raw || '').trim();
+    if (term.length < MIN_TEAM_TERM_LENGTH) continue;
+    // Case-insensitively, because a team whose place and nickname are the
+    // same word would otherwise be searched for twice and shown as two
+    // identical chips - "Athletics Athletics", and most soccer clubs,
+    // where ESPN repeats the club name in both fields.
+    const key = term.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    terms.push(term);
+  }
+  return terms;
+}
+
 // Splits a query into quoted phrases and loose tokens.
 //
 //   ESPN            -> tokens ['espn']
@@ -1258,12 +1309,33 @@ function matchesPhrase(channel, phrase) {
 //     because their GROUP is called "ESPN+".
 //   - excludeGroups drops whole groups outright, which is the blunt
 //     instrument for exactly that case.
+// `wholeWord` makes each token match only where a word starts, instead of
+// anywhere in the string.
+//
+// Off by default, because a person typing into the box is usually typing
+// a fragment and expects it to behave like one. On for the automatic team
+// search, where the words are generated rather than typed and a substring
+// match produces results nobody asked for: searching a college team
+// called the Utes returned "60 MINUTES", because "utes" is inside it.
+//
+// Anchored at the START of a word only, never the end - the same rule
+// nameMatchesAnyTerm uses, and for the same reason. A trailing boundary
+// would stop "Cardinal" matching "Cardinals", which is the one variation
+// a team search most needs to keep.
 function searchChannels(query, channels, options = {}) {
-  const { limit = 50, excludeGroups = [] } = options;
+  const { limit = 50, excludeGroups = [], wholeWord = false } = options;
   const { phrases, tokens } = parseSearchQuery(query);
   if (phrases.length === 0 && tokens.length === 0) {
-    return { channels: [], groups: [], truncated: false };
+    return { channels: [], groups: [], truncated: false, total: 0 };
   }
+
+  // Compiled once rather than per channel: this runs over every channel
+  // in the playlist, which is tens of thousands of them.
+  const tests = tokens.map(token => {
+    if (!wholeWord) return (haystack) => haystack.includes(token);
+    const re = new RegExp(`\\b${escapeRegex(token)}`);
+    return (haystack) => re.test(haystack);
+  });
 
   const excluded = new Set(excludeGroups);
   const matched = [];
@@ -1276,8 +1348,8 @@ function searchChannels(query, channels, options = {}) {
     const groups = channel.categories || [];
     const groupText = groups.join(' ').toLowerCase();
 
-    const inName = tokens.every(t => name.includes(t));
-    if (!inName && !tokens.every(t => `${name} ${groupText}`.includes(t))) continue;
+    const inName = tests.every(t => t(name));
+    if (!inName && !tests.every(t => t(`${name} ${groupText}`))) continue;
 
     // Counted before exclusion so a group the user has hidden still shows
     // its chip, and can be un-hidden.
@@ -1308,7 +1380,12 @@ function searchChannels(query, channels, options = {}) {
     groups: [...groupCounts.entries()]
       .map(([name, count]) => ({ name, count, excluded: excluded.has(name) }))
       .sort((a, b) => b.count - a.count),
-    truncated: matched.length > limit
+    truncated: matched.length > limit,
+    // How many matched, not how many are being returned. A caller that
+    // labels a control with this - the team-search chips do - would
+    // otherwise report the limit as the count and say "25" for a word
+    // that matched five hundred channels.
+    total: matched.length
   };
 }
 
@@ -1357,4 +1434,6 @@ module.exports = {
   searchChannels,
   parseSearchQuery,
   matchesPhrase,
+  teamSearchTerms,
+  MIN_TEAM_TERM_LENGTH,
 };
