@@ -4222,9 +4222,15 @@ function readAutoPick(user) {
   const raw = (user && user.autoPick) || {};
   const pickable = new Set(autopick.autoPickableNetworks());
 
+  // An absent list means the account has never been near this panel, and
+  // the default there is every network on. Auto-pick exists because the
+  // alternative is an account quietly serving channels a sweep has
+  // already marked dead, and that is not a state to opt in to. An empty
+  // ARRAY is different: somebody unticked everything and saved it, and
+  // that choice is kept.
   const networksOn = Array.isArray(raw.networks)
     ? [...new Set(raw.networks.filter(k => typeof k === 'string' && pickable.has(k)))]
-    : [];
+    : [...pickable];
 
   const rules = {};
   if (raw.rules && typeof raw.rules === 'object' && !Array.isArray(raw.rules)) {
@@ -4404,6 +4410,11 @@ function applyAutoPick(user, channels, options = {}) {
       label: result.label,
       count: validated.links.length,
       was: result.currentCount,
+      // The links themselves, not just a count. A caller that has just
+      // had an account's links rewritten under it is holding a stale
+      // copy, and a count cannot repair one - the dashboard used to
+      // redraw from its own pre-run state and show nothing new.
+      links: validated.links.map(withQualityTier),
     });
   }
 

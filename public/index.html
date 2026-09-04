@@ -2641,6 +2641,7 @@
     let autoPickData = null;                    // the last server response
     let autoPickDraft = { networks: [], rules: {} };
     const autoPickExpanded = {};                // key -> rules shown
+    let autoPickScroll = 0;                     // where the list was left
 
     const AUTO_PICK_FIELDS = [
       ['include', 'Match', 'A channel whose name carries any of these'],
@@ -2653,7 +2654,7 @@
       if (!panel) return;
       const opening = panel.classList.contains('hidden');
       panel.classList.toggle('hidden', !opening);
-      if (opening) loadAutoPick();
+      if (opening) { autoPickScroll = 0; loadAutoPick(); }
     }
 
     // Preview, and the thing every other button here is measured against.
@@ -2665,6 +2666,7 @@
     async function loadAutoPick(action) {
       const body = document.getElementById('autopick-body');
       const note = document.getElementById('autopick-status');
+      rememberAutoPickScroll();
       body.innerHTML = '<p class="text-[11px] text-[#e6e6e6]/40 italic p-2">Reading the published data...</p>';
 
       let data;
@@ -2702,6 +2704,20 @@
       return data;
     }
 
+    // The list is redrawn wholesale on every tick, every rule edit and
+    // every preview, and a fresh element starts at the top - so ticking a
+    // box forty rows down threw the reader back to the first one. The
+    // scroll offset is carried across the rebuild instead.
+    function rememberAutoPickScroll() {
+      const list = document.getElementById('autopick-list');
+      if (list) autoPickScroll = list.scrollTop;
+    }
+
+    function restoreAutoPickScroll() {
+      const list = document.getElementById('autopick-list');
+      if (list) list.scrollTop = autoPickScroll;
+    }
+
     function autoPickRules(key) {
       const edited = autoPickDraft.rules[key];
       const base = (autoPickData && autoPickData.rules[key]) || { include: [], exclude: [], groups: [] };
@@ -2717,6 +2733,7 @@
       const note = document.getElementById('autopick-status');
       const summary = document.getElementById('autopick-summary');
       if (!autoPickData) return;
+      rememberAutoPickScroll();
 
       if (!autoPickData.provider) {
         note.innerHTML = 'No provider is named for this account, so nothing has been measured. ' +
@@ -2739,8 +2756,9 @@
       note.textContent = `${autoPickData.provider}, sweep ${autoPickData.runDate || 'unknown'}. ${last}`;
 
       const keys = Object.keys(autoPickData.rules);
-      body.innerHTML = `<div class="space-y-1.5 max-h-[28rem] overflow-y-auto pr-1">` +
+      body.innerHTML = `<div id="autopick-list" class="space-y-1.5 max-h-[28rem] overflow-y-auto pr-1">` +
         keys.map(buildAutoPickRow).join('') + '</div>';
+      restoreAutoPickScroll();
 
       // Counted over the TICKED networks only. Every network is previewed
       // now, so counting them all would promise changes to sections that
@@ -2909,9 +2927,19 @@
       }
       const names = data.applied.map(a => `${a.label} (${a.count})`).join(', ');
       showStatus(`Updated ${names}.`);
-      // The links on screen were drawn from the account as it was before
-      // the run, so they are now a version behind what was just written.
-      loadNetworkLinks();
+
+      // The page's own copy of the links is what the sections below are
+      // drawn from, and loadNetworkLinks re-fetches suggestions and
+      // status but never the links themselves - so redrawing alone
+      // repainted the pre-run state and the run looked like it had done
+      // nothing. Worse, the next dashboard save would have posted that
+      // stale copy back and undone the run. The written links come back
+      // with the response; adopt them first, then redraw.
+      if (!activeUser.networkLinks) activeUser.networkLinks = {};
+      for (const change of data.applied) {
+        if (Array.isArray(change.links)) activeUser.networkLinks[change.networkKey] = change.links;
+      }
+      await loadNetworkLinks();
     }
 
     // Every category the provider offers, and the subset this account
