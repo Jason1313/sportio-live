@@ -237,6 +237,10 @@
               <i class="fa-solid fa-filter"></i>
               Link filters
             </button>
+            <button id="autopick-btn" onclick="toggleAutoPickPanel()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
+              <i class="fa-solid fa-arrows-rotate"></i>
+              Auto-pick
+            </button>
             <button id="network-categories-btn" onclick="toggleCategoriesPanel()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
               <i class="fa-solid fa-filter"></i>
               Categories
@@ -315,6 +319,42 @@
             </button>
             <button onclick="saveQualityFilter()" class="bg-[#3b8fc4] hover:bg-[#4fa3d8] font-bold py-2 px-4 rounded-lg text-xs transition">
               Save filters
+            </button>
+          </span>
+        </div>
+      </div>
+
+      <!-- Auto-pick. Re-chooses a network's channels from the newest
+           published sweep, so links that have gone dead are replaced
+           without anyone noticing they had.
+
+           Preview is the whole safety story here. These rules decide what
+           gets WRITTEN into an account's links on a schedule nobody is
+           watching, so every one of them is visible and editable, and the
+           exact channels a run would choose can be read on screen before
+           a single network is handed over. -->
+      <div id="autopick-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-4">
+        <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Auto-pick channels</h4>
+        <p class="text-[11px] text-[#e6e6e6]/45 mb-3 leading-relaxed">
+          Tick a network and its channels are re-chosen from the published data every time your
+          provider publishes a new sweep. Channels are matched by name and by playlist group, then
+          ordered best-first: 1080p above 0.060&nbsp;bpp, then 720p above 0.080, then the rest.
+          Anything dead, blackscreen, unmeasured or under 60&nbsp;fps is never picked &mdash; 30&nbsp;fps
+          only if a network has nothing else at all. A network that finds nothing keeps what it has.
+        </p>
+        <p id="autopick-status" class="text-[11px] text-[#e6e6e6]/45 mb-3 leading-relaxed"></p>
+        <div id="autopick-body"></div>
+        <div class="flex items-center justify-between gap-3 mt-3">
+          <span id="autopick-summary" class="text-[11px] text-[#e6e6e6]/45"></span>
+          <span class="flex items-center gap-2 shrink-0">
+            <button onclick="loadAutoPick()" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 font-bold py-2 px-3 rounded-lg text-[11px] transition">
+              Preview
+            </button>
+            <button onclick="runAutoPick()" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 font-bold py-2 px-3 rounded-lg text-[11px] transition">
+              Run now
+            </button>
+            <button onclick="saveAutoPick()" class="bg-[#3b8fc4] hover:bg-[#4fa3d8] font-bold py-2 px-4 rounded-lg text-xs transition">
+              Save
             </button>
           </span>
         </div>
@@ -995,6 +1035,13 @@
         if (data.success) {
           activeUser = { uuid, password, ...data };
           document.getElementById('active-uuid-display').textContent = uuid;
+          // Seeded before the panel is ever opened, so the ticks it shows
+          // are the account's own settings rather than an empty draft
+          // that a Save would then wipe.
+          autoPickDraft = {
+            networks: [...((data.autoPick && data.autoPick.networks) || [])],
+            rules: (data.autoPick && data.autoPick.rules) || {},
+          };
           applyConnectionType();
           showView('dashboard');
 
@@ -2571,6 +2618,292 @@
       } catch (err) {
         showStatus(`Could not reach the server: ${err.message}`, true);
       }
+    }
+
+    // ---------------------------------------------------------------
+    // Auto-pick
+    // ---------------------------------------------------------------
+    //
+    // Held here while the panel is open and written only on Save or Run
+    // now, like the panels above it. That matters more here than
+    // anywhere else on this screen: these settings decide what an
+    // unattended job writes into the account's links, so half-typed
+    // rules must never be live.
+
+    let autoPickData = null;                    // the last server response
+    let autoPickDraft = { networks: [], rules: {} };
+    const autoPickExpanded = {};                // key -> rules shown
+
+    const AUTO_PICK_FIELDS = [
+      ['include', 'Match', 'A channel whose name carries any of these'],
+      ['exclude', 'Never', 'Disqualifies a channel outright, whatever else matches'],
+      ['groups', 'Groups', 'Playlist groups whose channels count regardless of name'],
+    ];
+
+    function toggleAutoPickPanel() {
+      const panel = document.getElementById('autopick-panel');
+      if (!panel) return;
+      const opening = panel.classList.contains('hidden');
+      panel.classList.toggle('hidden', !opening);
+      if (opening) loadAutoPick();
+    }
+
+    // Preview, and the thing every other button here is measured against.
+    //
+    // Every network is previewed, whether or not it is ticked. Deciding
+    // which sections to hand over is the whole question this panel exists
+    // to answer, and a row that says "not previewed" until you turn it on
+    // has the order backwards.
+    async function loadAutoPick(action) {
+      const body = document.getElementById('autopick-body');
+      const note = document.getElementById('autopick-status');
+      body.innerHTML = '<p class="text-[11px] text-[#e6e6e6]/40 italic p-2">Reading the published data...</p>';
+
+      let data;
+      try {
+        const res = await fetch('/api/networks/autopick', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uuid: activeUser.uuid,
+            password: activeUser.password,
+            action: action || 'preview',
+            previewAll: true,
+            networks: autoPickDraft.networks,
+            rules: autoPickDraft.rules,
+          })
+        });
+        data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          body.innerHTML = '';
+          note.textContent = (data && data.error) || 'Could not read the auto-pick data.';
+          return null;
+        }
+      } catch (err) {
+        body.innerHTML = '';
+        note.textContent = `Could not reach the server: ${err.message}`;
+        return null;
+      }
+
+      autoPickData = data;
+      // The draft is NOT re-seeded from the response here. It is filled in
+      // once at login, and re-reading the saved list on every preview
+      // would undo an untick the moment the panel refreshed - which is
+      // exactly what unticking triggers.
+      renderAutoPick();
+      return data;
+    }
+
+    function autoPickRules(key) {
+      const edited = autoPickDraft.rules[key];
+      const base = (autoPickData && autoPickData.rules[key]) || { include: [], exclude: [], groups: [] };
+      return { ...base, ...(edited || {}) };
+    }
+
+    function autoPickResult(key) {
+      return ((autoPickData && autoPickData.results) || []).find(r => r.networkKey === key) || null;
+    }
+
+    function renderAutoPick() {
+      const body = document.getElementById('autopick-body');
+      const note = document.getElementById('autopick-status');
+      const summary = document.getElementById('autopick-summary');
+      if (!autoPickData) return;
+
+      if (!autoPickData.provider) {
+        note.innerHTML = 'No provider is named for this account, so nothing has been measured. ' +
+          'Pick one under <strong>Quality data</strong> first &mdash; auto-pick has nothing to judge without it.';
+        body.innerHTML = '';
+        summary.textContent = '';
+        return;
+      }
+      if (!autoPickData.loaded) {
+        note.textContent = `The published data for ${autoPickData.provider} has not loaded yet. Try again in a moment.`;
+        body.innerHTML = '';
+        summary.textContent = '';
+        return;
+      }
+
+      const last = autoPickData.lastRun
+        ? `Last run ${new Date(autoPickData.lastRun).toLocaleString()}` +
+          (autoPickData.lastRunDate ? ` from the ${autoPickData.lastRunDate} sweep.` : '.')
+        : 'Has not run yet.';
+      note.textContent = `${autoPickData.provider}, sweep ${autoPickData.runDate || 'unknown'}. ${last}`;
+
+      const keys = Object.keys(autoPickData.rules);
+      body.innerHTML = `<div class="space-y-1.5 max-h-[28rem] overflow-y-auto pr-1">` +
+        keys.map(buildAutoPickRow).join('') + '</div>';
+
+      // Counted over the TICKED networks only. Every network is previewed
+      // now, so counting them all would promise changes to sections that
+      // are not handed over and would not be touched.
+      const on = autoPickDraft.networks.length;
+      const changing = ((autoPickData.results) || [])
+        .filter(r => autoPickDraft.networks.includes(r.networkKey) && r.changed && r.picks.length).length;
+      summary.textContent = `${on} network${on === 1 ? '' : 's'} on auto-pick` +
+        (changing ? ` · ${changing} would change now` : ' · nothing would change right now');
+    }
+
+    function buildAutoPickRow(key) {
+      const label = (autoPickData.labels || {})[key] || key;
+      const on = autoPickDraft.networks.includes(key);
+      const result = autoPickResult(key);
+      const open = !!autoPickExpanded[key];
+
+      // The counts are the explanation. "Nothing picked" reads completely
+      // differently when it is 290 candidates all dead than when the rules
+      // matched nothing at all, and only the second is a rule to fix.
+      let detail = '<span class="text-[#e6e6e6]/35 italic">not previewed</span>';
+      if (result) {
+        const r = result.rejected;
+        const bits = [`${result.considered} candidate${result.considered === 1 ? '' : 's'}`];
+        if (r.notAlive) bits.push(`${r.notAlive} dead`);
+        if (r.slow) bits.push(`${r.slow} under ${autoPickData.minFps}fps`);
+        if (r.unmeasured) bits.push(`${r.unmeasured} unmeasured`);
+        detail = `<span class="${result.picks.length ? 'text-[#7fc98a]' : 'text-[#e0a355]'}">` +
+          `${result.picks.length} pick${result.picks.length === 1 ? '' : 's'}</span>` +
+          `<span class="text-[#e6e6e6]/35"> · ${bits.join(' · ')}</span>` +
+          (result.usedSlow ? '<span class="text-[#e0a355]"> · fell back to 30fps</span>' : '') +
+          // Worded off whether the network is actually handed over. On an
+          // unticked row these picks are an offer, not something about to
+          // happen, and "would change" reads like a promise.
+          (result.changed && result.picks.length
+            ? `<span class="text-[#5aa8d1]"> · ${on ? 'would change' : 'differs from your links'}</span>`
+            : '');
+      }
+
+      return `
+        <div class="bg-[#2f3e47] border border-[#e6e6e6]/10 rounded-lg">
+          <div class="flex items-center gap-2 px-2.5 py-2">
+            <input type="checkbox" ${on ? 'checked' : ''} onchange="toggleAutoPickNetwork('${key}')"
+                   class="accent-[#3b8fc4] shrink-0">
+            <span class="text-xs font-bold w-32 shrink-0">${escapeHtml(label)}</span>
+            <span class="text-[11px] flex-1 min-w-0 truncate">${detail}</span>
+            <button onclick="toggleAutoPickRules('${key}')"
+                    class="text-[11px] font-bold text-[#5aa8d1] hover:text-[#6bb5dd] shrink-0 px-1">
+              ${open ? 'Hide' : 'Rules'}
+            </button>
+          </div>
+          ${open ? buildAutoPickDetail(key, result) : ''}
+        </div>`;
+    }
+
+    function buildAutoPickDetail(key, result) {
+      const rules = autoPickRules(key);
+
+      const fields = AUTO_PICK_FIELDS.map(([field, title, hint]) => `
+        <div>
+          <div class="flex items-baseline gap-2 mb-1">
+            <span class="text-[11px] font-bold text-[#e6e6e6]/70">${title}</span>
+            <span class="text-[10px] text-[#e6e6e6]/35">${hint}</span>
+          </div>
+          <div class="flex flex-wrap gap-1.5 mb-1.5">
+            ${(rules[field] || []).length === 0
+              ? '<span class="text-[11px] text-[#e6e6e6]/35 italic">none</span>'
+              : rules[field].map((term, i) => `
+                <span class="flex items-center gap-1.5 bg-[#3b4d58] border border-[#e6e6e6]/15 rounded-lg pl-2.5 pr-1.5 py-0.5">
+                  <span class="text-[11px]">${escapeHtml(term)}</span>
+                  <button onclick="removeAutoPickTerm('${key}', '${field}', ${i})" title="Remove"
+                          class="text-[#e56a6a]/70 hover:text-[#e56a6a] text-[11px] px-1 leading-none">&times;</button>
+                </span>`).join('')}
+          </div>
+          <div class="flex gap-1.5">
+            <input type="text" id="autopick-${field}-${key}"
+                   onkeydown="if(event.key==='Enter'){event.preventDefault();addAutoPickTerm('${key}','${field}');}"
+                   placeholder="Add a term..."
+                   class="flex-1 min-w-0 bg-[#3b4d58] border border-[#e6e6e6]/15 rounded-lg px-2.5 py-1 text-[11px] focus:border-[#3b8fc4] focus:outline-none">
+            <button onclick="addAutoPickTerm('${key}','${field}')"
+                    class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 text-[11px] font-bold py-1 px-2.5 rounded-lg transition shrink-0">Add</button>
+          </div>
+        </div>`).join('');
+
+      const picks = !result ? '' : `
+        <div class="mt-3">
+          <div class="text-[11px] font-bold text-[#e6e6e6]/70 mb-1">What it would pick</div>
+          ${result.picks.length === 0
+            ? '<p class="text-[11px] text-[#e6e6e6]/35 italic">Nothing, so this network would keep the channels it has.</p>'
+            : result.picks.map((p, i) => `
+              <div class="flex items-baseline gap-2 py-0.5">
+                <span class="text-[10px] text-[#e6e6e6]/35 w-4 shrink-0">${i + 1}</span>
+                <span class="text-[11px] flex-1 min-w-0 truncate">${escapeHtml(p.name)}</span>
+                <span class="text-[10px] text-[#e6e6e6]/45 shrink-0">${escapeHtml(p.band)}</span>
+                <span class="text-[10px] text-[#7fc98a] shrink-0 w-32 text-right truncate">${escapeHtml(p.probedQuality || '')}</span>
+              </div>`).join('')}
+        </div>`;
+
+      return `<div class="px-2.5 pb-2.5 pt-1 border-t border-[#e6e6e6]/10 space-y-3">${fields}${picks}</div>`;
+    }
+
+    function toggleAutoPickRules(key) {
+      autoPickExpanded[key] = !autoPickExpanded[key];
+      renderAutoPick();
+    }
+
+    // A local redraw only. Every network was previewed when the panel
+    // opened, so ticking one changes what will be WRITTEN, not what was
+    // found - and going back to the server for an answer already on
+    // screen would put a second's delay on a checkbox.
+    function toggleAutoPickNetwork(key) {
+      const at = autoPickDraft.networks.indexOf(key);
+      if (at >= 0) autoPickDraft.networks.splice(at, 1);
+      else autoPickDraft.networks.push(key);
+      renderAutoPick();
+    }
+
+    function addAutoPickTerm(key, field) {
+      const input = document.getElementById(`autopick-${field}-${key}`);
+      const term = (input.value || '').trim();
+      if (term.length < 2) { showStatus('A term needs at least two characters.', true); return; }
+
+      const rules = autoPickRules(key);
+      if ((rules[field] || []).some(t => t.toLowerCase() === term.toLowerCase())) {
+        showStatus('That term is already there.', true);
+        return;
+      }
+      autoPickDraft.rules[key] = { ...autoPickDraft.rules[key], [field]: [...(rules[field] || []), term] };
+      input.value = '';
+      loadAutoPick();
+    }
+
+    function removeAutoPickTerm(key, field, index) {
+      const rules = autoPickRules(key);
+      const next = [...(rules[field] || [])];
+      next.splice(index, 1);
+      autoPickDraft.rules[key] = { ...autoPickDraft.rules[key], [field]: next };
+      loadAutoPick();
+    }
+
+    async function saveAutoPick() {
+      const data = await loadAutoPick('save');
+      if (!data) return;
+      activeUser.autoPick = { networks: data.enabled, rules: autoPickDraft.rules };
+      showStatus(data.enabled.length
+        ? `Auto-pick on for ${data.enabled.length} network${data.enabled.length === 1 ? '' : 's'}. ` +
+          'They will be re-chosen when your provider publishes its next sweep.'
+        : 'Auto-pick is off for every network.');
+    }
+
+    // Runs it against the sweep already in hand, rather than waiting for
+    // the next one.
+    //
+    // Saves first, deliberately. A run writes what is stored - that is
+    // what the scheduled job will use too - so running without saving
+    // would act on rules different from the ones on screen. Pressing this
+    // means "do this", and this is what is on screen.
+    async function runAutoPick() {
+      if (!(await loadAutoPick('save'))) return;
+      const data = await loadAutoPick('apply');
+      if (!data) return;
+
+      if (!data.applied.length) {
+        showStatus('Nothing to change - every network on auto-pick already has its best channels.');
+        return;
+      }
+      const names = data.applied.map(a => `${a.label} (${a.count})`).join(', ');
+      showStatus(`Updated ${names}.`);
+      // The links on screen were drawn from the account as it was before
+      // the run, so they are now a version behind what was just written.
+      loadNetworkLinks();
     }
 
     // Every category the provider offers, and the subset this account

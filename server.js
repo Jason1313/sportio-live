@@ -10,6 +10,7 @@ const m3u = require('./m3u.js');
 const networks = require('./networks.js');
 const quality = require('./quality.js');
 const streamcheck = require('./streamcheck.js');
+const autopick = require('./autopick.js');
 const posters = require('./posters.js');
 const wrestling = require('./wrestling.js');
 
@@ -1480,6 +1481,118 @@ app.post('/api/networks/search-terms/save', async (req, res) => {
   await saveUserConfigs();
 
   return res.json({ success: true, searchTerms: readSearchTerms(auth.user) });
+});
+
+// Auto-pick: preview it, change its settings, or run it now.
+//
+// One endpoint with an action rather than three, because all three need
+// the same expensive setup - an authenticated account with its playlist
+// resolved - and preview is what the other two are judged against.
+app.post('/api/networks/autopick', async (req, res) => {
+  const auth = await authenticateForChannels(req, res);
+  if (!auth) return;
+
+  const user = auth.user;
+  const action = req.body.action || 'preview';
+  const provider = user.streamcheckProvider || '';
+
+  // Asked for explicitly here rather than left to whatever happens to be
+  // in memory. Everything on this screen is a judgement about published
+  // readings, and a page that quietly showed "no data" because nobody had
+  // triggered a load yet would be telling the user something false about
+  // their provider.
+  if (provider && !streamcheck.isLoaded(provider)) {
+    await streamcheck.ensureProvider(provider);
+  }
+
+  if (action === 'save') {
+    user.autoPick = {
+      ...readAutoPick({ autoPick: req.body }),
+      lastRun: readAutoPick(user).lastRun,
+      lastRunDate: readAutoPick(user).lastRunDate,
+    };
+    await saveUserConfigs();
+  }
+
+  // The category filter applies, the quality filter does not.
+  //
+  // channelsForSearch would hide anything the account's own published
+  // filter rejects, and auto-pick is the tool for choosing between
+  // published readings - running it over a list already narrowed by them
+  // would mean a filter set to "1080p60 only" made 1080p60 the only thing
+  // auto-pick could ever find, and then reported that as a finding.
+  const selected = Array.isArray(user.searchCategories) ? user.searchCategories : [];
+  const channels = selected.length
+    ? auth.source.channels.filter(c => (c.categories || []).some(cat => selected.includes(cat)))
+    : auth.source.channels;
+
+  // The dashboard asks about every network, not only the ones already
+  // enabled: "which of these should I hand over" is the question the panel
+  // exists to answer, and it cannot be answered by a row reading "not
+  // previewed". Affordable because a full pass over a 57,000-channel
+  // playlist is under a second - it was six until the rule terms stopped
+  // being re-split for every channel.
+  const asked = req.body.previewAll
+    ? autopick.autoPickableNetworks()
+    : (Array.isArray(req.body.networks)
+      ? req.body.networks.filter(k => typeof k === 'string' && autopick.DEFAULT_RULES[k])
+      : []);
+
+  let outcome;
+  if (action === 'apply') {
+    // No rules override. An apply writes to the account, and it writes
+    // what was saved and reviewed - not whatever is half-typed in a text
+    // box. The dashboard saves before it runs, so the two never disagree
+    // on screen.
+    outcome = applyAutoPick(user, channels, { networks: asked });
+    if (outcome.applied && outcome.applied.length > 0) {
+      user.autoPick = {
+        ...readAutoPick(user),
+        lastRun: new Date().toISOString(),
+        lastRunDate: streamcheckRunDate(provider),
+      };
+      await saveUserConfigs();
+    }
+  } else {
+    // An absent `rules` means "use what is saved", NOT "use no
+    // overrides". The two look identical once normalised - both arrive as
+    // an empty object - and reading them the same way made a preview that
+    // omitted the field silently answer for the DEFAULT rules while the
+    // account had its own saved. That is the one thing this endpoint must
+    // never do: the preview's whole job is to show what the unattended
+    // run will do.
+    const sentRules = req.body.rules && typeof req.body.rules === 'object'
+      && !Array.isArray(req.body.rules);
+
+    outcome = computeAutoPick(user, channels, {
+      networks: asked,
+      rules: sentRules ? readAutoPick({ autoPick: req.body }).rules : undefined,
+    });
+  }
+
+  const settings = readAutoPick(user);
+
+  return res.json({
+    success: true,
+    provider,
+    loaded: !!provider && streamcheck.isLoaded(provider),
+    runDate: streamcheckRunDate(provider),
+    enabled: settings.networks,
+    lastRun: settings.lastRun,
+    lastRunDate: settings.lastRunDate,
+    // The rules as they will actually be applied - defaults with the
+    // account's edits already folded in - so the dashboard renders one
+    // set of terms rather than two the user has to reconcile.
+    rules: Object.fromEntries(autopick.autoPickableNetworks()
+      .map(key => [key, autopick.rulesFor(key, settings.rules)])),
+    labels: Object.fromEntries(autopick.autoPickableNetworks()
+      .map(key => [key, networks.getNetworkLabel(key)])),
+    bands: autopick.BANDS.map(b => b.name),
+    minFps: autopick.MIN_FPS,
+    ready: outcome.ready,
+    results: outcome.results,
+    applied: outcome.applied || [],
+  });
 });
 
 // A promotion's card. Drawn from its name and number, with no artwork
@@ -3723,6 +3836,216 @@ function configuredUrlsFor(user) {
   return urls;
 }
 
+// ---------------------------------------------------------------------
+// Auto-pick
+// ---------------------------------------------------------------------
+//
+// Re-choosing a network's channels from the newest published sweep.
+//
+// The rules and the ladder live in autopick.js, which knows nothing about
+// accounts, caches or HTTP. This is the part that joins them to one
+// user's playlist and one provider's readings, and decides what is
+// allowed to be written where.
+
+const AUTO_PICK_LIMIT = 5;
+
+// Which networks an account has handed over, and any rule text it has
+// edited. Normalised on read rather than trusted, like every other stored
+// preference here: this drives what gets WRITTEN into an account's links,
+// so a bad shape must fail at the boundary and not halfway through a
+// scheduled run that nobody is watching.
+function readAutoPick(user) {
+  const raw = (user && user.autoPick) || {};
+  const pickable = new Set(autopick.autoPickableNetworks());
+
+  const networksOn = Array.isArray(raw.networks)
+    ? [...new Set(raw.networks.filter(k => typeof k === 'string' && pickable.has(k)))]
+    : [];
+
+  const rules = {};
+  if (raw.rules && typeof raw.rules === 'object' && !Array.isArray(raw.rules)) {
+    const terms = (v) => (Array.isArray(v)
+      ? v.filter(t => typeof t === 'string' && t.trim()).map(t => t.trim()).slice(0, 60)
+      : undefined);
+    for (const [key, rule] of Object.entries(raw.rules)) {
+      if (!pickable.has(key) || !rule || typeof rule !== 'object') continue;
+      const entry = {};
+      // undefined means "not overridden", which is different from an
+      // empty array meaning "deliberately none" - CW ships with no
+      // exclusions and has to be able to stay that way.
+      if (terms(rule.include) !== undefined) entry.include = terms(rule.include);
+      if (terms(rule.exclude) !== undefined) entry.exclude = terms(rule.exclude);
+      if (terms(rule.groups) !== undefined) entry.groups = terms(rule.groups);
+      if (Object.keys(entry).length > 0) rules[key] = entry;
+    }
+  }
+
+  return {
+    networks: networksOn,
+    rules,
+    lastRun: typeof raw.lastRun === 'string' ? raw.lastRun : '',
+    lastRunDate: typeof raw.lastRunDate === 'string' ? raw.lastRunDate : '',
+  };
+}
+
+// Which sweep the readings in memory came from. Shown beside a pick so a
+// surprising result can be traced to the run that produced it, and stored
+// after a run so a later one can tell whether anything is new.
+function streamcheckRunDate(provider) {
+  const entry = streamcheck.describeCache().find(c => c.provider === provider);
+  return entry ? (entry.runDate || '') : '';
+}
+
+// Readings for one account's provider, in the shape autopick.js expects.
+//
+// Returns null when there is nothing to read from, and every caller
+// treats that as "do not touch anything". Auto-picking without published
+// data would mean replacing links that are known to work with links
+// nothing has ever measured.
+function autoPickReader(user) {
+  const provider = user.streamcheckProvider;
+  if (!provider || !streamcheck.isLoaded(provider)) return null;
+
+  return (channel) => {
+    const url = channel.streamUrl || channel.url;
+    if (!url) return null;
+    const record = streamcheck.lookupCached(provider, networks.streamIdFromUrl(url));
+    if (!record) return null;
+    const measured = qualityFromStreamcheck(record);
+    return {
+      status: record.status || null,
+      height: record.height,
+      fps: record.fps,
+      bpp: measured ? measured.bpp : null,
+      label: measured ? measured.label : '',
+      tier: measured ? measured.tier : null,
+      detail: measured ? describeQuality(measured) : '',
+      runDate: record.runDate || null,
+    };
+  };
+}
+
+// One pick as a stored link, carrying its reading with it.
+//
+// probedQuality is filled in here rather than left for the dashboard to
+// discover, because these links are written by a scheduled run that no
+// one is watching: without it, an account woken up the next morning would
+// show a set of freshly chosen channels with no indication of why any of
+// them was chosen.
+function autoPickEntry(pick) {
+  const channel = pick.channel;
+  return {
+    ...networks.makeLinkEntry({
+      url: channel.streamUrl || channel.url,
+      tvgId: channel.id,
+      name: channel.name,
+      group: (channel.categories || [])[0] || '',
+      streamId: channel.streamId,
+      probedQuality: pick.reading.label || '',
+    }),
+    band: autopick.BANDS[pick.band].name,
+    matchedBy: pick.matchedBy,
+    detail: pick.reading.detail || '',
+    tier: pick.reading.tier || null,
+  };
+}
+
+// What auto-pick would choose for an account, network by network.
+//
+// Nothing is written here. The same function backs the dashboard preview
+// and the scheduled run, so what somebody reviews on screen is what the
+// overnight job will do - there is no second code path that could drift
+// away from the one that was checked.
+function computeAutoPick(user, channels, options = {}) {
+  const settings = readAutoPick(user);
+  const read = autoPickReader(user);
+  const keys = options.networks && options.networks.length
+    ? options.networks.filter(k => autopick.DEFAULT_RULES[k])
+    : settings.networks;
+
+  // Rules being edited but not yet saved. The preview passes them so the
+  // panel answers for the terms on screen; a run never does, because what
+  // runs unattended has to be what was stored and reviewed.
+  const rules = options.rules || settings.rules;
+
+  if (!read) {
+    return { ready: false, reason: 'no-published-data', settings, results: [] };
+  }
+
+  const results = keys.map((key) => {
+    const outcome = autopick.pickForNetwork(key, channels, read, {
+      rules,
+      limit: options.limit || AUTO_PICK_LIMIT,
+    });
+    const current = (user.networkLinks || {})[key] || [];
+    const entries = outcome.picks.map(autoPickEntry);
+
+    // Whether this would actually change anything, compared on stream
+    // identity rather than on the objects. A run that picks the same
+    // channels in the same order is a no-op, and saying so is what stops
+    // a weekly job from looking like it churns an account's links every
+    // time it runs.
+    const before = current.map(l => l.streamId || l.url).join('|');
+    const after = entries.map(l => l.streamId || l.url).join('|');
+
+    return {
+      networkKey: key,
+      label: networks.getNetworkLabel(key),
+      picks: entries,
+      considered: outcome.considered,
+      rejected: outcome.rejected,
+      usedSlow: outcome.usedSlow,
+      currentCount: current.length,
+      changed: before !== after,
+    };
+  });
+
+  return { ready: true, settings, results };
+}
+
+// Writes the picks into the account. Returns what changed.
+//
+// Two refusals worth stating, because both are cases where doing nothing
+// is the correct behaviour and an empty result would otherwise look like
+// a bug:
+//
+//   - A network that found nothing keeps what it has. The stale link
+//     might be dead, but a dead link is still a lead - it names the
+//     channel the account wanted - and an empty section offers nothing at
+//     all. This matters most in exactly the situation that triggers a
+//     run: a sweep that marked half a provider Dead.
+//   - Networks the account has not enabled are never touched, even when
+//     a preview asked about them.
+function applyAutoPick(user, channels, options = {}) {
+  const computed = computeAutoPick(user, channels, options);
+  if (!computed.ready) return { ...computed, applied: [] };
+
+  const enabled = new Set(readAutoPick(user).networks);
+  if (!user.networkLinks) user.networkLinks = {};
+
+  const applied = [];
+  for (const result of computed.results) {
+    if (!enabled.has(result.networkKey)) continue;
+    if (result.picks.length === 0) continue;
+    if (!result.changed) continue;
+
+    const validated = networks.validateNetworkLinks(result.networkKey, result.picks);
+    if (!validated.ok) {
+      console.error(`[Auto-pick] ${result.networkKey}: ${validated.error}`);
+      continue;
+    }
+    user.networkLinks[result.networkKey] = validated.links;
+    applied.push({
+      networkKey: result.networkKey,
+      label: result.label,
+      count: validated.links.length,
+      was: result.currentCount,
+    });
+  }
+
+  return { ...computed, applied };
+}
+
 // The providers the dashboard can choose between, and what this instance
 // currently holds for each.
 app.post('/api/streamcheck/providers', async (req, res) => {
@@ -4035,6 +4358,7 @@ app.post('/api/user/login', async (req, res) => {
     streamcheckProvider: user.streamcheckProvider || '',
     qualityFilter: readQualityFilter(user),
     searchTerms: readSearchTerms(user),
+    autoPick: readAutoPick(user),
     networkLinks: tierNetworkLinks(user.networkLinks),
     savedChannels: (user.savedChannels || []).map(withQualityTier),
     manifestUrl: `/user/${uuid}/manifest.json` 
@@ -5169,6 +5493,84 @@ function scheduleGameCacheWarm() {
   setTimeout(() => { warmGameCaches(); }, 15 * 1000).unref();
 }
 
+// An account's playlist outside a request.
+//
+// The scheduled run has no req to authenticate, so it reaches the same
+// two sources authenticateForChannels does. An M3U playlist is taken from
+// cache only and never fetched: the playlist refresher owns that
+// schedule, and a second thing pulling playlists on its own timer is how
+// a provider starts rate-limiting an account.
+async function channelSourceFor(user) {
+  if (user.connectionType === 'm3u') {
+    const url = user.m3u && user.m3u.playlistUrl;
+    return url ? m3u.getCachedM3USource(url) : null;
+  }
+  if (!user.xtream || !user.xtream.url) return null;
+  return getXtreamChannelSource(user);
+}
+
+// Re-pick every account's channels after a provider publishes a new
+// sweep.
+//
+// This is the point of the whole feature. A sweep is the only event that
+// changes the answer - it is when links that worked last week become
+// known-dead - so the work happens then rather than on a timer of its
+// own, and an account that has handed a network over wakes up to channels
+// chosen from readings taken hours earlier.
+//
+// Deliberately silent when nothing changed. The common case is a run that
+// re-picks the same channels, and a job that announced itself weekly for
+// doing nothing would train its log line to be ignored.
+// Enough of an account's uuid to tell two apart in a log, and not enough
+// to be one. Nothing else here logs a uuid at all - the warmers and the
+// streamcheck scheduler report counts - and a full uuid is half of what
+// signs in to an account and the whole of what addresses its manifest.
+// These lines exist to be pasted into a chat when something looks wrong.
+function accountTag(user) {
+  return String(user.uuid || '').slice(0, 8);
+}
+
+async function autoPickAfterSweep(provider, runDate) {
+  const accounts = Object.values(userConfigs).filter(user =>
+    user.streamcheckProvider === provider && readAutoPick(user).networks.length > 0);
+  if (accounts.length === 0) return;
+
+  let touched = 0;
+  for (const user of accounts) {
+    try {
+      const source = await channelSourceFor(user);
+      if (!source) {
+        console.error(`[Auto-pick] ${accountTag(user)}: no playlist available, leaving links alone.`);
+        continue;
+      }
+
+      // The account's category filter applies here exactly as it does in
+      // the preview, so a scheduled run cannot reach into parts of the
+      // playlist the account has chosen not to browse.
+      const selected = Array.isArray(user.searchCategories) ? user.searchCategories : [];
+      const channels = selected.length
+        ? source.channels.filter(c => (c.categories || []).some(cat => selected.includes(cat)))
+        : source.channels;
+
+      const outcome = applyAutoPick(user, channels);
+      if (!outcome.ready || outcome.applied.length === 0) continue;
+
+      user.autoPick = { ...readAutoPick(user), lastRun: new Date().toISOString(), lastRunDate: runDate || '' };
+      touched++;
+      for (const change of outcome.applied) {
+        console.log(`[Auto-pick] ${accountTag(user)}: ${change.label} now ${change.count} channel(s) (was ${change.was}).`);
+      }
+    } catch (err) {
+      console.error(`[Auto-pick] ${accountTag(user)}: ${err.message}`);
+    }
+  }
+
+  if (touched > 0) {
+    await saveUserConfigs();
+    console.log(`[Auto-pick] ${provider}: updated ${touched} account(s) from run ${runDate || 'unknown'}.`);
+  }
+}
+
 function scheduleStreamcheckRefresh() {
   const nextRun = m3u.computeNextScheduledRun(
     EVERY_DAY, [STREAMCHECK_REFRESH_TIME], STREAMCHECK_REFRESH_TZ);
@@ -5196,9 +5598,11 @@ function scheduleStreamcheckRefresh() {
             console.error(`[Streamcheck scheduler] ${result.provider}: could not be reached, keeping what is held.`);
           } else if (result.firstLoad) {
             console.log(`[Streamcheck scheduler] ${result.provider}: loaded ${result.channels} channels for run ${result.runDate}.`);
+            await autoPickAfterSweep(result.provider, result.runDate);
           } else if (result.updated) {
             console.log(`[Streamcheck scheduler] ${result.provider}: new run ${result.runDate}` +
               ` (was ${result.previousRun}), ${result.channels} channels.`);
+            await autoPickAfterSweep(result.provider, result.runDate);
           } else {
             console.log(`[Streamcheck scheduler] ${result.provider}: still on run ${result.runDate}, nothing downloaded.`);
           }
