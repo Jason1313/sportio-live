@@ -30,10 +30,6 @@
     body .card-title {
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       overflow: hidden; min-height: 2.5rem;
-      /* Restated rather than inherited from the card. The clamp makes this
-         a -webkit-box, which lays its own lines out, and a centred button
-         around it does not reach inside. */
-      text-align: center;
     }
 
     /* A finished event, stood down so a row reads as what is still to
@@ -1305,7 +1301,7 @@
     // still presenting itself as something to watch.
     const now = Date.now();
     document.getElementById('grid').innerHTML = metas.map(m => `
-      <button class="card text-center${metaPhase(m, now) === 2 ? ' finished' : ''}"
+      <button class="card text-left${metaPhase(m, now) === 2 ? ' finished' : ''}"
               onclick="openStreams('${encodeURIComponent(m.id)}')">
         <img class="poster w-full rounded-lg border border-white/10 bg-[#1f2b36] object-cover" loading="lazy"
              style="aspect-ratio: ${m.posterShape === 'square' ? '1 / 1' : '2 / 3'}"
