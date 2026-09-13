@@ -78,6 +78,13 @@
        mobile breakpoint. */
     body.is-ios .row-copy { display: inline-flex; }
 
+    /* And on a Chromebook, for the same kind of reason from the other
+       direction: a Chromebook with no Play Store has no player to address
+       at all, and ChromeOS will not hand a link to a Linux app the way it
+       hands one to an Android app. Copying the address is the only route
+       left there, and a Chromebook is desktop-width. */
+    body.is-chromeos .row-copy { display: inline-flex; }
+
     /* ==================================================================
        Mobile
 
@@ -250,10 +257,10 @@
     device, so pick yours.
   </p>
 
-  <!-- Windows and Android need entirely different mechanisms, not
-       different instructions for one mechanism, so they get a tab each
-       rather than a page of caveats. Android is preselected on an
-       Android device - see showSetupPlatform(). -->
+  <!-- Each platform needs an entirely different mechanism, not different
+       instructions for one mechanism, so they get a tab each rather than
+       a page of caveats. The tab matching the device is preselected - see
+       showSetupPlatform(). -->
   <div id="setup-platform-tabs" class="flex gap-1.5 mb-5"></div>
 
   <!-- Outside both panels on purpose. This one setting decides what every
@@ -364,6 +371,77 @@
         <i class="fa-regular fa-copy mx-0.5"></i> button on any stream row to copy its address, then paste it into
         VLC under <span class="font-semibold">More &rsaquo; New stream</span>. The copy button is on every row on a
         phone regardless, for anything else that will not open.
+      </p>
+      <p class="text-[11px] text-[#e6e6e6]/60 leading-relaxed mt-3">
+        <span class="font-bold text-[#e6e6e6]/80">One thing worth knowing.</span>
+        A stream address contains your IPTV username and password, the same as it does everywhere else in this app.
+        The copy button puts it on the clipboard in full, so treat a pasted link the way you would the credentials
+        themselves.
+      </p>
+    </div>
+  </div>
+
+  <!-- Chromebook. Mechanically the Android tab - ChromeOS resolves the
+       same intent link through the Play Store apps it runs - so this tab
+       exists for what is different around it: the Play Store has to be
+       turned on, some Chromebooks have no Play Store at all, and the one
+       thing a Chromebook cannot do is the Windows helper the page would
+       otherwise hand it. -->
+  <div id="setup-chromeos" class="hidden">
+    <p class="text-xs text-[#e6e6e6]/55 mb-5 leading-relaxed">
+      A Chromebook runs Android apps, and that is what this page uses. There is no script to install and nothing to
+      register &mdash; the <code class="text-[#5aa8d1]">sportio:</code> link under the Windows tab has nowhere to go
+      on ChromeOS, which is why a click there appears to do nothing at all. A stream link names the player it wants
+      inside the link itself, and ChromeOS hands it to the Play Store app of that name.
+    </p>
+
+    <ol class="text-xs text-[#e6e6e6]/70 space-y-5 leading-relaxed">
+      <li>
+        <span class="font-bold text-[#e6e6e6]">1. Install VLC from the Play Store</span>
+        <span class="text-[#e6e6e6]/45">&mdash; the Android app; there is no separate Chromebook build. If the Play
+        Store is not on the shelf, switch it on under
+        <span class="font-semibold text-[#e6e6e6]/70">Settings &rsaquo; Apps &rsaquo; Google Play Store</span>.</span>
+        <div class="mt-2">
+          <a href="https://play.google.com/store/apps/details?id=org.videolan.vlc" target="_blank" rel="noopener"
+             class="inline-flex items-center gap-2 bg-[#3f5460] hover:bg-[#56707d] border border-white/10 text-[11px] font-bold py-1.5 px-3 rounded-lg transition">
+            <i class="fa-brands fa-google-play"></i>VLC on Google Play
+          </a>
+        </div>
+      </li>
+
+      <li>
+        <span class="font-bold text-[#e6e6e6]">2. Check the setting above</span>
+        <span class="text-[#e6e6e6]/45">&mdash; under <span class="font-semibold text-[#e6e6e6]/70">What streams
+        open in</span> this should read <span class="font-semibold text-[#e6e6e6]/70">VLC for Android</span>, which
+        is what a Chromebook picks by default. <span class="font-semibold text-[#e6e6e6]/70">Desktop helper</span>
+        is the one choice that cannot work here.</span>
+      </li>
+
+      <li>
+        <span class="font-bold text-[#e6e6e6]">3. Click any stream</span>
+        <span class="text-[#e6e6e6]/45">&mdash; ChromeOS asks once whether to open it in VLC. Allow it, and it stops
+        asking. VLC shows the channel name while it buffers; if it sits on a black screen for more than a few
+        seconds, that stream is probably down &mdash; use <span class="font-semibold text-[#e6e6e6]/70">Check
+        quality</span> in the picker to find one that is not.</span>
+      </li>
+    </ol>
+
+    <div class="bg-[#1f2b36] border border-white/10 rounded-lg p-4 mt-6">
+      <p class="text-[11px] text-[#e6e6e6]/60 leading-relaxed">
+        <span class="font-bold text-[#e6e6e6]/80">If there is no Play Store.</span>
+        School and work Chromebooks often have Android apps switched off, and
+        <span class="font-semibold text-[#e6e6e6]/70">ChromeOS Flex</span> has none at all.
+        <span class="text-[#c9992e]">A Linux player is not a substitute</span> &mdash; ChromeOS will hand a link to
+        an Android app but not to one in the Linux container, so installing VLC there does not make these links
+        work. Use the <i class="fa-regular fa-copy mx-0.5"></i> button on any stream row instead: it copies the
+        address, and Linux VLC plays it under
+        <span class="font-semibold">Media &rsaquo; Open Network Stream</span>. That button is shown at every window
+        size on a Chromebook for this reason.
+      </p>
+      <p class="text-[11px] text-[#e6e6e6]/60 leading-relaxed mt-3">
+        <span class="font-bold text-[#e6e6e6]/80">Which browser this works in.</span>
+        Chrome, the one ChromeOS comes with. A browser installed into the Linux container follows its own rules and
+        will not reach VLC &mdash; there, the copy button again.
       </p>
       <p class="text-[11px] text-[#e6e6e6]/60 leading-relaxed mt-3">
         <span class="font-bold text-[#e6e6e6]/80">One thing worth knowing.</span>
@@ -704,12 +782,12 @@
     },
     vlc: {
       label: 'VLC for Android',
-      hint: 'Opens VLC directly. Nothing to install but VLC itself.',
+      hint: 'Opens VLC directly - the Play Store app, on Android or a Chromebook. Nothing to install but VLC.',
       platform: 'android'
     },
     choose: {
       label: 'Ask Android',
-      hint: 'Android offers whichever players you have. Useful for MX Player, Just Player and the rest.',
+      hint: 'The device offers whichever players you have. Useful for MX Player, Just Player and the rest.',
       platform: 'android'
     },
     'ios-vlc': {
@@ -726,9 +804,11 @@
 
   // What each platform's links need, said the way it reads in a sentence.
   const PLATFORM_NEEDS = {
-    android: 'an Android browser',
+    android: 'an Android device or a Chromebook',
     ios: 'an iPhone or iPad',
-    desktop: 'a desktop browser'
+    // Not "a desktop browser": a Chromebook is one, and is the device
+    // most likely to be reading this sentence after a click did nothing.
+    desktop: 'Windows and the helper script'
   };
 
   // One line for every target. It used to name the player - "Opening in
@@ -738,6 +818,18 @@
   const PLAY_NOTE = 'Opening in external player.';
 
   const isAndroid = () => /android/i.test(navigator.userAgent);
+
+  // A Chromebook is a desktop browser that resolves Android links.
+  //
+  // It was falling through to `desktop` and being handed sportio: links,
+  // which on ChromeOS reach nothing at all - there is no registry to
+  // write the helper into and no route from Chrome to a Linux app - so
+  // every click did nothing, with no error anywhere to say why. What it
+  // does have is the Play Store: ChromeOS resolves an intent: URI through
+  // the Android apps it is running, so the Android side of this page
+  // already worked here and only the detection did not.
+  const isChromeOS = () => /\bCrOS\b/.test(navigator.userAgent)
+    || (navigator.userAgentData && navigator.userAgentData.platform === 'Chrome OS');
 
   // iPadOS reports itself as a Mac.
   //
@@ -752,10 +844,27 @@
   function devicePlatform() {
     if (isAndroid()) return 'android';
     if (isIOS()) return 'ios';
+    if (isChromeOS()) return 'chromeos';
     return 'desktop';
   }
 
-  const DEFAULT_TARGET_FOR = { android: 'vlc', ios: 'ios-vlc', desktop: 'desktop' };
+  // Which kinds of link a device can actually follow, as against which
+  // kind of device it is. The two came apart with ChromeOS: it follows
+  // Android links while being none of the things an Android device is,
+  // and it is the one platform that cannot follow the desktop helper's
+  // own links. Kept as a table so a device that borrows another's
+  // mechanism is one line rather than a condition threaded through
+  // effectivePlayTarget.
+  const PLATFORM_FOLLOWS = {
+    desktop: ['desktop'],
+    android: ['android'],
+    ios: ['ios'],
+    chromeos: ['android']
+  };
+
+  const DEFAULT_TARGET_FOR = {
+    android: 'vlc', ios: 'ios-vlc', chromeos: 'vlc', desktop: 'desktop'
+  };
 
   let playTarget = localStorage.getItem(PLAY_TARGET_KEY) || DEFAULT_TARGET_FOR[devicePlatform()];
   if (!PLAY_TARGETS[playTarget]) playTarget = 'desktop';
@@ -774,12 +883,19 @@
   // phone still honours it. It simply stops applying where it cannot
   // work.
   function effectivePlayTarget() {
-    const stored = PLAY_TARGETS[playTarget] ? playTarget : 'desktop';
-    // Every target now declares the platform its links can be followed
-    // on, so this is one comparison rather than a condition per target -
-    // which is what stopped it from silently missing the iOS ones when
-    // they were added.
-    return PLAY_TARGETS[stored].platform === devicePlatform() ? stored : 'desktop';
+    const fallback = DEFAULT_TARGET_FOR[devicePlatform()] || 'desktop';
+    const stored = PLAY_TARGETS[playTarget] ? playTarget : fallback;
+    // Every target declares the platform its links can be followed on, so
+    // this is one lookup rather than a condition per target - which is
+    // what stopped it from silently missing the iOS ones when they were
+    // added.
+    //
+    // The fallback is the device's own default rather than the desktop
+    // helper. On a Chromebook the helper is the one thing that cannot
+    // work, so landing on it was landing on the failure this override
+    // exists to prevent.
+    const follows = PLATFORM_FOLLOWS[devicePlatform()] || ['desktop'];
+    return follows.indexOf(PLAY_TARGETS[stored].platform) >= 0 ? stored : fallback;
   }
 
   // An Android intent: URI. VLC's manifest matches a VIEW intent that
@@ -1009,19 +1125,25 @@
   // rather than always landing on Windows: a phone opening this page to
   // three PowerShell listings has to work out that none of it applies
   // before it can find the part that does.
-  let setupPlatform = { android: 'android', ios: 'ios' }[devicePlatform()] || 'windows';
+  let setupPlatform = {
+    android: 'android', ios: 'ios', chromeos: 'chromeos'
+  }[devicePlatform()] || 'windows';
 
   const SETUP_PLATFORMS = [
     { id: 'windows', label: 'Windows', icon: 'fa-brands fa-windows' },
     { id: 'android', label: 'Android', icon: 'fa-brands fa-android' },
+    { id: 'chromeos', label: 'Chromebook', icon: 'fa-brands fa-chrome' },
     { id: 'ios', label: 'iPhone / iPad', icon: 'fa-brands fa-apple' }
   ];
 
   function showSetupPlatform(id) {
     setupPlatform = id;
-    document.getElementById('setup-windows').classList.toggle('hidden', id !== 'windows');
-    document.getElementById('setup-android').classList.toggle('hidden', id !== 'android');
-    document.getElementById('setup-ios').classList.toggle('hidden', id !== 'ios');
+    // Driven off the table above. It used to be a line per panel, and a
+    // fourth platform meant remembering to add a fourth line - the sort
+    // of edit that is silently forgotten and shows up as two panels open
+    // at once.
+    SETUP_PLATFORMS.forEach(p =>
+      document.getElementById(`setup-${p.id}`).classList.toggle('hidden', p.id !== id));
     document.getElementById('setup-platform-tabs').innerHTML = SETUP_PLATFORMS.map(p => `
       <button onclick="showSetupPlatform('${p.id}')"
               class="flex items-center gap-2 text-xs font-bold px-3.5 py-2 rounded-lg border transition ${p.id === id
@@ -1197,6 +1319,7 @@
     // here rather than in CSS because there is no media query for "this
     // is an iPhone", and the iPadOS user agent actively says otherwise.
     document.body.classList.toggle('is-ios', isIOS());
+    document.body.classList.toggle('is-chromeos', isChromeOS());
     renderLogoutButton(false);
     if (!uuid) { show('gate'); return; }
     try {
