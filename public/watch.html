@@ -312,7 +312,9 @@
       <button onclick="copyBox('lua-box','Reconnect script copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
       <p class="text-[#e6e6e6]/45 mt-1">A provider dropping a channel ends playback like a file ending, and mpv falls
       back to its empty window. This puts the same address back on within a few seconds, and keeps trying for as long as
-      the window is open. The player file below already points at it.</p>
+      the window is open. It also holds the picture near live: every stall leaves playback permanently further behind,
+      so any surplus that builds up is played off again at up to 3% fast, which is pitch-corrected and inaudible.
+      The player file below already points at it.</p>
       <pre id="lua-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre max-h-72 overflow-y-auto"></pre>
     </li>
     <li>
@@ -1019,7 +1021,8 @@
   // than served from this app on purpose: the helper only ever runs
   // files already sitting on the machine, and a player argument that
   // pointed at a URL would undo that.
-  const RELOAD_LUA = `-- sportio-reload.lua - put a dropped live stream back on screen.
+  const RELOAD_LUA = `-- sportio-reload.lua - put a dropped live stream back on screen, and
+-- keep it as close to live as it can be held.
 --
 -- A provider closing a stream looks exactly like a file ending:
 -- libavformat returns EOF, mpv fires end-file, and with nothing else
@@ -1048,11 +1051,18 @@ local o = {
     -- past any normal rebuffer and short of a commercial break.
     stall = 20,
     retries = 0, -- 0 = keep trying for as long as the window is open
+
+    governor = true,
+    target = 4,
+    gain = 0.004,
+    max_boost = 0.03,
+    window = 10,
 }
 options.read_options(o, "sportio-reload")
 
 local url, attempts, pending = nil, 0, nil
 local last_pos, still_since = nil, nil
+local samples, set_speed = {}, nil
 
 local function reconnect()
     if not url or pending then return end
@@ -1070,12 +1080,99 @@ local function reconnect()
     end)
 end
 
+-- Hand playback speed back and forget the history. Called wherever the
+-- surplus stops meaning what the governor thinks it means - a pause, a
+-- rebuffer, a different file - so speed is never left raised across a
+-- gap the viewer can see.
+local function ungovern()
+    samples = {}
+    if set_speed and mp.get_property_number("speed") == set_speed then
+        mp.set_property_number("speed", 1.0)
+    end
+    set_speed = nil
+end
+
+-- The latency governor.
+--
+-- Latency only ever ratchets up. Measured against a server bursting 8s
+-- of content on connect and then sending at 1x, a 5s stall left playback
+-- exactly 5.00s further behind live half a minute later and it never
+-- came back. Cache size has nothing to do with it: a 60s readahead and a
+-- 1s readahead sat at the same position to within 0.02s, the large one
+-- simply holding 6.3s in hand where the small one held 1.0s. So the only
+-- route back to live, short of rejoining the channel, is to play the
+-- surplus off - which is what this does, running up to 3% fast while
+-- more than "target" seconds are banked ahead of the picture. Pitch is
+-- corrected by scaletempo2, so commentary sounds normal; the ceiling is
+-- there because speech starts to sound hurried somewhere past it.
+--
+-- It is deliberately slow. At the default gain a second of surplus takes
+-- about half a minute to give back, which over a match is nothing and
+-- within a single play is unnoticeable.
+local function govern()
+    if not o.governor then return end
+
+    local cache = mp.get_property_number("demuxer-cache-duration")
+    if not cache or mp.get_property_bool("paused-for-cache", false) then
+        ungovern()
+        return
+    end
+
+    -- The low-water mark over the last few seconds, not the reading of
+    -- the moment. HLS arrives a whole segment at a time and sags in
+    -- between, so chasing the peak would drain exactly the runway that
+    -- stops the gap between two segments from becoming a stall.
+    samples[#samples + 1] = cache
+    while #samples > o.window do table.remove(samples, 1) end
+    if #samples < o.window then return end
+    local low = samples[1]
+    for _, v in ipairs(samples) do if v < low then low = v end end
+
+    local speed = 1.0
+    if low > o.target then
+        speed = 1 + math.min((low - o.target) * o.gain, o.max_boost)
+    end
+    speed = math.floor(speed * 1000 + 0.5) / 1000
+
+    -- A speed somebody set by hand is theirs. Engage only from 1.0, and
+    -- stand down the moment the current speed is not the one left here,
+    -- rather than fighting the keyboard a tenth of a percent at a time.
+    local now = mp.get_property_number("speed") or 1.0
+    local mine = set_speed or 1.0
+    if math.abs(now - mine) > 0.0005 then
+        set_speed = nil
+        return
+    end
+
+    if math.abs(now - speed) > 0.0005 then
+        mp.set_property_number("speed", speed)
+    end
+    set_speed = speed
+end
+
+local function watch_stall()
+    local pos = mp.get_property_number("time-pos")
+    -- No position means idle or still opening, and end-file owns both.
+    if not pos then return end
+    if not last_pos or pos > last_pos + 0.01 then
+        last_pos, still_since = pos, nil
+        return
+    end
+    still_since = still_since or mp.get_time()
+    if mp.get_time() - still_since >= o.stall then
+        msg.warn("no progress for " .. o.stall .. "s, treating the stream as dead")
+        still_since = nil
+        reconnect()
+    end
+end
+
 mp.register_event("start-file", function()
     -- Read it back rather than trusting the stored copy: a playlist or
     -- a redirect can hand mpv a different address than the one asked
     -- for, and that resolved one is what is actually playing.
     url = mp.get_property("path") or url
     last_pos, still_since = nil, nil
+    ungovern()
 end)
 
 -- Only a file that really opened clears the counter, so a run of
@@ -1093,21 +1190,11 @@ mp.add_periodic_timer(1, function()
     if pending or not url then return end
     if mp.get_property_bool("pause", false) then
         last_pos, still_since = nil, nil
+        ungovern()
         return
     end
-    local pos = mp.get_property_number("time-pos")
-    -- No position means idle or still opening, and end-file owns both.
-    if not pos then return end
-    if not last_pos or pos > last_pos + 0.01 then
-        last_pos, still_since = pos, nil
-        return
-    end
-    still_since = still_since or mp.get_time()
-    if mp.get_time() - still_since >= o.stall then
-        msg.warn("no progress for " .. o.stall .. "s, treating the stream as dead")
-        still_since = nil
-        reconnect()
-    end
+    watch_stall()
+    govern()
 end)
 `;
 
@@ -1128,6 +1215,12 @@ end)
     // anything. idle keeps the process alive and force-window keeps
     // something on screen while it does. mpv.net is already idle, so
     // both are free there.
+    //
+    // One --script only. mpv.net applies command line options after it
+    // has finished loading scripts, so --scripts-append silently loads
+    // nothing at all, and a second --script replaces the first rather
+    // than adding to it - which looks exactly like the script being
+    // broken. Anyone wanting another script has to merge the files.
     const reloadArgs = scripted
       ? ['--idle=yes', '--force-window=yes', `--script=${beside(script, RELOAD_FILENAME)}`]
       : [];
