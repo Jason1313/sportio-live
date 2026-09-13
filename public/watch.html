@@ -301,49 +301,65 @@
 
   <ol id="setup-steps" class="text-xs text-[#e6e6e6]/70 space-y-4 leading-relaxed">
     <li>
-      <span class="font-bold text-[#e6e6e6]"><span class="step-n">1.</span> Save the helper script</span>
-      <span class="text-[#e6e6e6]/45">&mdash; one time only. It contains no player path, so it never needs changing again.</span>
-      <button onclick="copyBox('ps1-box','Script copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
-      <pre id="ps1-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre"></pre>
-    </li>
-    <li id="step-reload">
-      <span class="font-bold text-[#e6e6e6]"><span class="step-n">2.</span> Save the reconnect script</span>
-      <span class="text-[#e6e6e6]/45">as <code id="reload-path-label" class="text-[#5aa8d1]"></code></span>
-      <button onclick="copyBox('lua-box','Reconnect script copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
-      <p class="text-[#e6e6e6]/45 mt-1">A provider dropping a channel ends playback like a file ending, and mpv falls
-      back to its empty window. This puts the same address back on within a few seconds, and keeps trying for as long as
-      the window is open. It also holds the picture near live: every stall leaves playback permanently further behind,
-      so any surplus that builds up is played off again at up to 3% fast, which is pitch-corrected and inaudible.
-      The player file below already points at it.</p>
-      <pre id="lua-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre max-h-72 overflow-y-auto"></pre>
+      <span class="font-bold text-[#e6e6e6]">1. Save the setup script</span>
+      <span class="text-[#e6e6e6]/45">as <code id="setup-path-label" class="text-[#5aa8d1]"></code></span>
+      <button onclick="copyBox('setup-box','Setup script copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
+      <p class="text-[#e6e6e6]/45 mt-1">It writes every file it needs and registers the link handler itself. Nothing
+      here wants administrator rights &mdash; the protocol goes under <code>HKEY_CURRENT_USER</code>.</p>
+      <pre id="setup-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre max-h-96 overflow-y-auto"></pre>
     </li>
     <li>
-      <span class="font-bold text-[#e6e6e6]"><span class="step-n">3.</span> Save the player file</span>
-      <span class="text-[#e6e6e6]/45">as <code id="config-path-label" class="text-[#5aa8d1]"></code></span>
-      <button onclick="copyBox('cfg-box','Player file copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
-      <p class="text-[#c9992e] mt-1">This is the only file to change when you want a different player.</p>
-      <pre id="cfg-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre"></pre>
+      <span class="font-bold text-[#e6e6e6]">2. Run it once</span>
+      <span class="text-[#e6e6e6]/45">&mdash; paste this into any PowerShell window. Running it again later is safe.</span>
+      <button onclick="copyBox('run-box','Command copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
+      <pre id="run-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre"></pre>
     </li>
     <li>
-      <span class="font-bold text-[#e6e6e6]"><span class="step-n">4.</span> Register the link handler</span>
-      <span class="text-[#e6e6e6]/45">&mdash; save as <code>sportio.reg</code> and double-click. Writes to
-      <code>HKEY_CURRENT_USER</code> only, so no administrator rights are needed. One time only.</span>
-      <button onclick="copyBox('reg-box','Registry file copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
-      <pre id="reg-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre"></pre>
-    </li>
-    <li>
-      <span class="font-bold text-[#e6e6e6] step-n">5.</span> Click any stream. Your browser will ask once whether to open it &mdash;
+      <span class="font-bold text-[#e6e6e6]">3.</span> Click any stream. Your browser will ask once whether to open it &mdash;
       tick &ldquo;always allow&rdquo; and it will not ask again.
     </li>
   </ol>
 
-  <p class="text-[11px] text-[#e6e6e6]/45 mt-6 leading-relaxed border-t border-white/10 pt-4">
-    <span class="font-bold text-[#c9992e]">Already set this up before?</span>
-    The earliest version of <code>sportio-play.ps1</code> had the player path written into it, so editing the field above
-    did nothing to an installed copy. Re-save that script and add <code>sportio-player.txt</code>, and the player will
-    follow this page from then on. The registry entry is unchanged, and dropping in
-    <code>sportio-reload.lua</code> needs nothing else re-saved except the player file that names it.
-  </p>
+  <details class="mt-6 border-t border-white/10 pt-4">
+    <summary class="text-xs font-bold text-[#e6e6e6]/70 cursor-pointer hover:text-[#e6e6e6]">
+      What it writes, if you would rather place the files yourself
+    </summary>
+    <div class="mt-4 space-y-5 text-xs text-[#e6e6e6]/70 leading-relaxed">
+      <div>
+        <span class="font-bold text-[#e6e6e6]">The handler</span>
+        <span class="text-[#e6e6e6]/45">&mdash; <code id="ps1-path-label" class="text-[#5aa8d1]"></code>. Holds no
+        player path, so it never needs changing again.</span>
+        <button onclick="copyBox('ps1-box','Script copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
+        <pre id="ps1-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre max-h-72 overflow-y-auto"></pre>
+      </div>
+      <div id="file-reload">
+        <span class="font-bold text-[#e6e6e6]">The reconnect script</span>
+        <span class="text-[#e6e6e6]/45">&mdash; <code id="reload-path-label" class="text-[#5aa8d1]"></code></span>
+        <button onclick="copyBox('lua-box','Reconnect script copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
+        <p class="text-[#e6e6e6]/45 mt-1">A provider dropping a channel ends playback like a file ending, and mpv falls
+        back to its empty window. This puts the same address back on within a few seconds, and keeps trying for as long
+        as the window is open. It also holds the picture near live: every stall leaves playback permanently further
+        behind, so any surplus that builds up is played off again at up to 3% fast, which is pitch-corrected and
+        inaudible.</p>
+        <pre id="lua-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre max-h-72 overflow-y-auto"></pre>
+      </div>
+      <div>
+        <span class="font-bold text-[#e6e6e6]">The player file</span>
+        <span class="text-[#e6e6e6]/45">&mdash; <code id="config-path-label" class="text-[#5aa8d1]"></code></span>
+        <button onclick="copyBox('cfg-box','Player file copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
+        <p class="text-[#c9992e] mt-1">This is the only file to change when you want a different player. Setup keeps a
+        copy of yours as <code>.bak</code> before replacing it.</p>
+        <pre id="cfg-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre"></pre>
+      </div>
+      <div>
+        <span class="font-bold text-[#e6e6e6]">The link handler registration</span>
+        <span class="text-[#e6e6e6]/45">&mdash; save as <code>sportio.reg</code> and double-click, if you are doing
+        this by hand rather than running the script above.</span>
+        <button onclick="copyBox('reg-box','Registry file copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
+        <pre id="reg-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre"></pre>
+      </div>
+    </div>
+  </details>
   </div>
 
   <!-- Android. No helper script and nothing to register: an intent link
@@ -1002,11 +1018,27 @@
   // choice local means a link can only ever start the player you configured.
   const CONFIG_FILENAME = 'sportio-player.txt';
   const RELOAD_FILENAME = 'sportio-reload.lua';
+  const SETUP_FILENAME = 'sportio-setup.ps1';
+
+  function dirOf(scriptPath) {
+    const cut = Math.max(scriptPath.lastIndexOf('\\'), scriptPath.lastIndexOf('/'));
+    return cut >= 0 ? scriptPath.slice(0, cut) : 'C:\\Users\\Public';
+  }
+
+  function basename(scriptPath) {
+    const cut = Math.max(scriptPath.lastIndexOf('\\'), scriptPath.lastIndexOf('/'));
+    return cut >= 0 ? scriptPath.slice(cut + 1) : scriptPath;
+  }
 
   function beside(scriptPath, filename) {
-    const cut = Math.max(scriptPath.lastIndexOf('\\'), scriptPath.lastIndexOf('/'));
-    const dir = cut >= 0 ? scriptPath.slice(0, cut) : 'C:\\Users\\Public';
-    return `${dir}\\${filename}`;
+    return `${dirOf(scriptPath)}\\${filename}`;
+  }
+
+  // A PowerShell single-quoted literal, which expands nothing at all -
+  // and a Windows path is exactly the sort of string that would
+  // otherwise be read for $variables and backtick escapes.
+  function psQuote(text) {
+    return `'${String(text).replace(/'/g, "''")}'`;
   }
 
   // mpv and mpv.net take --script; VLC and PotPlayer would read it as
@@ -1206,8 +1238,12 @@ end)
   function renderSetupFiles() {
     const script = document.getElementById('script-path').value.trim() || 'C:\\Users\\Public\\sportio-play.ps1';
     const player = document.getElementById('player-path').value.trim() || 'C:\\Program Files\\mpv\\mpv.exe';
+    // A line of "'@" on its own would close the PowerShell here-string
+    // that carries this file inside the setup script, and everything
+    // after it would be read as code. The two constant bodies are ours
+    // to check; this is the only place a reader's own text gets in.
     const extraArgs = document.getElementById('player-args').value
-      .split('\n').map(l => l.trim()).filter(Boolean);
+      .split('\n').map(l => l.trim()).filter(l => l && !l.startsWith("'@"));
 
     const scripted = playerTakesScripts(player);
     // Plain mpv shuts down when the playlist runs out, and would take
@@ -1225,18 +1261,12 @@ end)
       ? ['--idle=yes', '--force-window=yes', `--script=${beside(script, RELOAD_FILENAME)}`]
       : [];
 
+    document.getElementById('ps1-path-label').textContent = script;
     document.getElementById('config-path-label').textContent = beside(script, CONFIG_FILENAME);
     document.getElementById('reload-path-label').textContent = beside(script, RELOAD_FILENAME);
+    document.getElementById('setup-path-label').textContent = beside(script, SETUP_FILENAME);
     document.getElementById('lua-box').textContent = RELOAD_LUA;
-    document.getElementById('step-reload').classList.toggle('hidden', !scripted);
-
-    // Numbered here rather than in the markup: the reconnect step is
-    // only there for mpv, and hiding a hardcoded "2." would leave the
-    // list reading 1, 3, 4, 5.
-    document.querySelectorAll('#setup-steps > li:not(.hidden)').forEach((li, i) => {
-      const n = li.querySelector('.step-n');
-      if (n) n.textContent = `${i + 1}.`;
-    });
+    document.getElementById('file-reload').classList.toggle('hidden', !scripted);
 
     document.getElementById('cfg-box').textContent = [
       '# First non-comment line: full path to the player.',
@@ -1345,6 +1375,117 @@ end)
       `@="${cmd}"`,
       ''
     ].join('\n');
+
+    // The installer is composed from the three boxes above rather than
+    // holding its own copies. They were three listings to save by hand
+    // before this existed, and the risk in keeping both routes is that
+    // they drift - a fix made to the handler and not to the copy inside
+    // the installer would be invisible until somebody reinstalled.
+    const body = id => document.getElementById(id).textContent;
+    // Exactly one trailing newline, whichever box this came from: a
+    // here-string ends at the line before its terminator, so the blank
+    // line this leaves is what puts a final newline in the written file.
+    const here = (name, text) => [`$${name} = @'`, text.replace(/\n*$/, '\n'), "'@", ''];
+
+    document.getElementById('setup-box').textContent = [
+      '# Sportio Live - the whole Windows setup, in one run.',
+      '#',
+      '# Writes the handler script and the player file into one folder,',
+      '# then points the sportio: protocol at the handler. Everything goes',
+      '# under HKEY_CURRENT_USER and your own profile, so no administrator',
+      '# rights are wanted and nobody else signed in to this machine is',
+      '# touched.',
+      '#',
+      '# Running it again is safe and is how you move to a different',
+      '# player: re-copy it from the watch page with the new one chosen.',
+      '# The one file it will not quietly replace is sportio-player.txt,',
+      '# since that is the file you are invited to edit - an existing copy',
+      '# is kept as .bak first.',
+      '',
+      `param([string]$Dir = ${psQuote(dirOf(script))})`,
+      '',
+      '$ErrorActionPreference = "Stop"',
+      '',
+      '# Not Set-Content: in Windows PowerShell it writes the system ANSI',
+      '# codepage by default, and its -Encoding utf8 writes a BOM, which',
+      '# LuaJIT reads as part of the first line and refuses to compile.',
+      'function Write-Utf8($path, $text) {',
+      '  [IO.File]::WriteAllText($path, $text, (New-Object Text.UTF8Encoding($false)))',
+      '}',
+      '',
+      'if (-not (Test-Path -LiteralPath $Dir)) {',
+      '  New-Item -ItemType Directory -Path $Dir -Force | Out-Null',
+      '}',
+      '# .NET keeps its own current directory and it is not PowerShell\'s,',
+      '# so a relative -Dir would write the files somewhere other than',
+      '# where the registry is about to say they are.',
+      '$Dir = (Resolve-Path -LiteralPath $Dir).Path',
+      '',
+      `$playPath = Join-Path $Dir ${psQuote(basename(script))}`,
+      `$configPath = Join-Path $Dir ${psQuote(CONFIG_FILENAME)}`,
+      ...(scripted ? [`$reloadPath = Join-Path $Dir ${psQuote(RELOAD_FILENAME)}`] : []),
+      '',
+      ...here('playScript', body('ps1-box')),
+      ...here('playerFile', body('cfg-box')),
+      ...(scripted ? here('reloadScript', body('lua-box')) : []),
+      'Write-Utf8 $playPath $playScript',
+      'Write-Host "wrote $playPath"',
+      '',
+      ...(scripted ? [
+        'Write-Utf8 $reloadPath $reloadScript',
+        'Write-Host "wrote $reloadPath"',
+        '',
+        '# --script wants an absolute path, and the one written into the',
+        '# player file is wherever the watch page was pointed when this was',
+        '# copied. -Dir may since have put the reconnect script somewhere',
+        '# else, and a stale path here is silent - mpv just carries on',
+        '# without the script, which reads as the reconnecting being broken.',
+        '$playerFile = ($playerFile -split "`n" | ForEach-Object {',
+        '  if ($_ -like "--script=*") { "--script=$reloadPath" } else { $_ }',
+        '}) -join "`n"',
+        ''
+      ] : []),
+      'if (Test-Path -LiteralPath $configPath) {',
+      '  if ([IO.File]::ReadAllText($configPath) -ne $playerFile) {',
+      '    Copy-Item -LiteralPath $configPath -Destination "$configPath.bak" -Force',
+      '    Write-Host "kept the player file you had as $configPath.bak"',
+      '  }',
+      '}',
+      'Write-Utf8 $configPath $playerFile',
+      'Write-Host "wrote $configPath"',
+      '',
+      `$key = "HKCU:\\Software\\Classes\\${PROTOCOL}"`,
+      '$ps = Join-Path $env:SystemRoot "System32\\WindowsPowerShell\\v1.0\\powershell.exe"',
+      '$command = \'"\' + $ps + \'" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "\' + $playPath + \'" "%1"\'',
+      '',
+      'New-Item -Path $key -Force | Out-Null',
+      'Set-ItemProperty -Path $key -Name "(Default)" -Value "URL:Sportio Live"',
+      'Set-ItemProperty -Path $key -Name "URL Protocol" -Value ""',
+      'New-Item -Path "$key\\shell\\open\\command" -Force | Out-Null',
+      'Set-ItemProperty -Path "$key\\shell\\open\\command" -Name "(Default)" -Value $command',
+      `Write-Host "registered ${PROTOCOL}: -> $playPath"`,
+      '',
+      '# Checked here rather than left for the first click. A path that is',
+      '# wrong only shows up as the handler falling back to some other',
+      '# installed player, which reads as the wrong player being chosen on',
+      '# purpose rather than as a typo.',
+      '$player = @(Get-Content -LiteralPath $configPath |',
+      '  ForEach-Object { $_.Trim() } |',
+      '  Where-Object { $_ -and -not $_.StartsWith("#") })[0]',
+      'if (Test-Path -LiteralPath $player) {',
+      '  Write-Host "player found: $player"',
+      '} else {',
+      '  Write-Warning "player not found: $player"',
+      '  Write-Warning "edit $configPath, or re-copy this script with another player chosen"',
+      '}',
+      '',
+      'Write-Host ""',
+      'Write-Host "Done. Click a stream on the watch page - the browser will ask once."',
+      ''
+    ].join('\n');
+
+    document.getElementById('run-box').textContent =
+      `powershell -NoProfile -ExecutionPolicy Bypass -File "${beside(script, SETUP_FILENAME)}"`;
   }
 
   function copyBox(id, msg) {
