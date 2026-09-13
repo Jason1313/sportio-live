@@ -299,37 +299,48 @@
               class="w-full bg-[#16202a] border border-white/15 rounded px-3 py-2 text-xs font-mono focus:border-[#3b8fc4] focus:outline-none"></textarea>
   </div>
 
-  <ol class="text-xs text-[#e6e6e6]/70 space-y-4 leading-relaxed">
+  <ol id="setup-steps" class="text-xs text-[#e6e6e6]/70 space-y-4 leading-relaxed">
     <li>
-      <span class="font-bold text-[#e6e6e6]">1. Save the helper script</span>
+      <span class="font-bold text-[#e6e6e6]"><span class="step-n">1.</span> Save the helper script</span>
       <span class="text-[#e6e6e6]/45">&mdash; one time only. It contains no player path, so it never needs changing again.</span>
       <button onclick="copyBox('ps1-box','Script copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
       <pre id="ps1-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre"></pre>
     </li>
+    <li id="step-reload">
+      <span class="font-bold text-[#e6e6e6]"><span class="step-n">2.</span> Save the reconnect script</span>
+      <span class="text-[#e6e6e6]/45">as <code id="reload-path-label" class="text-[#5aa8d1]"></code></span>
+      <button onclick="copyBox('lua-box','Reconnect script copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
+      <p class="text-[#e6e6e6]/45 mt-1">A provider dropping a channel ends playback like a file ending, and mpv falls
+      back to its empty window. This puts the same address back on within a few seconds, and keeps trying for as long as
+      the window is open. The player file below already points at it.</p>
+      <pre id="lua-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre max-h-72 overflow-y-auto"></pre>
+    </li>
     <li>
-      <span class="font-bold text-[#e6e6e6]">2. Save the player file</span>
+      <span class="font-bold text-[#e6e6e6]"><span class="step-n">3.</span> Save the player file</span>
       <span class="text-[#e6e6e6]/45">as <code id="config-path-label" class="text-[#5aa8d1]"></code></span>
       <button onclick="copyBox('cfg-box','Player file copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
       <p class="text-[#c9992e] mt-1">This is the only file to change when you want a different player.</p>
       <pre id="cfg-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre"></pre>
     </li>
     <li>
-      <span class="font-bold text-[#e6e6e6]">3. Register the link handler</span>
+      <span class="font-bold text-[#e6e6e6]"><span class="step-n">4.</span> Register the link handler</span>
       <span class="text-[#e6e6e6]/45">&mdash; save as <code>sportio.reg</code> and double-click. Writes to
       <code>HKEY_CURRENT_USER</code> only, so no administrator rights are needed. One time only.</span>
       <button onclick="copyBox('reg-box','Registry file copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
       <pre id="reg-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre"></pre>
     </li>
     <li>
-      <span class="font-bold text-[#e6e6e6]">4.</span> Click any stream. Your browser will ask once whether to open it &mdash;
+      <span class="font-bold text-[#e6e6e6] step-n">5.</span> Click any stream. Your browser will ask once whether to open it &mdash;
       tick &ldquo;always allow&rdquo; and it will not ask again.
     </li>
   </ol>
 
   <p class="text-[11px] text-[#e6e6e6]/45 mt-6 leading-relaxed border-t border-white/10 pt-4">
     <span class="font-bold text-[#c9992e]">Already set this up before?</span>
-    The earlier version of the script had the player path written into it, so editing the field above did nothing to an
-    installed copy. Re-save step 1 and add step 2, and the player will follow this page from then on. Step 3 is unchanged.
+    The earliest version of <code>sportio-play.ps1</code> had the player path written into it, so editing the field above
+    did nothing to an installed copy. Re-save that script and add <code>sportio-player.txt</code>, and the player will
+    follow this page from then on. The registry entry is unchanged, and dropping in
+    <code>sportio-reload.lua</code> needs nothing else re-saved except the player file that names it.
   </p>
   </div>
 
@@ -988,12 +999,117 @@
   // site run an arbitrary program with an arbitrary argument. Keeping the
   // choice local means a link can only ever start the player you configured.
   const CONFIG_FILENAME = 'sportio-player.txt';
+  const RELOAD_FILENAME = 'sportio-reload.lua';
 
-  function configPathFor(scriptPath) {
+  function beside(scriptPath, filename) {
     const cut = Math.max(scriptPath.lastIndexOf('\\'), scriptPath.lastIndexOf('/'));
     const dir = cut >= 0 ? scriptPath.slice(0, cut) : 'C:\\Users\\Public';
-    return `${dir}\\${CONFIG_FILENAME}`;
+    return `${dir}\\${filename}`;
   }
+
+  // mpv and mpv.net take --script; VLC and PotPlayer would read it as
+  // another file to play. Keyed off the executable name so choosing a
+  // player from the presets above is the whole of the decision - a
+  // checkbox for it would be a second thing to get wrong.
+  function playerTakesScripts(player) {
+    return /(^|[\\/])mpv(net)?\.exe$/i.test(player.trim());
+  }
+
+  // The reconnect script, verbatim. It is offered for copying rather
+  // than served from this app on purpose: the helper only ever runs
+  // files already sitting on the machine, and a player argument that
+  // pointed at a URL would undo that.
+  const RELOAD_LUA = `-- sportio-reload.lua - put a dropped live stream back on screen.
+--
+-- A provider closing a stream looks exactly like a file ending:
+-- libavformat returns EOF, mpv fires end-file, and with nothing else
+-- queued the player falls back to its idle screen - "Drop files or URLs
+-- to play here" on mpv.net. ffmpeg's own reconnect=1 does not cover it:
+-- that retries a request that broke mid-read, not one the server closed
+-- cleanly, and not one that never opened at all.
+--
+-- So the address is remembered and put back. eof and error both retry,
+-- because a channel coming back up goes through a stretch of refused
+-- connections and 5xx first. A stream that freezes with the socket
+-- still open reports neither, and is caught by the watchdog instead.
+
+local mp = require "mp"
+local msg = require "mp.msg"
+local options = require "mp.options"
+
+local o = {
+    delay = 3,
+    -- A provider that is down stays down for minutes, not seconds.
+    -- Quick retries get through a channel restart; past that they are
+    -- only hammering somebody's server, so the interval opens out.
+    slow_delay = 15,
+    fast_for = 30,
+    -- Frames stop arriving long before the socket admits it. 20s is
+    -- past any normal rebuffer and short of a commercial break.
+    stall = 20,
+    retries = 0, -- 0 = keep trying for as long as the window is open
+}
+options.read_options(o, "sportio-reload")
+
+local url, attempts, pending = nil, 0, nil
+local last_pos, still_since = nil, nil
+
+local function reconnect()
+    if not url or pending then return end
+    if o.retries > 0 and attempts >= o.retries then
+        msg.warn("giving up after " .. attempts .. " attempts")
+        return
+    end
+    attempts = attempts + 1
+    local wait = (attempts * o.delay <= o.fast_for) and o.delay or o.slow_delay
+    msg.info(("stream gone, retrying in %ds (attempt %d)"):format(wait, attempts))
+    mp.osd_message(("Stream dropped - reconnecting (%d)"):format(attempts), wait)
+    pending = mp.add_timeout(wait, function()
+        pending = nil
+        mp.commandv("loadfile", url, "replace")
+    end)
+end
+
+mp.register_event("start-file", function()
+    -- Read it back rather than trusting the stored copy: a playlist or
+    -- a redirect can hand mpv a different address than the one asked
+    -- for, and that resolved one is what is actually playing.
+    url = mp.get_property("path") or url
+    last_pos, still_since = nil, nil
+end)
+
+-- Only a file that really opened clears the counter, so a run of
+-- failures keeps backing off instead of dropping to three seconds
+-- again every time mpv tries and fails.
+mp.register_event("file-loaded", function() attempts = 0 end)
+
+mp.register_event("end-file", function(e)
+    -- "stop" is this script's own loadfile, or the viewer picking
+    -- something else; retrying either would fight whoever asked.
+    if e.reason == "eof" or e.reason == "error" then reconnect() end
+end)
+
+mp.add_periodic_timer(1, function()
+    if pending or not url then return end
+    if mp.get_property_bool("pause", false) then
+        last_pos, still_since = nil, nil
+        return
+    end
+    local pos = mp.get_property_number("time-pos")
+    -- No position means idle or still opening, and end-file owns both.
+    if not pos then return end
+    if not last_pos or pos > last_pos + 0.01 then
+        last_pos, still_since = pos, nil
+        return
+    end
+    still_since = still_since or mp.get_time()
+    if mp.get_time() - still_since >= o.stall then
+        msg.warn("no progress for " .. o.stall .. "s, treating the stream as dead")
+        still_since = nil
+        reconnect()
+    end
+end)
+`;
 
   function usePreset(path) {
     document.getElementById('player-path').value = path;
@@ -1006,12 +1122,34 @@
     const extraArgs = document.getElementById('player-args').value
       .split('\n').map(l => l.trim()).filter(Boolean);
 
-    document.getElementById('config-path-label').textContent = configPathFor(script);
+    const scripted = playerTakesScripts(player);
+    // Plain mpv shuts down when the playlist runs out, and would take
+    // the reconnect script down with it before it could reload
+    // anything. idle keeps the process alive and force-window keeps
+    // something on screen while it does. mpv.net is already idle, so
+    // both are free there.
+    const reloadArgs = scripted
+      ? ['--idle=yes', '--force-window=yes', `--script=${beside(script, RELOAD_FILENAME)}`]
+      : [];
+
+    document.getElementById('config-path-label').textContent = beside(script, CONFIG_FILENAME);
+    document.getElementById('reload-path-label').textContent = beside(script, RELOAD_FILENAME);
+    document.getElementById('lua-box').textContent = RELOAD_LUA;
+    document.getElementById('step-reload').classList.toggle('hidden', !scripted);
+
+    // Numbered here rather than in the markup: the reconnect step is
+    // only there for mpv, and hiding a hardcoded "2." would leave the
+    // list reading 1, 3, 4, 5.
+    document.querySelectorAll('#setup-steps > li:not(.hidden)').forEach((li, i) => {
+      const n = li.querySelector('.step-n');
+      if (n) n.textContent = `${i + 1}.`;
+    });
 
     document.getElementById('cfg-box').textContent = [
       '# First non-comment line: full path to the player.',
       '# Any lines after it: extra arguments, one per line, passed before the URL.',
       player,
+      ...reloadArgs,
       ...extraArgs,
       ''
     ].join('\n');
