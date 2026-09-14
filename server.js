@@ -13,6 +13,7 @@ const streamcheck = require('./streamcheck.js');
 const autopick = require('./autopick.js');
 const posters = require('./posters.js');
 const wrestling = require('./wrestling.js');
+const bkfc = require('./bkfc.js');
 
 // Xtream credentials are encrypted at rest in users.json using this key.
 // Must be a 64-character hex string (32 bytes) for AES-256-GCM. Generate one
@@ -791,9 +792,18 @@ const SOCCER_SCHEDULE_DAYS = 7;
 // section to a new promotion is an entry here plus, if it needs its own
 // channels, a networks.PROMOTIONS entry - not a new code path.
 //
-// Dana White's Contender Series is deliberately absent: ESPN has no
-// separate league for it, filing it under ufc. It is separated by name at
-// the promotion layer instead, which is the only signal available.
+// Two promotions in this section are deliberately absent from it.
+//
+// Dana White's Contender Series, because ESPN has no separate league for
+// it and files it under ufc. It is separated by name at the promotion
+// layer instead, which is the only signal available.
+//
+// Bare Knuckle FC, because ESPN does not carry it at all - confirmed
+// against their own MMA leagues index, which lists forty-eight leagues
+// from Pancrase to Shooto Brazil and has no bare-knuckle entry, and the
+// three slugs worth guessing all answer 400. Its schedule is scraped
+// from the promotion instead, and merged into this section by
+// fetchTodayMmaEvents. See bkfc.js.
 //
 // `key` doubles as the artwork key - it must exist in ESPN_ENDPOINTS
 // above (for the league logo) and in SPORT_THEMES (for the landscape
@@ -2118,6 +2128,11 @@ const SPORT_THEMES = {
   LIGUE1: { primary: '#091C3E', secondary: '#DAE021' },
   UFC: { primary: '#000000', secondary: '#D20A0A' },
   PFL: { primary: '#0A0A0A', secondary: '#E4002B' },
+  // The promotion's own red on near-black. It needs a theme more than
+  // the ESPN leagues do: they have a real badge to fetch and this has
+  // none, so the theme and the motif below are the entire identity of a
+  // BKFC card.
+  BKFC: { primary: '#0A0A0A', secondary: '#C8102E' },
   OTHER: { primary: '#1A1A1A', secondary: '#B31217' }
 };
 
@@ -2164,6 +2179,24 @@ function getSportMotif(sportKey, accentColor, opacity) {
           <circle r="60" fill="${accentColor}" opacity="0.5" stroke="none" />
           <line x1="-460" y1="0" x2="-260" y2="0" stroke-width="14" />
           <line x1="260" y1="0" x2="460" y2="0" stroke-width="14" />
+        </g>`;
+    // BKFC's ring and its scratch lines. The promotion fights in a round
+    // ring of four ropes rather than a cage, and the two short lines at
+    // the middle are the thing it is named for - fighters toe them to
+    // start each round.
+    //
+    // It earns a motif where UFC needs none: ESPN serves a real UFC
+    // badge and carries no bare knuckle at all, so this is what the
+    // section's card, its backdrop and its badge are all drawn from.
+    case 'BKFC':
+      return `
+        <g transform="translate(1500,540)" opacity="${o(0.16)}" stroke="${accentColor}" fill="none">
+          <circle r="380" stroke-width="10" />
+          <circle r="352" stroke-width="5" />
+          <circle r="324" stroke-width="5" />
+          <circle r="296" stroke-width="5" />
+          <line x1="-96" y1="-44" x2="96" y2="-44" stroke-width="12" />
+          <line x1="-96" y1="44" x2="96" y2="44" stroke-width="12" />
         </g>`;
     // A pitch seen from above, not a ball: the centre circle, the halfway
     // line and the two penalty areas. Drawn rather than fetched, like
@@ -3406,15 +3439,94 @@ async function fetchTodayLeagueEvents(league, hostUrl, userTimeZone = 'America/N
 // the whole section. A failure is already logged by the fetcher itself
 // and simply contributes no events.
 async function fetchTodayMmaEvents(hostUrl, userTimeZone = 'America/New_York') {
-  const results = await Promise.allSettled(
-    MMA_LEAGUES.map(league => fetchTodayLeagueEvents(league, hostUrl, userTimeZone))
-  );
+  // BKFC rides alongside the ESPN leagues rather than inside them. It is
+  // a promotion in this section like any other and its cards are the same
+  // shape by the time they get here; the only difference is that its
+  // schedule comes from the promotion's own site, because ESPN publishes
+  // none. Settled with the rest so that a slow scrape costs the section
+  // nothing the ESPN leagues were not already costing it.
+  const results = await Promise.allSettled([
+    ...MMA_LEAGUES.map(league => fetchTodayLeagueEvents(league, hostUrl, userTimeZone)),
+    fetchBkfcEvents(hostUrl, userTimeZone),
+  ]);
   const events = results.flatMap(r => (r.status === 'fulfilled' ? r.value : []));
 
   // Nearest first. Without this the list arrives grouped by promotion -
   // every UFC card, then every PFL one - which for a months-long window
   // buries tonight's event somewhere in the middle.
   return sortGamesByRelevance(events);
+}
+
+// Bare Knuckle FC's cards, scraped rather than fetched.
+//
+// Built into the same card shape fetchTodayLeagueEvents produces, because
+// everything downstream - the catalog, the meta route, the stream route,
+// the watch portal's filters - reads one shape and should not learn that
+// this section has two kinds of event in it.
+//
+// The artwork is the MMA poster with BKFC's own theme rather than a
+// bespoke one. A bare-knuckle card sits in a row of UFC and PFL cards and
+// should look like it belongs there; what makes it recognisable is the
+// promotion's red and its ring, which is what SPORT_THEMES.BKFC and
+// getSportMotif('BKFC') are. There is no league badge to fetch, so the
+// poster draws its own mark from the key.
+async function fetchBkfcEvents(hostUrl, userTimeZone) {
+  const events = await bkfc.getEvents();
+
+  return events.map(event => {
+    const iso = event.date.toISOString();
+    const when = formatEventWhen(iso, userTimeZone);
+    const [fighterA, fighterB] = event.fighters;
+
+    // The poster prints the card's name, split into a headline and a
+    // detail line by splitEventName exactly as an ESPN card's is. `date`
+    // rides along purely as a cache key, so the artwork re-renders if a
+    // card is moved.
+    const art = new URLSearchParams({ name: event.name, date: iso }).toString();
+
+    return {
+      // Prefixed so a promotion added later cannot collide with a slug,
+      // but not doubled up when the promotion's own slug already starts
+      // with it - "bkfc-95-newark" would otherwise become
+      // bkfc-bkfc-95-newark.
+      id: 'bkfc-' + event.slug.replace('/events/', '').replace(/^bkfc[\s-]*/i, ''),
+      // Which promotion the stream route should resolve channels for.
+      // Named here rather than inferred from the card's title, because
+      // the promotion's sister billing - "BKFSEA BRUISE CRUISE" - says
+      // neither of the words a title match would look for.
+      league: 'BKFC',
+      name: event.name,
+      // The headline fighters where the promotion has announced them. A
+      // card with none still belongs on the schedule; it just has nothing
+      // for the team-name search to fall back on.
+      homeTeam: fighterA || '', awayTeam: fighterB || '',
+      homeNick: fighterA || '', awayNick: fighterB || '',
+      homeAbbr: '', awayAbbr: '',
+      // Both streaming, so neither resolves to a network slot and the
+      // BKFC bucket is the only thing that can hold a channel for this -
+      // the same position DWCS is in. Measured across four of the
+      // promotion's event pages: every one offers DAZN and the
+      // promotion's own service, and nothing linear.
+      broadcastNames: ['DAZN', 'BKFC+'],
+      nationalBroadcasts: [
+        { name: 'DAZN', type: 'Streaming' },
+        { name: 'BKFC+', type: 'Streaming' },
+      ],
+      network: null,
+      posterShape: 'square',
+      poster: `${hostUrl}/poster/mma/bkfc.svg?${art}`,
+      background: `${hostUrl}/landscape/bkfc.svg`,
+      logo: `${hostUrl}/logo/bkfc.svg`,
+      description: `${when}\n\n${event.name}`
+        + (event.location ? `\n${event.location}` : '')
+        + '\n\nStreams on DAZN and BKFC+.',
+      status: 'Scheduled',
+      state: 'pre',
+      date: iso,
+      whenLabel: when,
+      isToday: isSameLocalDay(iso, userTimeZone),
+    };
+  });
 }
 
 // Single entry point used by the catalog, meta, and stream routes -
@@ -3498,8 +3610,15 @@ async function fetchWrestlingEvents(hostUrl, userTimeZone) {
       // Every card is on Fox Nation and has been since the promotion
       // launched, so there is no per-event broadcast to resolve - it is
       // a fact about the promotion, not about the fixture.
+      //
+      // The two fields are not the same shape, which is easy to miss
+      // because they hold the same fact. broadcastNames is a list of
+      // names; nationalBroadcasts is what resolveNetworkFromCompetition
+      // returns, entries of { name, type }. Written as a bare string
+      // here, the name read back as undefined and a card with no terms
+      // configured offered "Only on " with nothing after it.
       broadcastNames: ['Fox Nation'],
-      nationalBroadcasts: ['Fox Nation'],
+      nationalBroadcasts: [{ name: 'Fox Nation', type: 'Streaming' }],
       network: null,
       // Which bucket in the dashboard holds this card's channels. The
       // wrestling section will hold more than one promotion, so the

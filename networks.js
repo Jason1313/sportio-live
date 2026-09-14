@@ -119,6 +119,18 @@ const NETWORKS = [
   { key: 'DWCS', label: "Dana White's Contender Series", kind: 'hybrid', sport: 'UFC',
     aliases: [] },
 
+  // Bare Knuckle FC, the same shape as DWCS above and for the same
+  // reason: providers carry it both ways. Some list a standing "BKFC"
+  // or "Bare Knuckle TV" channel; others put up a listing named for the
+  // card - "BKFC 95 NEWARK" - that is gone the following week.
+  //
+  // Its cards reach this bucket from a scraped schedule rather than an
+  // ESPN one, which changes nothing here. The promotion claims the
+  // event, the promotion names this bucket, and where the schedule came
+  // from is the fetcher's business. See PROMOTIONS and bkfc.js.
+  { key: 'BKFC', label: 'Bare Knuckle FC', kind: 'hybrid', sport: 'UFC',
+    aliases: [] },
+
   // A search bucket. Like the event bucket above in that it is bound to
   // events rather than to a broadcaster, and unlike it in holding search
   // terms instead of pinned channels.
@@ -690,6 +702,34 @@ const PROMOTIONS = [
     // own that a group filter would only risk excluding the very listing
     // being looked for.
     autoSearch: { terms: ['PFL'] },
+  },
+  {
+    key: 'BKFC',
+    label: 'Bare Knuckle FC',
+    sport: 'UFC',
+    // Claimed both ways, like PFL, and for a different reason. ESPN
+    // publishes no bare-knuckle league at all - confirmed against their
+    // own MMA leagues index, forty-eight leagues and not one of them -
+    // so every card here comes from the promotion's own site under this
+    // key, which the league claim catches outright.
+    //
+    // The name is the belt and braces. It catches a card should ESPN
+    // ever start filing one under its catch-all, and it catches the
+    // promotion's sister billing: "BKFSEA BRUISE CRUISE" is on the
+    // schedule now and says neither "BKFC" nor "bare knuckle".
+    league: 'BKFC',
+    match: /\bbkfc\b|\bbkfsea\b|bare[\s-]?knuckle/i,
+    // Its own bucket, holding channels and terms both. BKFC streams on
+    // DAZN and on the promotion's own service - measured across four of
+    // its event pages, every one of them offers those two and nothing
+    // linear - so there is no network slot this could borrow, which is
+    // the same position DWCS is in.
+    networkKey: 'BKFC',
+    // Two spellings, unconfined by group. "BKFC" is what a provider
+    // writing a per-card listing uses and "Bare Knuckle" is what one
+    // carrying a standing channel tends to; neither is a word that
+    // matches anything else on a playlist.
+    autoSearch: { terms: ['BKFC', 'Bare Knuckle'] },
   },
   {
     key: 'OTHER',
