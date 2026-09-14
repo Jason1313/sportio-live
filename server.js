@@ -1792,7 +1792,7 @@ app.post('/api/networks/search-terms/save', async (req, res) => {
   if (!auth) return;
 
   const key = String(req.body.key || '').toUpperCase();
-  if (!networks.isSearchNetwork(key)) {
+  if (!networks.holdsSearchTerms(key)) {
     return res.status(400).json({ error: 'That section does not hold search terms.' });
   }
 
@@ -4022,18 +4022,20 @@ function readSearchTerms(user) {
   return out;
 }
 
-// The account's own terms win over the built-in ones. Somebody who has
-// written a list has said what they want searched, and quietly unioning
-// that with a default would put back the results the list was narrowed
-// to exclude.
-function autoSearchFor(user, bucketKey, sportKey) {
+// The account's own terms win over the built-in ones outright. Somebody
+// who has written a list has said what they want searched, and quietly
+// unioning that with a default would put back the results the list was
+// narrowed to exclude.
+//
+// What counts as built-in is the caller's to say, because three
+// different things can be meant by it - a sport-wide search for a league,
+// a promotion's own spellings for a show that has them, and nothing at
+// all for a bucket whose whole content is what the account typed. See the
+// stream route, which is where that is decided.
+function autoSearchFor(user, bucketKey, builtIn) {
   const own = readSearchTerms(user)[String(bucketKey || '').toUpperCase()];
   if (own && own.length) return { terms: own, groups: [] };
-  // A search bucket has no built-in fallback: an empty list means the
-  // account has not set it up, and running a sport-wide default in its
-  // place would serve one promotion's channels for another's card.
-  if (networks.isSearchNetwork(bucketKey)) return null;
-  return networks.getAutoSearch(sportKey);
+  return builtIn || null;
 }
 
 // ---------------------------------------------------------------------
@@ -6673,11 +6675,26 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   //
   // Resolved here, alongside the links, so buildStreamList receives both
   // sources at once and decides the order in one place.
-  // An event can name the bucket its channels live in - a promotion
-  // within a section that holds several. Only that bucket's terms run,
-  // so one promotion's card never reaches for another's channels.
-  const searchKey = game.searchKey || sportKey;
-  const autoSearch = promotion ? promotion.autoSearch : autoSearchFor(user, searchKey, sportKey);
+  // Which bucket's terms these are, and what runs when the account has
+  // written none.
+  //
+  // A promotion answers both: its bucket is the same key its channels are
+  // pinned under, so a hybrid bucket like DWCS cannot end up searching
+  // one show's terms over another show's slot, and its own spellings are
+  // the fallback. A promotion with no bucket (PFL, the catch-all) still
+  // has nowhere for an account to write terms, so only its built-in runs.
+  //
+  // Otherwise the event names its own bucket - a promotion inside a
+  // section that holds several, which is what keeps RAF's terms off a
+  // college dual - and the fallback is the sport-wide search, except for
+  // a terms-only bucket where an empty list means the account has simply
+  // not set it up and a sport-wide default would serve one promotion's
+  // channels for another's card.
+  const searchKey = promotion ? promotion.networkKey : (game.searchKey || sportKey);
+  const builtInSearch = promotion
+    ? promotion.autoSearch
+    : (networks.holdsSearchTerms(searchKey) ? null : networks.getAutoSearch(sportKey));
+  const autoSearch = autoSearchFor(user, searchKey, builtInSearch);
   let autoStreams = [];
   if (autoSearch) {
     const autoChannels = await fetchAutoSearchChannels(

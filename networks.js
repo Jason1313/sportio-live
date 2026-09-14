@@ -99,6 +99,26 @@ const NETWORKS = [
   // only ever reached explicitly, by the sport.
   { key: 'UFC', label: 'UFC', kind: 'event', sport: 'UFC', aliases: ['UFC', 'UFC Fight Pass', 'UFC PPV'] },
 
+  // Both halves at once: pinned channels like the UFC bucket above, and
+  // search terms like the RAF bucket below.
+  //
+  // Dana White's Contender Series needs both because its listings come in
+  // two kinds at the same time. Some providers carry a standing "DWCS"
+  // channel worth pinning and quality-checking once; others spin up a
+  // listing named for that week's show, which no pinned id survives.
+  // Giving it only one half would have left the other half of the
+  // providers with nothing.
+  //
+  // Channels rank ahead of what the terms find, which is the order links
+  // and a standing search already have everywhere else: a channel
+  // somebody chose outranks one a word matched.
+  //
+  // Reached through the promotion that claims the event, never by sport -
+  // a real UFC card gets the UFC bucket, and these two shows share a
+  // league id and nothing else. See PROMOTIONS.
+  { key: 'DWCS', label: "Dana White's Contender Series", kind: 'hybrid', sport: 'UFC',
+    aliases: [] },
+
   // A search bucket. Like the event bucket above in that it is bound to
   // events rather than to a broadcaster, and unlike it in holding search
   // terms instead of pinned channels.
@@ -116,14 +136,23 @@ const NETWORKS = [
     aliases: [] },
 ];
 
-// Buckets that hold search terms rather than channels. The dashboard
-// draws them differently and the stream route resolves them differently,
-// so both need to ask.
-const SEARCH_NETWORK_KEYS = new Set(NETWORKS.filter(n => n.kind === 'search').map(n => n.key));
+// Buckets that hold search terms. A 'search' bucket holds nothing else;
+// a 'hybrid' one holds them alongside pinned channels. The dashboard
+// draws a term editor for both and the stream route reads an account's
+// own terms for both, so neither can ask about 'search' alone.
+const SEARCH_TERM_BUCKETS = new Set(
+  NETWORKS.filter(n => n.kind === 'search' || n.kind === 'hybrid').map(n => n.key));
 
-function isSearchNetwork(key) {
-  return SEARCH_NETWORK_KEYS.has(String(key || '').toUpperCase());
+function holdsSearchTerms(key) {
+  return SEARCH_TERM_BUCKETS.has(String(key || '').toUpperCase());
 }
+
+// Buckets that hold an account's channels or terms for one show, rather
+// than standing for a broadcaster. None of them take part in alias
+// lookup: a broadcast literally named "UFC" must never resolve to the UFC
+// bucket, which is only ever reached explicitly - by the sport, or by the
+// promotion claiming the event.
+const BUCKET_KINDS = new Set(['event', 'search', 'hybrid']);
 
 // Names that are streaming services, never a linear channel the IPTV
 // provider would carry under that name. These must NOT resolve to a
@@ -158,11 +187,10 @@ function normalizeNetworkName(name) {
   return String(name || '').toLowerCase().replace(/[^a-z0-9+]/g, '');
 }
 
-// Only real networks participate in alias lookup. Event buckets are
-// reached explicitly by sport, never by matching a broadcast name.
+// Only real networks participate in alias lookup. See BUCKET_KINDS.
 const NETWORK_BY_ALIAS = new Map();
 for (const net of NETWORKS) {
-  if (net.kind === 'event') continue;
+  if (BUCKET_KINDS.has(net.kind)) continue;
   for (const alias of net.aliases) {
     NETWORK_BY_ALIAS.set(normalizeNetworkName(alias), net.key);
   }
@@ -599,8 +627,11 @@ const AUTO_SEARCH = {
 // A promotion therefore overrides two things, and only these two, for the
 // events it claims:
 //
-//   networkKey - which configured link slot applies, or null for none
-//   autoSearch - the standing search to run instead of the league's own
+//   networkKey - which configured link slot applies, or null for none.
+//                It doubles as the bucket whose search terms apply, so a
+//                'hybrid' bucket's channels and terms cannot drift apart.
+//   autoSearch - the standing search to run when the account has written
+//                no terms for that bucket, instead of the league's own
 //
 // Everything else (artwork, the fighter-name tiers, date filtering) is
 // genuinely shared with the parent league and deliberately left alone.
@@ -614,11 +645,22 @@ const PROMOTIONS = [
     // of the three means the classifier survives ESPN reformatting the
     // name, which is the only signal it has.
     match: /dana white|contender series|\bdwcs\b/i,
-    // Deliberately null rather than 'UFC'. This is the entire point of
-    // the promotion existing: the UFC slot's channels are wrong here, and
-    // showing them ranked first is worse than showing nothing, because
-    // they look authoritative and play something else.
-    networkKey: null,
+    // Its own bucket, and emphatically not 'UFC'. That is the point of
+    // the promotion existing in the first place: the UFC slot's channels
+    // are wrong here, and showing them ranked first is worse than showing
+    // nothing, because they look authoritative and play something else.
+    //
+    // It held null for a while, which was right while there was nowhere
+    // else to put them and wrong the moment a provider turned out to
+    // carry a standing DWCS channel - there was no slot to pin it in.
+    // The bucket is 'hybrid', so this one key names both the channels and
+    // the terms and they cannot drift apart. See NETWORKS.
+    networkKey: 'DWCS',
+    // What runs when the account has written no terms of its own. Every
+    // spelling here is DWCS's own, so it is a default rather than a
+    // guess, and an account that writes a list replaces it outright -
+    // see autoSearchFor.
+    //
     // Unconfined by group, unlike UFC's. There is no PPV group for a show
     // that is not a PPV, and providers file DWCS wherever they please -
     // so the terms have to carry the whole search.
@@ -1486,8 +1528,8 @@ module.exports = {
   AUTO_SEARCH,
   MAX_AUTO_SEARCH_RESULTS,
   getAutoSearch,
-  isSearchNetwork,
-  SEARCH_NETWORK_KEYS,
+  holdsSearchTerms,
+  SEARCH_TERM_BUCKETS,
   PROMOTIONS,
   getPromotionForEvent,
   autoSearchChannels,

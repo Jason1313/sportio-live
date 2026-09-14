@@ -492,14 +492,19 @@ const DEFAULT_RULES = {
   },
 };
 
-// UFC and RAF are deliberately absent.
+// UFC, DWCS and RAF are deliberately absent.
 //
-// Both are event buckets rather than channels: a provider spins up a
+// All three are event buckets rather than channels: a provider spins up a
 // listing per card, named for the event, and it exists for a few days.
 // There is no standing channel to keep fresh, no sweep old enough to
 // have measured one, and the account picks them by hand for exactly that
 // reason. Auto-picking here would mean inventing a rule for a channel
 // that does not exist yet.
+//
+// DWCS can hold pinned channels like UFC and search terms like RAF, and
+// neither half changes that: the terms are what covers the weeks no
+// standing channel exists, which is the same job a rule here would be
+// guessing at.
 function rulesFor(networkKey, overrides) {
   const base = DEFAULT_RULES[networkKey];
   if (!base) return null;

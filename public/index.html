@@ -2005,7 +2005,12 @@
       const problemBadge = problems.length > 0
         ? `<span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-[#c0392b] text-white"><i class="fa-solid fa-triangle-exclamation mr-1"></i>${problems.length}</span>`
         : '';
-      return `${problemBadge}<span class="text-xs font-semibold px-2 py-0.5 rounded-full ${badgeClass}">${links.length}/${networkMaxLinks}</span>`;
+      // A hybrid bucket shows both of its counts, because it is filled
+      // two independent ways and a header reporting only the channels
+      // reads as empty to somebody who has configured it entirely with
+      // terms.
+      const termsBadge = sectionHoldsTerms(key) ? buildSearchCountBadge(key) : '';
+      return `${termsBadge}${problemBadge}<span class="text-xs font-semibold px-2 py-0.5 rounded-full ${badgeClass}">${links.length}/${networkMaxLinks}</span>`;
     }
 
     function buildNetworkLinksListHtml(key) {
@@ -2013,12 +2018,13 @@
       const links = readNetworkLinks(key);
       const problems = ((networkStatus[key] || {}).problems) || [];
 
-      // An event bucket (UFC) has a standing search behind it that can
-      // still turn something up; a network has nothing behind it at all,
-      // so an empty one means an empty card.
-      const emptyText = network.kind === 'event'
-        ? 'No channels set - only the automatic search will show.'
-        : 'No channels set - games on this network will have nothing to play.';
+      // An event or hybrid bucket has a search behind it that can still
+      // turn something up; a network has nothing behind it at all, so an
+      // empty one means an empty card.
+      const emptyText = {
+        event: 'No channels set - only the automatic search will show.',
+        hybrid: 'No channels set - only the search terms below will show.',
+      }[network.kind] || 'No channels set - games on this network will have nothing to play.';
 
       const rows = links.length > 0
         ? links.map((link, i) => buildNetworkLinkRow(key, link, i, links.length)).join('')
@@ -2071,6 +2077,54 @@
       actions.innerHTML = buildNetworkActionsHtml(key);
     }
 
+    // What a bucket holds, read from the server's own registry rather
+    // than decided here - the kinds are networks.js's to name.
+    function networkKindOf(key) {
+      return (networkRegistry.find(n => n.key === key) || {}).kind || '';
+    }
+
+    function sectionHoldsTerms(key) {
+      const kind = networkKindOf(key);
+      return kind === 'search' || kind === 'hybrid';
+    }
+
+    // The term count, with an id of its own because a hybrid section has
+    // two counts in one header and two refreshers that each own one of
+    // them. Addressed any more loosely than this - by position, or by
+    // rebuilding the header - one refresher would carry away the other's
+    // count, which is the same class of mistake the channel sections
+    // already document.
+    function buildSearchCountBadge(key) {
+      const count = searchTermsFor(key).length;
+      return `<span id="search-count-${key}" class="text-[10px] ${count ? 'text-[#7fc98a]' : 'text-[#e6e6e6]/35'}">${count} term${count === 1 ? '' : 's'}</span>`;
+    }
+
+    // The term editor itself. Shared by a terms-only bucket, where it is
+    // the whole section, and a hybrid one, where it sits under the
+    // channel picker - one piece of markup, so the two cannot drift.
+    //
+    // Only the standfirst differs, and it has to: for a terms-only bucket
+    // the terms are the entire answer, and for a hybrid one they are the
+    // half that covers the weeks no pinned channel does.
+    function buildSearchTermsPanel(network, blurb) {
+      const key = network.key;
+      return `
+        <p class="text-[11px] text-[#e6e6e6]/45 leading-relaxed pt-1">${blurb}</p>
+        <div id="search-terms-${key}" class="flex flex-wrap gap-1.5">${buildSearchTermChips(key)}</div>
+        <div class="flex gap-2">
+          <input type="text" id="search-term-input-${key}" maxlength="60" placeholder="Add a term, e.g. ${escapeHtml(network.label)}"
+                 onkeydown="if(event.key==='Enter'){event.preventDefault();addSearchTerm('${key}');}"
+                 class="flex-1 min-w-0 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
+          <button onclick="addSearchTerm('${key}')" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 text-xs font-bold py-2 px-3 rounded-lg transition shrink-0">Add</button>
+          <button onclick="previewSearchTerms('${key}')" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 text-xs font-bold py-2 px-3 rounded-lg transition shrink-0">Preview</button>
+        </div>
+        <div id="search-preview-${key}" class="max-h-48 overflow-y-auto"></div>
+        <div class="flex items-center justify-between gap-3 pt-1">
+          <span id="search-summary-${key}" class="text-[11px] text-[#e6e6e6]/45"></span>
+          <button onclick="saveSearchTerms('${key}')" class="bg-[#3b8fc4] hover:bg-[#4fa3d8] text-xs font-bold py-2 px-4 rounded-lg transition shrink-0">Save</button>
+        </div>`;
+    }
+
     // A bucket that holds search terms rather than channels.
     //
     // Same accordion as every other section so it sits in the list
@@ -2081,7 +2135,6 @@
     function buildSearchSection(network) {
       const key = network.key;
       const isOpen = !!networkExpanded[key];
-      const terms = searchTermsFor(key);
 
       return `
         <div class="bg-[#3b4d58]/40 border border-[#e6e6e6]/10 rounded-lg overflow-hidden">
@@ -2091,30 +2144,16 @@
               <span class="text-[10px] uppercase tracking-wider text-[#e6e6e6]/35">search</span>
             </span>
             <span id="network-header-${key}" class="flex items-center gap-2">
-              <span class="text-[10px] ${terms.length ? 'text-[#7fc98a]' : 'text-[#e6e6e6]/35'}">${terms.length} term${terms.length === 1 ? '' : 's'}</span>
+              ${buildSearchCountBadge(key)}
               <i class="fa-solid fa-chevron-down text-xs text-[#e6e6e6]/45 transition-transform ${isOpen ? 'rotate-180' : ''}"></i>
             </span>
           </button>
           <div id="network-body-${key}" class="${isOpen ? '' : 'hidden'} px-3 pb-3 space-y-2">
-            <p class="text-[11px] text-[#e6e6e6]/45 leading-relaxed pt-1">
-              No channels are pinned here. These terms are searched against your playlist every time
-              one of this promotion's events is opened, and whatever matches is offered as a stream &mdash;
-              so a channel the provider renames between cards is still found. Good terms are the
-              promotion's name and its broadcaster.
-            </p>
-            <div id="search-terms-${key}" class="flex flex-wrap gap-1.5">${buildSearchTermChips(key)}</div>
-            <div class="flex gap-2">
-              <input type="text" id="search-term-input-${key}" maxlength="60" placeholder="Add a term, e.g. Real American Freestyle"
-                     onkeydown="if(event.key==='Enter'){event.preventDefault();addSearchTerm('${key}');}"
-                     class="flex-1 min-w-0 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
-              <button onclick="addSearchTerm('${key}')" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 text-xs font-bold py-2 px-3 rounded-lg transition shrink-0">Add</button>
-              <button onclick="previewSearchTerms('${key}')" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 text-xs font-bold py-2 px-3 rounded-lg transition shrink-0">Preview</button>
-            </div>
-            <div id="search-preview-${key}" class="max-h-48 overflow-y-auto"></div>
-            <div class="flex items-center justify-between gap-3 pt-1">
-              <span id="search-summary-${key}" class="text-[11px] text-[#e6e6e6]/45"></span>
-              <button onclick="saveSearchTerms('${key}')" class="bg-[#3b8fc4] hover:bg-[#4fa3d8] text-xs font-bold py-2 px-4 rounded-lg transition shrink-0">Save</button>
-            </div>
+            ${buildSearchTermsPanel(network,
+              `No channels are pinned here. These terms are searched against your playlist every time
+               one of this promotion's events is opened, and whatever matches is offered as a stream &mdash;
+               so a channel the provider renames between cards is still found. Good terms are the
+               promotion's name and its broadcaster.`)}
           </div>
         </div>`;
     }
@@ -2133,7 +2172,13 @@
     function buildSearchTermChips(key) {
       const terms = searchTermsFor(key);
       if (terms.length === 0) {
-        return '<p class="text-[11px] text-[#e6e6e6]/40 italic">No terms yet &mdash; this promotion\u2019s events will offer no streams.</p>';
+        // Two quite different situations. A terms-only bucket with no
+        // terms has nothing at all behind it; a hybrid one falls back to
+        // the built-in spellings of the show's own name, so an empty list
+        // there is the default rather than a hole.
+        return `<p class="text-[11px] text-[#e6e6e6]/40 italic">${networkKindOf(key) === 'hybrid'
+          ? 'No terms of your own &mdash; the built-in ones are searched.'
+          : 'No terms yet &mdash; this promotion\u2019s events will offer no streams.'}</p>`;
       }
       return terms.map((term, i) => `
         <span class="flex items-center gap-1.5 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg pl-2.5 pr-1.5 py-1">
@@ -2143,17 +2188,23 @@
         </span>`).join('');
     }
 
-    // Only the chips are redrawn. Rebuilding the whole section would
-    // discard the preview list and whatever is half-typed in the input,
-    // which is the same trap the channel sections already document.
+    // Only the chips and the count are redrawn. Rebuilding the whole
+    // section would discard the preview list and whatever is half-typed
+    // in the input, which is the same trap the channel sections already
+    // document.
+    //
+    // The count is found by its own id rather than as the header's first
+    // span, which is what it used to be. In a hybrid section that span is
+    // the channel count, and writing the term count over it would replace
+    // "1/10" with "2 terms" the moment a term was added.
     function refreshSearchTermChips(key) {
       const box = document.getElementById(`search-terms-${key}`);
       if (box) box.innerHTML = buildSearchTermChips(key);
-      const header = document.querySelector(`#network-header-${key} span`);
+      const badge = document.getElementById(`search-count-${key}`);
       const count = searchTermsFor(key).length;
-      if (header) {
-        header.textContent = `${count} term${count === 1 ? '' : 's'}`;
-        header.className = `text-[10px] ${count ? 'text-[#7fc98a]' : 'text-[#e6e6e6]/35'}`;
+      if (badge) {
+        badge.textContent = `${count} term${count === 1 ? '' : 's'}`;
+        badge.className = `text-[10px] ${count ? 'text-[#7fc98a]' : 'text-[#e6e6e6]/35'}`;
       }
     }
 
@@ -2232,18 +2283,41 @@
         }
         activeUser.searchTerms = data.searchTerms || {};
         showStatus(terms.length === 0
-          ? 'Searches cleared - this promotion\u2019s events will offer no streams.'
+          ? (networkKindOf(key) === 'hybrid'
+              ? 'Searches cleared - the built-in terms are used again.'
+              : 'Searches cleared - this promotion\u2019s events will offer no streams.')
           : `Saved ${terms.length} search term${terms.length === 1 ? '' : 's'}.`);
       } catch (err) {
         showStatus(`Could not reach the server: ${err.message}`, true);
       }
     }
 
+    // What the header chip calls a section. 'hybrid' is the registry's
+    // word for the shape of the bucket, and nobody reading a dashboard
+    // should have to decode it.
+    const KIND_LABELS = { hybrid: 'channels + search' };
+
     function buildNetworkSection(network) {
       if (network.kind === 'search') return buildSearchSection(network);
       const key = network.key;
       const isOpen = !!networkExpanded[key];
       const resultRows = buildSearchResultsHtml(key);
+
+      // A hybrid bucket carries the term editor below its channel
+      // picker, because its show is listed both ways at once: a standing
+      // channel some providers carry all year, and a per-card listing the
+      // rest name after whichever week it is. Pinned channels are offered
+      // first and whatever the terms find follows them.
+      const termsPanel = network.kind === 'hybrid'
+        ? `<div class="border-t border-[#e6e6e6]/10 pt-2 mt-1 space-y-2">
+             <p class="text-[10px] uppercase tracking-wider text-[#e6e6e6]/35">Search terms</p>
+             ${buildSearchTermsPanel(network,
+               `Pinned channels above are offered first. These terms are searched against your
+                playlist every time one of this show's events is opened, and whatever matches is
+                offered under them &mdash; which is how a card your provider only lists for the
+                week is still found. Leave the list empty and the built-in terms are used.`)}
+           </div>`
+        : '';
 
       // Everything that changes with the saved links now comes from the
       // three builders above, so it can be re-rendered without disturbing
@@ -2253,7 +2327,7 @@
           <button onclick="toggleNetworkSection('${key}')" class="w-full flex items-center justify-between px-4 py-3 hover:bg-[#3b4d58]/60 transition">
             <span class="flex items-center gap-2">
               <span class="font-bold text-sm">${escapeHtml(network.label)}</span>
-              <span class="text-[10px] uppercase tracking-wider text-[#e6e6e6]/35">${escapeHtml(network.kind)}</span>
+              <span class="text-[10px] uppercase tracking-wider text-[#e6e6e6]/35">${escapeHtml(KIND_LABELS[network.kind] || network.kind)}</span>
             </span>
             <span id="network-header-${key}" class="flex items-center gap-2">
               ${buildNetworkHeaderBadges(key)}
@@ -2280,6 +2354,7 @@
                 Add
               </button>
             </div>
+            ${termsPanel}
           </div>
         </div>`;
     }
