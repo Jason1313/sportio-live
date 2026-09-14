@@ -24,6 +24,7 @@ either side of the wire.
 | `quality.js` | Turns one of those readings into a band, a score and a badge line. Measures nothing itself. |
 | `posters.js` | Matchup poster art drawn from team colours and marks. |
 | `wrestling.js` | Wrestling schedules, scraped from the promotions, because nothing publishes them. |
+| `bkfc.js` | Bare Knuckle FC's schedule, scraped for the same reason - ESPN carries no bare knuckle. Merged into the MMA section. |
 | `public/*.html` | `index.html` the account dashboard, `watch.html` the watch portal, `admin.html` the operator page. Tailwind from CDN, Font Awesome from CDN, vanilla JS inline at the bottom of each file. |
 
 `networks.js`, `autopick.js`, `posters.js` and `quality.js` are pure
