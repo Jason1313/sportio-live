@@ -343,6 +343,16 @@
         inaudible.</p>
         <pre id="lua-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre max-h-72 overflow-y-auto"></pre>
       </div>
+      <div id="file-mpvconf">
+        <span class="font-bold text-[#e6e6e6]">The mpv profile</span>
+        <span class="text-[#e6e6e6]/45">&mdash; appended to <code id="mpvconf-path-label" class="text-[#5aa8d1]"></code></span>
+        <button onclick="copyBox('mpv-box','Profile copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
+        <p class="text-[#e6e6e6]/45 mt-1">Buffering, reconnect and low-latency settings for a live stream, which the
+        player file selects with <code>--profile=sportio</code>. Setup manages only this block, between its two marker
+        lines, and leaves the rest of the file alone &mdash; a profile runs to the end of the file, so it is always
+        re-appended last rather than edited in place.</p>
+        <pre id="mpv-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre max-h-72 overflow-y-auto"></pre>
+      </div>
       <div>
         <span class="font-bold text-[#e6e6e6]">The player file</span>
         <span class="text-[#e6e6e6]/45">&mdash; <code id="config-path-label" class="text-[#5aa8d1]"></code></span>
@@ -1041,13 +1051,83 @@
     return `'${String(text).replace(/'/g, "''")}'`;
   }
 
-  // mpv and mpv.net take --script; VLC and PotPlayer would read it as
-  // another file to play. Keyed off the executable name so choosing a
-  // player from the presets above is the whole of the decision - a
+  // Gates everything mpv-shaped: --script, which VLC and PotPlayer
+  // would read as another file to play, and the mpv.conf profile, which
+  // nothing else reads at all. Keyed off the executable name so choosing
+  // a player from the presets above is the whole of the decision - a
   // checkbox for it would be a second thing to get wrong.
-  function playerTakesScripts(player) {
+  function playerIsMpv(player) {
     return /(^|[\\/])mpv(net)?\.exe$/i.test(player.trim());
   }
+
+  // mpv.net and mpv keep separate config folders, and the profile is no
+  // use in the wrong one. Only the leaf differs, so this is the whole
+  // difference between them - the installer resolves the rest, because a
+  // portable install keeps its config beside the executable instead and
+  // this page cannot see whether that is the case.
+  function mpvConfLeaf(player) {
+    return /mpvnet\.exe$/i.test(player.trim()) ? 'mpv.net' : 'mpv';
+  }
+
+  // The profile --profile=sportio selects. Only this block is managed:
+  // the rest of mpv.conf is display tuning that belongs to whoever set
+  // the machine up, and nothing here has an opinion about it.
+  const MPV_PROFILE = `[sportio]
+profile-desc=Live IPTV
+# Reconnect instead of dying when the provider drops a packet. This is
+# ffmpeg's own retry and it is the cheap one - the readahead below covers
+# the gap, so a recovery here is invisible. It only reaches a request
+# that broke mid-read though; a clean close reads as EOF and a refused
+# connection as an error, and sportio-reload.lua is what handles those.
+stream-lavf-o-append=reconnect=1
+stream-lavf-o-append=reconnect_streamed=1
+stream-lavf-o-append=reconnect_delay_max=5
+stream-lavf-o-append=reconnect_on_network_error=1
+# No network-timeout here, deliberately. It was set to 10s once, on the
+# reasoning that ten seconds is well inside the readahead so a false
+# positive costs nothing - which has it exactly backwards. The readahead
+# is what makes the timeout unnecessary, not what makes it safe: a
+# reconnect on a live .ts does not resume, it starts again at the head of
+# whatever the provider has buffered, and replays the lot.
+#
+# Measured against a server that goes quiet for 15s without closing the
+# socket, holding a 20s buffer. At network-timeout=10 mpv reconnected at
+# exactly ten seconds in and was served from 20s back. At 0 the same gap
+# passed with one connection and nothing visible at all - the buffer rode
+# through it, which is what the buffer is for. Anything genuinely frozen
+# is caught by the watchdog in sportio-reload.lua, which measures whether
+# the picture is moving rather than whether the socket is quiet.
+# Buffering is not latency, which is worth writing down because the two
+# get traded against each other by reflex. Measured against a server
+# that bursts 8s on connect and then sends at 1x: a 60s readahead and a
+# 1s readahead sat at the same playback position to within 0.02s after
+# half a minute - the large one simply held 6.3s in hand where the small
+# one held 1.0s. What puts you behind live is where you joined and every
+# stall since, not the size of the cache. So there is nothing to win by
+# shrinking these, and a stall's worth of protection to lose.
+cache=yes
+demuxer-max-bytes=100MiB
+demuxer-readahead-secs=60
+# Probing is paid once and then carried for the rest of the stream.
+# Playback starts from the first byte whenever it starts, so a second
+# spent working out the codecs is a second further behind live until the
+# channel is rejoined.
+demuxer-lavf-o-append=fflags=+nobuffer
+demuxer-lavf-analyzeduration=0.2
+# HLS only - harmlessly ignored on a .ts URL, which reports it as an
+# AVOption it could not set and carries on. ffmpeg joins a live playlist
+# three segments from the end, so with 6s segments that is 18s of delay
+# accepted before anything else is decided. -2 gives a segment back and
+# still leaves one in hand; -1 is the floor and rebuffers whenever a
+# segment is published late.
+demuxer-lavf-o-append=live_start_index=-2
+stream-buffer-size=4KiB
+# Default is 0.2s. Small beside the seconds above, but unlike the cache
+# it is delay with nothing bought by it.
+audio-buffer=0.1
+keep-open=no
+force-seekable=no
+`;
 
   // The reconnect script, verbatim. It is offered for copying rather
   // than served from this app on purpose: the helper only ever runs
@@ -1258,10 +1338,15 @@ end)
     // that carries this file inside the setup script, and everything
     // after it would be read as code. The two constant bodies are ours
     // to check; this is the only place a reader's own text gets in.
+    //
+    // --profile=sportio is dropped if it is typed here too: it used to
+    // be the reader's job to add it, and setup now passes it, so a file
+    // carried over from before would otherwise list it twice.
     const extraArgs = document.getElementById('player-args').value
-      .split('\n').map(l => l.trim()).filter(l => l && !l.startsWith("'@"));
+      .split('\n').map(l => l.trim())
+      .filter(l => l && !l.startsWith("'@") && l !== '--profile=sportio');
 
-    const scripted = playerTakesScripts(player);
+    const scripted = playerIsMpv(player);
     // Plain mpv shuts down when the playlist runs out, and would take
     // the reconnect script down with it before it could reload
     // anything. idle keeps the process alive and force-window keeps
@@ -1273,8 +1358,14 @@ end)
     // nothing at all, and a second --script replaces the first rather
     // than adding to it - which looks exactly like the script being
     // broken. Anyone wanting another script has to merge the files.
+    //
+    // --profile=sportio is here rather than left to the reader because
+    // setup is what writes the profile. A profile written into mpv.conf
+    // and then selected by nobody is worse than not writing one: every
+    // option in it silently does nothing.
     const reloadArgs = scripted
-      ? ['--idle=yes', '--force-window=yes', `--script=${beside(script, RELOAD_FILENAME)}`]
+      ? ['--profile=sportio', '--idle=yes', '--force-window=yes',
+         `--script=${beside(script, RELOAD_FILENAME)}`]
       : [];
 
     document.getElementById('ps1-path-label').textContent = script;
@@ -1282,7 +1373,11 @@ end)
     document.getElementById('reload-path-label').textContent = beside(script, RELOAD_FILENAME);
     document.getElementById('setup-path-label').textContent = beside(script, SETUP_FILENAME);
     document.getElementById('lua-box').textContent = RELOAD_LUA;
+    document.getElementById('mpv-box').textContent = MPV_PROFILE;
+    document.getElementById('mpvconf-path-label').textContent =
+      `%APPDATA%\\${mpvConfLeaf(player)}\\mpv.conf`;
     document.getElementById('file-reload').classList.toggle('hidden', !scripted);
+    document.getElementById('file-mpvconf').classList.toggle('hidden', !scripted);
 
     document.getElementById('cfg-box').textContent = [
       '# First non-comment line: full path to the player.',
@@ -1444,6 +1539,7 @@ end)
       ...here('playScript', body('ps1-box')),
       ...here('playerFile', body('cfg-box')),
       ...(scripted ? here('reloadScript', body('lua-box')) : []),
+      ...(scripted ? here('mpvProfile', body('mpv-box')) : []),
       'Write-Utf8 $playPath $playScript',
       'Write-Host "wrote $playPath"',
       '',
@@ -1470,6 +1566,65 @@ end)
       'Write-Utf8 $configPath $playerFile',
       'Write-Host "wrote $configPath"',
       '',
+      '$player = @(Get-Content -LiteralPath $configPath |',
+      '  ForEach-Object { $_.Trim() } |',
+      '  Where-Object { $_ -and -not $_.StartsWith("#") })[0]',
+      '',
+      ...(scripted ? [
+        '# A portable install keeps its config beside the executable and',
+        '# ignores the one under APPDATA entirely, so writing the profile',
+        '# there would land somewhere mpv never reads.',
+        '$portable = Join-Path (Split-Path -Parent $player) "portable_config"',
+        'if (Test-Path -LiteralPath $portable) { $confDir = $portable }',
+        `else { $confDir = Join-Path $env:APPDATA ${psQuote(mpvConfLeaf(player))} }`,
+        'if (-not (Test-Path -LiteralPath $confDir)) {',
+        '  New-Item -ItemType Directory -Path $confDir -Force | Out-Null',
+        '}',
+        '$confPath = Join-Path $confDir "mpv.conf"',
+        '',
+        '$open = "# >>> sportio-live >>>"',
+        '$close = "# <<< sportio-live <<<"',
+        '$before = ""',
+        'if (Test-Path -LiteralPath $confPath) { $before = [IO.File]::ReadAllText($confPath) }',
+        '',
+        '# Everything outside the markers belongs to whoever set this',
+        '# machine up - display tuning, keybinds, whatever else is in there',
+        '# - and is carried through untouched.',
+        '$kept = New-Object Collections.ArrayList',
+        '$inBlock = $false',
+        "foreach ($line in ($before -split '\\r?\\n')) {",
+        '  if ($line.Trim() -eq $open) { $inBlock = $true; continue }',
+        '  if ($line.Trim() -eq $close) { $inBlock = $false; continue }',
+        '  if (-not $inBlock) { [void]$kept.Add($line) }',
+        '}',
+        '$body = ($kept -join "`n").TrimEnd()',
+        '',
+        '# An [sportio] outside the markers is one this script did not',
+        '# write, and deleting somebody else\'s lines is not its business.',
+        '# It is left where it is; the managed block goes in below it and',
+        '# is the one that takes effect.',
+        "if ($body -match '(?m)^\\s*\\[sportio\\]') {",
+        '  Write-Warning "$confPath already carries an [sportio] profile of its own - the managed one is appended below it and wins"',
+        '}',
+        '',
+        '# Appended, never edited in place: an mpv profile runs to the next',
+        '# section or the end of the file, so a managed block sitting in the',
+        '# middle would swallow anything added after it.',
+        '$block = $open + "`n" + $mpvProfile.TrimEnd() + "`n" + $close + "`n"',
+        'if ($body) { $merged = $body + "`n`n" + $block } else { $merged = $block }',
+        '',
+        'if ($before -ne $merged) {',
+        '  if ($before) {',
+        '    Copy-Item -LiteralPath $confPath -Destination "$confPath.bak" -Force',
+        '    Write-Host "kept the mpv.conf you had as $confPath.bak"',
+        '  }',
+        '  Write-Utf8 $confPath $merged',
+        '  Write-Host "wrote the sportio profile into $confPath"',
+        '} else {',
+        '  Write-Host "sportio profile already current in $confPath"',
+        '}',
+        ''
+      ] : []),
       `$key = "HKCU:\\Software\\Classes\\${PROTOCOL}"`,
       '$ps = Join-Path $env:SystemRoot "System32\\WindowsPowerShell\\v1.0\\powershell.exe"',
       '$command = \'"\' + $ps + \'" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "\' + $playPath + \'" "%1"\'',
@@ -1485,9 +1640,6 @@ end)
       '# wrong only shows up as the handler falling back to some other',
       '# installed player, which reads as the wrong player being chosen on',
       '# purpose rather than as a typo.',
-      '$player = @(Get-Content -LiteralPath $configPath |',
-      '  ForEach-Object { $_.Trim() } |',
-      '  Where-Object { $_ -and -not $_.StartsWith("#") })[0]',
       'if (Test-Path -LiteralPath $player) {',
       '  Write-Host "player found: $player"',
       '} else {',
