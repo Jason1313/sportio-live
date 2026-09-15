@@ -83,6 +83,74 @@ function instantFrom(year, monthIndex, day, hour, minute, timeZone) {
   return new Date(Date.UTC(year, monthIndex, day, hour, minute, 0) - offset * 60000);
 }
 
+// ------------------------------------------------------------- billing
+//
+// The promotion bills a card as one unbroken line of capitals - "BKFC 95
+// NEWARK HERRING vs DODSON" - where every other promotion in the MMA
+// section is published as "designation: matchup" in mixed case. Left as
+// printed, a bare knuckle card does not read like the ones either side
+// of it in the row: the poster splits a name at its colon, finds none,
+// and sets the whole billing as one block of capitals with no detail
+// line under it.
+//
+// So the billing is re-punctuated into the shape the section already
+// has. Where the designation ends is taken from the fighters the page
+// names beside the card rather than guessed from the line: "TILL vs
+// ROMERO" puts one word before the vs and "VAN HEERDEN vs SMITH" two,
+// and nothing in the string itself says which. A card whose fights are
+// not announced yet keeps its billing whole, which is the right answer
+// anyway - there is no matchup to set apart.
+// Words that stay down when they are not the first of a line. "van" is
+// not among them on purpose: it would read a card billed from Van Nuys
+// as a Dutch surname, and "Francois Van Heerden" is only formal where
+// "BKFC 96 van Nuys" is wrong.
+const MINOR_WORDS = new Set(['and', 'at', 'de', 'del', 'du', 'in', 'of', 'the', 'vs']);
+
+// What stays shouted. The billing is capitals throughout, so an
+// initialism cannot be told from a word by its case and the promotion's
+// own have to be named. Short tokens are kept as they are because that
+// is what they nearly always are here - a state, a country, a number.
+const SHOUTED = /^(?:BKFC|BKFSEA|BKB|KB|TBA|USA|MMA|PPV|DAZN|[A-Z]{1,2}|[IVX]+|[0-9]+(?:ST|ND|RD|TH)?)$/;
+
+function titleCaseWord(word, index) {
+  const lower = word.toLowerCase();
+  if (index > 0 && MINOR_WORDS.has(lower)) return lower;
+  if (SHOUTED.test(word)) return word;
+  return lower
+    // Anything ahead of the first letter is carried over untouched, which
+    // is how a ring name keeps the quotes the promotion prints around it:
+    // 'ROYAL' RYAN REBER is on the October card.
+    .replace(/(^[^a-z]*|[-/])([a-z])/g, (m, sep, letter) => sep + letter.toUpperCase())
+    // Two spellings a first-letter rule gets wrong, and a fight roster is
+    // full of both: McGee, O'Malley.
+    .replace(/^Mc([a-z])/, (m, letter) => `Mc${letter.toUpperCase()}`)
+    .replace(/^([A-Z])'([a-z])/, (m, first, letter) => `${first}'${letter.toUpperCase()}`);
+}
+
+function titleCase(text) {
+  return String(text).split(' ').filter(Boolean)
+    .map(titleCaseWord)
+    .join(' ');
+}
+
+function billingFor(name, fighters) {
+  const words = String(name).split(' ').filter(Boolean);
+  const at = words.findIndex(word => /^vs\.?$/i.test(word));
+  if (at < 1 || fighters.length !== 2) return titleCase(name);
+
+  // Walk back over the words the first fighter's own name accounts for.
+  const own = new Set(fighters[0].split(/\s+/).map(word => word.toUpperCase()));
+  let cut = at;
+  while (cut > 0 && own.has(words[cut - 1].toUpperCase())) cut--;
+  // Nothing matched, or everything did. Either way the line is not the
+  // shape this assumes, and a wrong split is worse than none.
+  if (cut === 0 || cut === at) return titleCase(name);
+
+  return `${titleCase(words.slice(0, cut).join(' '))}: `
+    + `${titleCase(words.slice(cut, at).join(' '))} vs. `
+    + `${titleCase(words.slice(at + 1).join(' '))}`;
+}
+
 // ------------------------------------------------------------- parsing
 const DATE_ONLY = new RegExp(`^(${MONTH_ALT})\\s+(\\d{1,2}),?\\s+(\\d{4})$`, 'i');
 const DATE_TIME = new RegExp(
@@ -179,9 +247,13 @@ function parseEvents(html) {
 
     events.push({
       slug: link,
-      name,
+      // Re-punctuated into the section's own shape, in the section's own
+      // case - see billingFor. The billing as printed is not kept: every
+      // card here is filed under the BKFC league by name, so nothing
+      // downstream has to read a title to know what it is looking at.
+      name: billingFor(name, fighters),
       location: DATE_ONLY.test(venue) ? '' : venue,
-      fighters: fighters.length === 2 ? fighters : [],
+      fighters: fighters.length === 2 ? fighters.map(f => titleCase(f)) : [],
       date: instantFrom(Number(at[3]), monthIndex, Number(at[2]), hour, Number(at[5]), SOURCE_ZONE),
     });
   }
@@ -244,4 +316,7 @@ module.exports = {
   parseEvents,
   instantFrom,
   SOURCE_ZONE,
+  // Same reason: a billing can be re-punctuated and read back without a
+  // page to scrape.
+  billingFor,
 };

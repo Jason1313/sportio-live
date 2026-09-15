@@ -1474,6 +1474,42 @@ function splitEventName(name) {
   return { headline: text.slice(0, at).trim(), detail: text.slice(at + 1).trim() };
 }
 
+// A promotion with no badge to fetch, set as its own wordmark.
+//
+// The fallback here used to be buildLogoFallback, which is a team plate:
+// a slate disc with the name inside it stretched to a fixed width by
+// textLength. On a bare knuckle card, in a row of UFC and PFL marks,
+// that read as a fetch that had failed rather than as a logo - a circle
+// where a wordmark belongs, lettered in a different typeface from
+// everything else on the poster and squeezed to fill its width. It was
+// not even the right size: the disc is drawn from the box's width, so at
+// 360 across it ran 180 below a logo box 178 tall and crossed the rule
+// underneath.
+//
+// The promotion's letters in the poster's own type, in the promotion's
+// own accent, is what the rest of the row already looks like.
+//
+// The ratio is not the same kind of number as POSTER_CHAR_RATIO. A
+// capital in this face advances about half its font size, measured off
+// the rendered mark - four letters 234 across at font-size 115 - so this
+// is that measurement with the mark's air already in it. ESPN's league
+// badges are PNGs carrying a wide transparent margin and come out about
+// a third of the logo box across; a wordmark set to fill the box edge to
+// edge would tower over the UFC's own in the row beside it.
+const WORDMARK_CHAR_RATIO = 0.92;
+
+function buildWordmark(box, text, color) {
+  const label = String(text || '').trim().toUpperCase();
+  const fontSize = Math.min(box.height * 0.82,
+    box.width / Math.max(1, label.length * WORDMARK_CHAR_RATIO));
+  const tracking = fontSize * 0.06;
+  // Tracking is added after the last letter too, so the run sits half a
+  // space right of where text-anchor="middle" puts it.
+  const x = box.x + box.width / 2 - tracking / 2;
+  const y = box.y + box.height / 2 + fontSize * 0.36;
+  return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" font-family="'Trebuchet MS', Verdana, sans-serif" font-size="${fontSize.toFixed(1)}" font-weight="800" fill="${color}" text-anchor="middle" letter-spacing="${tracking.toFixed(1)}">${escapeXml(label)}</text>`;
+}
+
 // The MMA event poster: the promotion's logo over the event's name.
 //
 // It used to composite each fighter's stance photo from ESPN. That worked
@@ -1520,7 +1556,7 @@ const mmaPosterHandler = async (req, res) => {
   const LOGO = { x: 120, y: 76, width: 360, height: 178 };
   const logoMarkup = leagueLogoData
     ? `<image href="${leagueLogoData}" x="${LOGO.x}" y="${LOGO.y}" width="${LOGO.width}" height="${LOGO.height}" preserveAspectRatio="xMidYMid meet" />`
-    : buildLogoFallback(LOGO.x, LOGO.y, LOGO.width, leagueKey, theme.secondary);
+    : buildWordmark(LOGO, leagueKey, theme.secondary);
 
   // Text occupies the lower half, as one block centred within it, so a
   // one-line name and a four-line one both sit level rather than one
