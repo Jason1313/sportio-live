@@ -1085,7 +1085,13 @@ local o = {
     retries = 0, -- 0 = keep trying for as long as the window is open
 
     governor = true,
-    target = 4,
+    -- Ten rather than four. The surplus a provider hands you on connect
+    -- is also the only thing standing between a hiccup and a stall, and
+    -- draining it to four seconds left almost none - on a feed that
+    -- jitters, that turns an invisible gap into a rebuffer. Ten still
+    -- gives back the drift that stalls leave behind without spending the
+    -- cushion that stops the next one.
+    target = 10,
     gain = 0.004,
     max_boost = 0.03,
     window = 10,
@@ -1093,7 +1099,7 @@ local o = {
 options.read_options(o, "sportio-reload")
 
 local url, attempts, pending = nil, 0, nil
-local last_pos, still_since = nil, nil
+local last_pos, still_since, last_cache = nil, nil, nil
 local samples, set_speed = {}, nil
 
 local function reconnect()
@@ -1187,12 +1193,22 @@ local function watch_stall()
     -- No position means idle or still opening, and end-file owns both.
     if not pos then return end
     if not last_pos or pos > last_pos + 0.01 then
-        last_pos, still_since = pos, nil
+        last_pos, still_since, last_cache = pos, nil, nil
         return
     end
+    -- A frozen picture with the cache still filling behind it is a
+    -- stream rebuffering, not a stream that has died, and reloading it
+    -- throws away the recovery already in progress - then lands on the
+    -- head of the provider's buffer and replays everything since. Only
+    -- a picture that is stopped with nothing arriving counts as dead.
+    local cache = mp.get_property_number("demuxer-cache-duration")
+    if cache and last_cache and cache > last_cache + 0.01 then
+        still_since = nil
+    end
+    last_cache = cache
     still_since = still_since or mp.get_time()
     if mp.get_time() - still_since >= o.stall then
-        msg.warn("no progress for " .. o.stall .. "s, treating the stream as dead")
+        msg.warn("no progress for " .. o.stall .. "s with nothing arriving, treating the stream as dead")
         still_since = nil
         reconnect()
     end
@@ -1203,7 +1219,7 @@ mp.register_event("start-file", function()
     -- a redirect can hand mpv a different address than the one asked
     -- for, and that resolved one is what is actually playing.
     url = mp.get_property("path") or url
-    last_pos, still_since = nil, nil
+    last_pos, still_since, last_cache = nil, nil, nil
     ungovern()
 end)
 
@@ -1221,7 +1237,7 @@ end)
 mp.add_periodic_timer(1, function()
     if pending or not url then return end
     if mp.get_property_bool("pause", false) then
-        last_pos, still_since = nil, nil
+        last_pos, still_since, last_cache = nil, nil, nil
         ungovern()
         return
     end
