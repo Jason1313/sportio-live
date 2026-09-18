@@ -16,8 +16,10 @@
 //
 // This is the one part of the app that deliberately opens the provider's
 // streams rather than just its lists, which is why it is slow on purpose:
-// one probe at a time, with a gap between them. Providers cap concurrent
-// connections, and a burst of probes is how an account gets rate limited.
+// a fixed number of probes per login at once - one unless the caller
+// says the provider allows more - with a gap between their starts.
+// Providers cap concurrent connections, and a burst of probes is how an
+// account gets rate limited.
 
 const { execFile } = require('child_process');
 
@@ -184,8 +186,36 @@ function runFfprobe(url, legacy) {
   });
 }
 
-let lastProbeStartedAt = 0;
-let queue = Promise.resolve();
+// One lane per provider login, because that is what a connection limit
+// is counted against. It was a single queue for the whole app, one probe
+// at a time; Flix-Streams allows three connections per login, and a run
+// of twenty channels at twenty-odd seconds each was taking eight minutes
+// with two of them idle.
+//
+// A lane lets `limit` probes run together and still spaces their STARTS
+// by MIN_PROBE_INTERVAL_MS, so two probes never open in the same instant
+// even when both slots are free - a provider sees a steady trickle of
+// connections rather than a burst.
+const lanes = new Map(); // key -> { active, limit, waiting: [resolve], nextStart }
+
+function laneFor(key, limit) {
+  let lane = lanes.get(key);
+  if (!lane) {
+    lane = { active: 0, limit: 1, waiting: [], nextStart: 0 };
+    lanes.set(key, lane);
+  }
+  // Taken from the latest caller, so changing a provider's setting takes
+  // effect on the next test rather than on a restart.
+  lane.limit = Math.max(1, Math.floor(limit) || 1);
+  return lane;
+}
+
+function pump(lane) {
+  while (lane.active < lane.limit && lane.waiting.length > 0) {
+    lane.active++;
+    lane.waiting.shift()();
+  }
+}
 
 // Measures one stream. Resolves to
 //   { ok: true, width, height, fps, interlaced, codec, bitrate, sampleSeconds }
@@ -193,18 +223,23 @@ let queue = Promise.resolve();
 // and never rejects: a stream that will not open is an ordinary answer
 // here - finding those is half of what testing is for.
 //
-// Queued, so two callers never have probes open at once, and spaced by
-// MIN_PROBE_INTERVAL_MS from the start of the last one.
-function probeStream(url) {
-  const run = queue.then(async () => {
-    const wait = MIN_PROBE_INTERVAL_MS - (Date.now() - lastProbeStartedAt);
-    if (wait > 0) await new Promise(r => setTimeout(r, wait));
-    lastProbeStartedAt = Date.now();
-    return measure(url);
-  });
-  // The queue carries on whatever this one did.
-  queue = run.catch(() => {});
-  return run;
+// `lane` names the login the stream plays through and `limit` how many
+// probes it may have open at once. A caller that names neither gets one
+// shared lane of one, which is what everything was before lanes existed.
+async function probeStream(url, options = {}) {
+  const lane = laneFor(options.lane || 'default', options.limit || 1);
+  await new Promise(resolve => { lane.waiting.push(resolve); pump(lane); });
+  try {
+    // A start time reserved rather than computed from the last one, so
+    // two probes taking their slots together are still spaced apart.
+    const startAt = Math.max(Date.now(), lane.nextStart);
+    lane.nextStart = startAt + MIN_PROBE_INTERVAL_MS;
+    if (startAt > Date.now()) await new Promise(r => setTimeout(r, startAt - Date.now()));
+    return await measure(url);
+  } finally {
+    lane.active--;
+    pump(lane);
+  }
 }
 
 async function measure(url) {

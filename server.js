@@ -3949,6 +3949,19 @@ function xtreamCacheKey(provider) {
   return `${baseUrl}|${provider.username}`;
 }
 
+// The login a provider's streams play through, which is what a provider
+// counts connections against - so tests queue per login, and two accounts
+// entered with the same one share its limit rather than doubling it. An
+// M3U playlist URL carries the login in its path, so it is hashed rather
+// than kept whole; the key lives in memory and is never logged either
+// way.
+function connectionKeyFor(provider) {
+  if (provider.kind === 'm3u') {
+    return `m3u|${crypto.createHash('sha1').update(String(provider.playlistUrl || '')).digest('hex')}`;
+  }
+  return `xtream|${xtreamCacheKey(provider)}`;
+}
+
 async function fetchXtreamCatalog(provider) {
   const [categories, streams] = await Promise.all([
     fetchXtreamCategories(provider),
@@ -5300,8 +5313,9 @@ function storeTestResult(user, providerId, url, result) {
 // Tests ONE channel. One per request rather than a batch, as it was
 // before: a batch of ten at twenty seconds each would hold a request open
 // for minutes, which reverse proxies cut off, and would show nothing
-// until the last one finished. The page runs its selection one at a time
-// and fills each row in as it lands.
+// until the last one finished. The page runs its selection as many at a
+// time as the provider's testsAtOnce allows and fills each row in as it
+// lands; the lane in probe.js enforces that limit whatever a page sends.
 //
 // The URL must be one the account's own playlist contains. That is the
 // security boundary, not a convenience: without it this would open any
@@ -5324,7 +5338,10 @@ app.post('/api/networks/test', async (req, res) => {
     });
   }
 
-  const result = await probe.probeStream(url);
+  const result = await probe.probeStream(url, {
+    lane: connectionKeyFor(provider),
+    limit: bundles.bundleFor(provider.bundle).testsAtOnce,
+  });
   const stored = storeTestResult(auth.user, provider.id, url, result);
   saveUserConfigs();
 
@@ -6116,7 +6133,9 @@ app.post('/api/user/register', async (req, res) => {
 // Providers panel draws its switch from the server's list rather than a
 // copy that could drift from it.
 function describeBundles() {
-  return bundles.BUNDLES.map(bundle => ({ key: bundle.key, label: bundle.label }));
+  return bundles.BUNDLES.map(bundle => ({
+    key: bundle.key, label: bundle.label, testsAtOnce: bundle.testsAtOnce || 1,
+  }));
 }
 
 // The first provider in the pre-providers shape, for the parts of the

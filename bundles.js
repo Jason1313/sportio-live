@@ -13,7 +13,7 @@
 // a feed - Strong carries several feeds of most stations - and the badge
 // it produced for FOX 28 Cedar Rapids said 1080p60 for a channel that
 // plays at 720p60. A reseller's channels are measured by ffprobe
-// instead, one at a time, when somebody asks. See probe.js.
+// instead, when somebody asks. See probe.js.
 //
 // Marking a provider as a reseller therefore means three things, all
 // decided in server.js: its channels can be tested, their readings come
@@ -22,8 +22,14 @@
 
 // One entry per reseller. Adding another is an entry here and nothing
 // else.
+//
+// `testsAtOnce` is how many channels may be tested together on one
+// login. Flix-Streams allows three connections per login; testing takes
+// two and leaves one, so somebody can go on watching while a run is
+// under way. Taking all three would make every run a reason the stream
+// they are watching drops.
 const BUNDLES = [
-  { key: 'flix-streams', label: 'Flix-Streams' },
+  { key: 'flix-streams', label: 'Flix-Streams', testsAtOnce: 2 },
 ];
 
 const BUNDLE_BY_KEY = new Map(BUNDLES.map(bundle => [bundle.key, bundle]));

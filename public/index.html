@@ -4238,11 +4238,12 @@
 
     // ---- Testing -------------------------------------------------------
     //
-    // Tick channels, then test them one at a time. Each test holds a
-    // connection to the provider for about twenty seconds - it counts the
-    // bitrate off the wire - and the server spaces them out on top, so a
-    // run of twenty is several minutes. That is why it is a selection and
-    // not a button on the whole list.
+    // Tick channels, then test them - as many at once as the provider
+    // allows, two for Flix-Streams. Each test holds a connection to the
+    // provider for about twenty seconds - it counts the bitrate off the
+    // wire - and the server spaces their starts on top, so a run of twenty
+    // is still a few minutes. That is why it is a selection and not a
+    // button on the whole list.
     //
     // A channel that is not 1080p60 or 720p60 comes back hidden: greyed,
     // moved to the bottom and left out of Select all, with Unhide to put
@@ -4250,6 +4251,12 @@
     // other channel, since it may still be the only one showing the game.
 
     const TEST_SECONDS_ESTIMATE = 25;
+
+    // Tests running side by side finish together, so the wait is the
+    // count divided across the slots rather than the sum.
+    function minutesFor(count, atOnce) {
+      return Math.max(1, Math.round((Math.ceil(count / Math.max(1, atOnce || 1)) * TEST_SECONDS_ESTIMATE) / 60));
+    }
 
     function testableRows(key) {
       return (networkSearchResults[key] || [])
@@ -4263,8 +4270,8 @@
         return `
           <div class="flex items-center gap-2 px-2 py-1.5 text-[11px] text-[#e6e6e6]/70">
             <i class="fa-solid fa-spinner fa-spin text-[#5aa8d1]"></i>
-            <span class="flex-1">Testing ${run.done + 1} of ${run.total}${run.stop ? ' - stopping after this one' : ''}...
-              about ${Math.max(1, Math.round(((run.total - run.done) * TEST_SECONDS_ESTIMATE) / 60))} min left</span>
+            <span class="flex-1">${run.done} of ${run.total} tested${run.active ? `, ${run.active} testing now` : ''}${run.stop ? ' - stopping once these finish' : ''}...
+              about ${minutesFor(run.total - run.done, run.atOnce)} min left</span>
             ${run.stop ? '' : `<button onclick="stopNetworkTests()" class="text-[11px] font-bold text-[#e56a6a]/80 hover:text-[#e56a6a]">Stop</button>`}
           </div>`;
       }
@@ -4283,7 +4290,7 @@
                   class="font-bold px-2.5 py-1 rounded-lg ${ticked === 0 || busy ? 'bg-[#3b4d58] text-[#e6e6e6]/30 cursor-not-allowed' : 'bg-[#3b8fc4] hover:bg-[#2f7fb3] text-white'}">
             Test selected (${ticked})
           </button>
-          ${ticked > 0 && !busy ? `<span class="text-[10px] text-[#e6e6e6]/35">about ${Math.max(1, Math.round((ticked * TEST_SECONDS_ESTIMATE) / 60))} min</span>` : ''}
+          ${ticked > 0 && !busy ? `<span class="text-[10px] text-[#e6e6e6]/35">about ${minutesFor(ticked, testsAtOnceFor(rows.filter(c => selected.has(c.url)).map(c => c.url), key))} min</span>` : ''}
           ${busy ? '<span class="text-[10px] text-[#e6e6e6]/35">another section is testing</span>' : ''}
         </div>`;
     }
@@ -4317,61 +4324,100 @@
       }
     }
 
+    // How many of these channels may be tested together - the provider's
+    // testsAtOnce, which the server holds to whatever this sends. The
+    // smallest across the providers involved, since a run that mixes two
+    // must not overrun the stricter one.
+    function testsAtOnceFor(urls, key) {
+      const rows = networkSearchResults[key] || [];
+      const providers = (activeUser && activeUser.providers) || [];
+      let limit = Infinity;
+      for (const url of urls) {
+        const row = rows.find(c => c.url === url);
+        const provider = providers.find(pr => pr.id === (row && row.providerId)) || providers[0];
+        const bundle = provider && bundleOf(provider);
+        limit = Math.min(limit, (bundle && bundle.testsAtOnce) || 1);
+      }
+      return Number.isFinite(limit) ? Math.max(1, limit) : 1;
+    }
+
+    // Tests one channel and puts the answer on its row. Returns 'passed',
+    // 'hidden', 'failed' or '' for a result that is neither.
+    async function testOneChannel(key, url) {
+      probeResults[url] = { checking: true };
+      refreshProbeBadges(url);
+      let outcome = '';
+      try {
+        const res = await fetch('/api/networks/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, url })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          probeResults[url] = { error: (data && data.error) || `The server answered ${res.status}.` };
+          outcome = 'failed';
+        } else {
+          applyTestResult(url, data.test);
+          // No quality means the picture was read but not the bitrate,
+          // so there is no bpp to rate - the format alone still says
+          // whether it passed.
+          probeResults[url] = data.quality
+            ? { label: data.quality.label, tier: data.quality.tier, score: data.quality.score,
+                detail: data.quality.detail, source: 'test' }
+            : { label: (data.test && data.test.format) || '?', tier: data.test && data.test.passes ? 'good' : 'low',
+                detail: 'Bitrate could not be measured', source: 'test' };
+          if (data.test && data.test.passes) outcome = 'passed';
+          else if (data.test && data.test.hidden) outcome = 'hidden';
+        }
+      } catch (err) {
+        probeResults[url] = { error: err.message };
+        outcome = 'failed';
+      }
+      if (networkTestSelection[key]) networkTestSelection[key].delete(url);
+      refreshProbeBadges(url);
+      return outcome;
+    }
+
+    // Runs the ticked channels, as many at once as the provider allows.
+    //
+    // A handful of workers pull from one shared list, so a slow channel
+    // holds up only its own slot and the next one starts the moment any
+    // slot frees. Stop lets the tests already open finish - their
+    // answers are nearly in - and starts no more.
     async function runNetworkTests(key) {
       if (networkTestRun) return;
       const urls = testableRows(key).map(c => c.url).filter(url => (networkTestSelection[key] || new Set()).has(url));
       if (urls.length === 0) return;
-      networkTestRun = { key, done: 0, total: urls.length, stop: false };
+      const atOnce = Math.min(testsAtOnceFor(urls, key), urls.length);
+      networkTestRun = { key, done: 0, active: 0, total: urls.length, atOnce, stop: false };
       renderNetworkSearchResults(key);
 
-      let passed = 0;
-      let hidden = 0;
-      let failed = 0;
-      for (const url of urls) {
-        if (networkTestRun.stop) break;
-        probeResults[url] = { checking: true };
-        refreshProbeBadges(url);
-        try {
-          const res = await fetch('/api/networks/test', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, url })
-          });
-          const data = await res.json().catch(() => null);
-          if (!res.ok || !data || !data.success) {
-            probeResults[url] = { error: (data && data.error) || `The server answered ${res.status}.` };
-            failed++;
-          } else {
-            applyTestResult(url, data.test);
-            // No quality means the picture was read but not the bitrate,
-            // so there is no bpp to rate - the format alone still says
-            // whether it passed.
-            probeResults[url] = data.quality
-              ? { label: data.quality.label, tier: data.quality.tier, score: data.quality.score,
-                  detail: data.quality.detail, source: 'test' }
-              : { label: (data.test && data.test.format) || '?', tier: data.test && data.test.passes ? 'good' : 'low',
-                  detail: 'Bitrate could not be measured', source: 'test' };
-            if (data.test && data.test.passes) passed++;
-            if (data.test && data.test.hidden) hidden++;
-          }
-        } catch (err) {
-          probeResults[url] = { error: err.message };
-          failed++;
+      const queue = [...urls];
+      const counts = { passed: 0, hidden: 0, failed: 0 };
+      const worker = async () => {
+        while (queue.length > 0 && !networkTestRun.stop) {
+          const url = queue.shift();
+          networkTestRun.active++;
+          refreshTestBar(key);
+          const outcome = await testOneChannel(key, url);
+          if (outcome) counts[outcome]++;
+          networkTestRun.active--;
+          networkTestRun.done++;
+          // Re-sorted after every channel, so a good one rises into place
+          // and a failure drops to the bottom as it happens, rather than
+          // all at once when the run ends.
+          networkSearchResults[key] = orderForPicking(networkSearchResults[key] || []);
+          renderNetworkSearchResults(key);
         }
-        if (networkTestSelection[key]) networkTestSelection[key].delete(url);
-        networkTestRun.done++;
-        refreshProbeBadges(url);
-        // Re-sorted after every channel, so a good one rises into place
-        // and a failure drops to the bottom as it happens, rather than
-        // all at once when the run ends.
-        networkSearchResults[key] = orderForPicking(networkSearchResults[key] || []);
-        renderNetworkSearchResults(key);
-      }
+      };
+      await Promise.all(Array.from({ length: atOnce }, worker));
 
       const tested = networkTestRun.done;
       networkTestRun = null;
       renderNetworkSearchResults(key);
-      showStatus(`Tested ${tested}: ${passed} passed, ${hidden} hidden` + (failed ? `, ${failed} could not be tested.` : '.'), failed > 0);
+      showStatus(`Tested ${tested}: ${counts.passed} passed, ${counts.hidden} hidden` +
+        (counts.failed ? `, ${counts.failed} could not be tested.` : '.'), counts.failed > 0);
     }
 
     function stopNetworkTests() {
