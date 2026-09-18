@@ -12,6 +12,7 @@ const quality = require('./quality.js');
 const streamcheck = require('./streamcheck.js');
 const autopick = require('./autopick.js');
 const bundles = require('./bundles.js');
+const probe = require('./probe.js');
 const posters = require('./posters.js');
 const wrestling = require('./wrestling.js');
 const bkfc = require('./bkfc.js');
@@ -229,10 +230,10 @@ function normaliseProvider(raw, kind, index) {
   const id = str(raw.id) || makeProviderId();
   const label = str(raw.label).slice(0, 40) || `Provider ${index + 1}`;
   const streamcheckProvider = str(raw.streamcheckProvider);
-  // A reseller carrying several services under this one login, named by
-  // its key in bundles.BUNDLES, or '' for an ordinary provider. It
-  // replaces streamcheckProvider rather than sitting beside it: a
-  // reseller's folders each have their own table, fixed by the bundle.
+  // A reseller carrying other services under this one login, named by its
+  // key in bundles.BUNDLES, or '' for an ordinary provider. Set, it
+  // overrides streamcheckProvider: a reseller's channels are tested
+  // rather than looked up. See isTestedProvider.
   const bundle = bundles.bundleFor(raw.bundle) ? str(raw.bundle) : '';
 
   if (kind === 'm3u') {
@@ -324,46 +325,25 @@ function providerLabelFor(user, providerId) {
   return provider ? provider.label : '';
 }
 
-// The published tables behind one provider: one entry for an ordinary
-// provider, whether or not it has chosen a table, and one per folder for
-// a reseller carrying several services.
-//
-// Each entry is also a block auto-pick fills on its own. A reseller's
-// folders play from different services - which is the point of it
-// carrying both - so they get the redundancy two separate providers
-// would, and a network gets its best few from each rather than ten from
-// whichever service happened to measure better that week.
-function publishedSourcesOf(provider) {
-  const bundle = bundles.bundleFor(provider.bundle);
-  if (bundle) {
-    return bundle.folders.map(folder => ({
-      providerId: provider.id,
-      label: `${provider.label} · ${folder.label}`,
-      table: folder.table,
-      bundle,
-      folder,
-    }));
-  }
-  return [{
-    providerId: provider.id,
-    label: provider.label,
-    table: provider.streamcheckProvider || '',
-    bundle: null,
-    folder: null,
-  }];
-}
-
-function publishedSourcesFor(user) {
-  return providersOf(user).flatMap(publishedSourcesOf);
+// A reseller renumbers every channel, so nothing published describes its
+// channels and they are measured by testing instead - see bundles.js and
+// probe.js. Everything that treats a provider differently for that
+// reason asks this.
+function isTestedProvider(provider) {
+  return !!(provider && bundles.bundleFor(provider.bundle));
 }
 
 // Every streamcheck table this account names, deduplicated. Used by the
-// panels that describe the account as a whole rather than one link, and
-// by the warmers and the daily refresh, which is how a reseller's tables
-// get loaded without anyone choosing them.
+// panels that describe the account as a whole rather than one link.
+//
+// A tested provider names none, even when a table was chosen for it
+// before it was marked as a reseller: its ids are not the ones any table
+// is keyed by, and reading one would be the confident wrong answer
+// streamcheckLookup exists to avoid.
 function streamcheckTablesFor(user) {
-  return [...new Set(publishedSourcesFor(user)
-    .map(source => source.table)
+  return [...new Set(providersOf(user)
+    .filter(provider => !isTestedProvider(provider))
+    .map(provider => provider.streamcheckProvider)
     .filter(Boolean))];
 }
 
@@ -1979,18 +1959,23 @@ app.post('/api/networks/autopick', async (req, res) => {
     // have to lie about one of them. `loaded` stays as the answer to "is
     // there anything at all to judge by", which is what gates the panel.
     //
-    // One row per block auto-pick fills, which for a reseller is one per
-    // service it carries - the same split the limit below is worked out
-    // over, so the panel cannot promise five each over a split it is not
-    // making.
-    providers: publishedSourcesFor(user).map(source => ({
-      id: source.providerId,
-      label: source.label,
-      table: source.table,
-      loaded: !!source.table && streamcheck.isLoaded(source.table),
-      runDate: streamcheckRunDate(source.table),
-    })),
-    perProviderLimit: autoPickLimitFor(publishedSourcesFor(user).length),
+    // A tested provider is listed and marked as such, so an account
+    // holding one says why it is not being picked from rather than
+    // looking like a provider with no data.
+    providers: providersOf(user).map(entry => {
+      const tested = isTestedProvider(entry);
+      const table = tested ? '' : (entry.streamcheckProvider || '');
+      return {
+        id: entry.id,
+        label: entry.label,
+        tested,
+        table,
+        loaded: !!table && streamcheck.isLoaded(table),
+        runDate: streamcheckRunDate(table),
+      };
+    }),
+    perProviderLimit: autoPickLimitFor(providersOf(user).filter(p => !isTestedProvider(p)).length),
+    reason: outcome.reason || '',
     loaded: tables.some(table => streamcheck.isLoaded(table)),
     runDate: accountRunDate(user),
     enabled: settings.networks,
@@ -4715,17 +4700,17 @@ function readQualityFilter(user) {
 // mode worth spending a field to avoid.
 //
 // A reseller's channels are the exception: it renumbers every channel, so
-// its ids appear in no table and are looked up by name instead, in the
-// table of whichever service the channel's folder names. See bundles.js.
-// Never by id as well - a reseller id that happened to exist in the
-// upstream table would be exactly the confident wrong answer above.
+// its ids appear in no table at all, and its readings are the account's
+// own ffprobe tests instead. Never a table as well - a reseller id that
+// happened to exist in one would be exactly the confident wrong answer
+// above.
 //
-// Returns null when NO provider on the account has a table in memory, so
+// Returns null when NO provider on the account has anything to read, so
 // the ordinary case - published data switched off - costs one call rather
 // than a closure per channel.
 function streamcheckLookup(user) {
   const providers = providersOf(user);
-  const readers = new Map(providers.map(provider => [provider.id, publishedReaderFor(provider)]));
+  const readers = new Map(providers.map(provider => [provider.id, publishedReaderFor(user, provider)]));
   if (![...readers.values()].some(Boolean)) return null;
 
   // Links saved before the account had a second provider carry no
@@ -4746,26 +4731,13 @@ function streamcheckLookup(user) {
   };
 }
 
-// Every group an entry is filed under, whichever shape it arrived in: a
-// catalog channel carries `categories`, a stored link `group`, and a
-// search hit both `group` and `groups`.
-function categoriesOfEntry(entry) {
-  return [entry.group, ...(entry.categories || []), ...(entry.groups || [])].filter(Boolean);
-}
-
-// How one provider's channels are read, or null when it has nothing in
-// memory to read from.
-function publishedReaderFor(provider) {
-  const bundle = bundles.bundleFor(provider.bundle);
-  if (bundle) {
-    if (!bundle.folders.some(folder => streamcheck.isLoaded(folder.table))) return null;
-    return (entry) => {
-      const where = bundles.folderOf(bundle, categoriesOfEntry(entry));
-      if (!where) return null;
-      const index = bundles.nameIndexFor(streamcheck.snapshot(where.folder.table));
-      const record = bundles.lookupByName(index, entry.name, where.group);
-      return record ? { ...record, provider: where.folder.table } : null;
-    };
+// How one provider's channels are read, or null when it has nothing to
+// read from.
+function publishedReaderFor(user, provider) {
+  if (isTestedProvider(provider)) {
+    const results = readTestResults(user);
+    if (Object.keys(results).length === 0) return null;
+    return (entry, url) => testRecordFor(results[testKey(provider.id, url)]);
   }
 
   const table = provider.streamcheckProvider;
@@ -4978,13 +4950,20 @@ app.post('/api/networks/quality-filter', async (req, res) => {
 // A dead or blackscreen channel has no bitrate to rate, but "it does not
 // work" is the most useful thing anyone can be told about a channel, so
 // it is reported in the same place a quality would have been.
+//
+// A tested channel's reading arrives here in the same shape, from
+// testRecordFor, and says so in `source`. It is the one kind that can be
+// interlaced - the published tables never say - which is why that is
+// read here at all.
 function qualityFromStreamcheck(record) {
   if (!record) return null;
+  const source = record.source || 'streamcheck';
+  const interlaced = !!record.interlaced;
 
   const bpp = quality.bitsPerPixel({
     bitrate: record.bitrate, width: record.width, height: record.height, fps: record.fps,
   });
-  const scored = bpp ? quality.scoreQuality({ height: record.height, fps: record.fps, bpp }) : null;
+  const scored = bpp ? quality.scoreQuality({ height: record.height, fps: record.fps, interlaced, bpp }) : null;
 
   // A channel that does not work is reported as not working, whatever
   // numbers came back with it. A blackscreen feed still carries a
@@ -4995,10 +4974,11 @@ function qualityFromStreamcheck(record) {
     const format = record.height ? ` · ${record.height}p${record.fps || ''}` : '';
     return {
       ok: true,
-      source: 'streamcheck',
+      source,
       status: record.status,
       height: record.height,
       fps: record.fps,
+      interlaced,
       codec: record.codec,
       bitrate: record.bitrate,
       bpp,
@@ -5012,11 +4992,12 @@ function qualityFromStreamcheck(record) {
   if (scored) {
     return {
       ok: true,
-      source: 'streamcheck',
+      source,
       status: record.status,
       width: record.width,
       height: record.height,
       fps: record.fps,
+      interlaced,
       codec: record.codec,
       bitrate: record.bitrate,
       bpp,
@@ -5027,8 +5008,28 @@ function qualityFromStreamcheck(record) {
       tier: scored.tier,
       tooSlow: scored.tooSlow,
       label: quality.formatQualityLabel({
-        height: record.height, fps: record.fps, bpp, tier: scored.tier,
+        height: record.height, fps: record.fps, interlaced, bpp, tier: scored.tier,
       }),
+    };
+  }
+
+  // A test that read the picture but could not count the bitrate - an
+  // older ffprobe that refused the packet options, or a stream too short
+  // to measure. There is no bpp to rate, but the format is a real
+  // measurement and says whether the channel passed, so it is shown bare
+  // rather than dropped.
+  if (source === 'test' && record.height) {
+    return {
+      ok: true,
+      source,
+      status: record.status,
+      height: record.height,
+      fps: record.fps,
+      interlaced,
+      runDate: record.runDate,
+      score: 0,
+      tier: null,
+      label: quality.formatQualityLabel({ height: record.height, fps: record.fps, interlaced }),
     };
   }
 
@@ -5050,11 +5051,19 @@ function qualityFromStreamcheck(record) {
 function describeQuality(quality) {
   if (!quality) return '';
   if (quality.status && quality.status !== 'Alive') {
-    return `${quality.status} - as of the ${quality.runDate || 'last'} sweep`;
+    // A tested channel's date is the day somebody opened it, not a sweep.
+    const when = quality.source === 'test' ? 'test' : 'sweep';
+    return `${quality.status} - as of the ${quality.runDate || 'last'} ${when}`;
   }
   const parts = [];
   if (quality.tier) parts.push(quality.tier.charAt(0).toUpperCase() + quality.tier.slice(1));
-  if (quality.height) parts.push(`${quality.height}p${quality.fps || ''}`);
+  // Interlaced is named by its field rate, the way the badge names it -
+  // only a tested channel can be, the published tables never say.
+  if (quality.height) {
+    parts.push(quality.interlaced
+      ? `${quality.height}i${quality.fps ? quality.fps * 2 : ''}`
+      : `${quality.height}p${quality.fps || ''}`);
+  }
   if (quality.bpp) parts.push(`${Number(quality.bpp).toFixed(3)} bpp`);
   if (quality.bitrate) parts.push(`${(quality.bitrate / 1e6).toFixed(2)} Mbps video`);
   return parts.join(' · ');
@@ -5124,6 +5133,284 @@ function configuredEntriesFor(user) {
 }
 
 // ---------------------------------------------------------------------
+// Channel tests
+// ---------------------------------------------------------------------
+//
+// A tested provider's channels are measured one at a time with ffprobe,
+// because nothing published describes them - see bundles.js. This is the
+// storage for those readings and the routes that take them.
+//
+// Kept on the account, not in memory, which is the opposite of what the
+// old probe cache did and on purpose. It was memory-only because a stale
+// reading "would look authoritative while being wrong"; that still holds,
+// and every badge says the date it was taken. What changed is that a test
+// now decides what the channel picker shows - a channel that failed is
+// hidden from it - and a hide that forgot itself on every restart would
+// put the whole list back to test again.
+
+// Bounded so users.json cannot grow without limit. Well past what anybody
+// tests by hand - two FOX folders are about four hundred channels - and
+// the oldest go first.
+const MAX_TEST_RESULTS = 3000;
+
+// What a channel has to be to stay in the picker: 1080p60 or 720p60, as
+// asked for. Height at least 720 and at least 59 pictures a second, since
+// ffprobe reports 59.94 and snaps it to 60 only within a tolerance.
+//
+// Interlaced 1080 passes. 1080i60 is sixty fields a second - the same
+// motion 720p60 carries, at a higher resolution - and it is how most
+// American broadcast networks send their HD signal, so hiding it would
+// empty the CBS and NBC lists of the very feeds they are made of.
+const TEST_MIN_HEIGHT = 720;
+const TEST_MIN_RATE = 59;
+
+// Scoped by provider, because stream ids collide across services, and by
+// stream id rather than URL, because the URL carries the password.
+function testKey(providerId, url) {
+  return `${providerId || ''}|${networks.streamIdFromUrl(url)}`;
+}
+
+function readTestResults(user) {
+  const raw = user && user.testResults;
+  return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+}
+
+function meetsTestBar(result) {
+  if (!result || !result.ok || !result.height || !result.fps) return false;
+  const rate = result.interlaced ? result.fps * 2 : result.fps;
+  return result.height >= TEST_MIN_HEIGHT && rate >= TEST_MIN_RATE;
+}
+
+// A stored test as a published record, so everything that already reads
+// those - the badges, the quality filter, the Stremio titles - reads a
+// tested channel with no second path. A test that could not open the
+// stream is reported as Unavailable rather than Dead: a provider refuses
+// a connection for reasons that pass, a busy slot most often.
+function testRecordFor(result) {
+  if (!result) return null;
+  const runDate = String(result.testedAt || '').slice(0, 10);
+  if (!result.ok) return { source: 'test', status: 'Unavailable', runDate };
+  return {
+    source: 'test',
+    status: 'Alive',
+    width: result.width || null,
+    height: result.height,
+    fps: result.fps,
+    interlaced: !!result.interlaced,
+    codec: result.codec || null,
+    bitrate: result.bitrate || null,
+    runDate,
+  };
+}
+
+// What the picker needs to know about one channel's test.
+//
+//   testable  its provider is one whose channels are tested
+//   tested    it has been
+//   passes    the test met TEST_MIN_HEIGHT and TEST_MIN_RATE
+//   hidden    it failed and nobody has asked to see it again
+//   format    what the test found, "720p30", or why it could not
+function testStateFor(user, providerId, url) {
+  const testable = isTestedProvider(providerFor(user, providerId));
+  const result = testable && url
+    ? readTestResults(user)[testKey(providerIdFor(user, providerId), url)]
+    : null;
+  if (!result) return { testable, tested: false, passes: false, hidden: false };
+  const passes = meetsTestBar(result);
+  const rate = result.ok && result.fps ? (result.interlaced ? result.fps * 2 : result.fps) : null;
+  return {
+    testable,
+    tested: true,
+    passes,
+    hidden: !passes && !result.shown,
+    testedAt: result.testedAt || '',
+    format: result.ok
+      ? `${result.height}${result.interlaced ? 'i' : 'p'}${rate || ''}`
+      : (result.error || 'could not open'),
+  };
+}
+
+function withTestState(user, entries) {
+  return (entries || []).map(entry =>
+    (entry && entry.url ? { ...entry, test: testStateFor(user, entry.providerId, entry.url) } : entry));
+}
+
+function storeTestResult(user, providerId, url, result) {
+  const results = { ...readTestResults(user) };
+  const stored = {
+    ok: !!result.ok,
+    width: result.width || null,
+    height: result.height || null,
+    fps: result.fps || null,
+    interlaced: !!result.interlaced,
+    codec: result.codec || null,
+    bitrate: result.bitrate || null,
+    error: result.ok ? '' : String(result.error || 'probe failed').slice(0, 160),
+    testedAt: new Date().toISOString(),
+  };
+  results[testKey(providerId, url)] = stored;
+
+  const keys = Object.keys(results);
+  if (keys.length > MAX_TEST_RESULTS) {
+    keys.sort((a, b) => String(results[a].testedAt).localeCompare(String(results[b].testedAt)));
+    for (const key of keys.slice(0, keys.length - MAX_TEST_RESULTS)) delete results[key];
+  }
+  user.testResults = results;
+  return stored;
+}
+
+// Tests ONE channel. One per request rather than a batch, as it was
+// before: a batch of ten at twenty seconds each would hold a request open
+// for minutes, which reverse proxies cut off, and would show nothing
+// until the last one finished. The page runs its selection one at a time
+// and fills each row in as it lands.
+//
+// The URL must be one the account's own playlist contains. That is the
+// security boundary, not a convenience: without it this would open any
+// address a client named, from inside the server's network.
+app.post('/api/networks/test', async (req, res) => {
+  const auth = await authenticateForChannels(req, res);
+  if (!auth) return;
+
+  const { url } = req.body;
+  if (!url || typeof url !== 'string') {
+    return res.status(400).json({ error: 'A stream URL is required.' });
+  }
+  const channel = auth.source.channels.find(c => c.streamUrl === url);
+  if (!channel) return res.status(400).json({ error: 'That stream is not in your playlist.' });
+
+  const provider = providerFor(auth.user, channel.providerId);
+  if (!isTestedProvider(provider)) {
+    return res.status(400).json({
+      error: `${provider ? provider.label : 'That provider'} uses published quality data, so its channels are not tested.`,
+    });
+  }
+
+  const result = await probe.probeStream(url);
+  const stored = storeTestResult(auth.user, provider.id, url, result);
+  saveUserConfigs();
+
+  // The stream id only - the URL carries the provider password.
+  const streamId = networks.streamIdFromUrl(url);
+  console.log(result.ok
+    ? `[Test] #${streamId} ${result.height}${result.interlaced ? `i${result.fps * 2}` : `p${result.fps}`} over ${result.sampleSeconds || '?'}s`
+    : `[Test] #${streamId} failed: ${result.error}`);
+
+  const measured = qualityFromStreamcheck(testRecordFor(stored));
+  return res.json({
+    success: true,
+    url,
+    test: testStateFor(auth.user, provider.id, url),
+    quality: measured ? { ...measured, detail: describeQuality(measured) } : null,
+  });
+});
+
+// Puts a channel that failed its test back in the picker, without
+// forgetting what the test found - the badge still says 720p30, and the
+// next test decides afresh.
+app.post('/api/networks/test/unhide', async (req, res) => {
+  const auth = await authenticateAccount(req, res);
+  if (!auth) return;
+
+  const { url, providerId } = req.body;
+  if (!url || typeof url !== 'string') {
+    return res.status(400).json({ error: 'A stream URL is required.' });
+  }
+  const key = testKey(providerIdFor(auth.user, providerId), url);
+  const results = readTestResults(auth.user);
+  if (!results[key]) return res.status(404).json({ error: 'That channel has not been tested.' });
+
+  auth.user.testResults = { ...results, [key]: { ...results[key], shown: true } };
+  saveUserConfigs();
+  return res.json({ success: true, url, test: testStateFor(auth.user, providerId, url) });
+});
+
+// The playlist categories each network section lists channels from, keyed
+// by network - "Strong8K: US| FOX NETWORK" and "Trex: US| FOX NETWORK" for
+// FOX. Names only, exactly as the playlist spells them; a category the
+// provider has since renamed contributes nothing rather than failing.
+const MAX_NETWORK_CATEGORIES = 20;
+
+function readNetworkCategories(user) {
+  const raw = (user && user.networkCategories) || {};
+  const known = new Set(networks.NETWORKS.map(n => n.key));
+  const out = {};
+  for (const [key, list] of Object.entries(raw)) {
+    if (!known.has(key) || !Array.isArray(list)) continue;
+    const cleaned = [...new Set(list
+      .filter(c => typeof c === 'string' && c.trim())
+      .map(c => c.slice(0, 160)))].slice(0, MAX_NETWORK_CATEGORIES);
+    if (cleaned.length) out[key] = cleaned;
+  }
+  return out;
+}
+
+app.post('/api/networks/categories/save', async (req, res) => {
+  const auth = await authenticateAccount(req, res);
+  if (!auth) return;
+
+  const key = String(req.body.key || '');
+  if (!networks.NETWORKS.some(n => n.key === key)) {
+    return res.status(400).json({ error: `Unknown network: ${key}` });
+  }
+  const categories = Array.isArray(req.body.categories) ? req.body.categories : [];
+  auth.user.networkCategories = readNetworkCategories({
+    networkCategories: { ...readNetworkCategories(auth.user), [key]: categories },
+  });
+  saveUserConfigs();
+  return res.json({ success: true, networkCategories: readNetworkCategories(auth.user) });
+});
+
+// Every channel in a network's chosen categories, for its section to list
+// without anything being typed.
+//
+// Not put through the account's category allowlist or quality filter.
+// Those narrow what a SEARCH offers; this is a list somebody built by
+// naming the categories themselves, and quietly dropping part of it would
+// read as the provider having lost channels.
+//
+// Channels that failed their test go to the bottom, in the order they
+// were in. The page greys them and keeps them out of the next test run.
+const MAX_CATEGORY_CHANNELS = 1500;
+
+app.post('/api/networks/category-channels', async (req, res) => {
+  const auth = await authenticateForChannels(req, res);
+  if (!auth) return;
+
+  const key = String(req.body.key || '');
+  const wanted = new Set(readNetworkCategories(auth.user)[key] || []);
+  if (wanted.size === 0) return res.json({ success: true, channels: [], truncated: false });
+
+  const found = auth.source.channels.filter(c => (c.categories || []).some(cat => wanted.has(cat)));
+  const entries = withTestState(auth.user, enrichWithStreamcheck(auth.user,
+    found.slice(0, MAX_CATEGORY_CHANNELS).map(channel => {
+      const groups = channel.categories || [];
+      // The category that put it on this list, not whichever the
+      // provider happened to list first.
+      const group = groups.find(cat => wanted.has(cat)) || groups[0] || '';
+      return {
+        ...networks.makeLinkEntry({
+          url: channel.streamUrl,
+          tvgId: channel.id,
+          name: channel.name,
+          group,
+          streamId: channel.streamId,
+          providerId: channel.providerId,
+        }),
+        groups,
+      };
+    })));
+
+  const shown = entries.filter(e => !(e.test && e.test.hidden));
+  const hidden = entries.filter(e => e.test && e.test.hidden);
+  return res.json({
+    success: true,
+    channels: [...shown, ...hidden],
+    truncated: found.length > MAX_CATEGORY_CHANNELS,
+  });
+});
+
+// ---------------------------------------------------------------------
 // Auto-pick
 // ---------------------------------------------------------------------
 //
@@ -5154,37 +5441,30 @@ function autoPickLimitFor(providerCount) {
     Math.floor(networks.MAX_LINKS_PER_NETWORK / providerCount)));
 }
 
-// The account's channel list, split back into one list per provider - or
-// per folder, for a reseller carrying several services under one login.
+// The account's channel list, split back into one list per provider.
 //
 // Everything upstream works on the merged list, which is right for
 // searching - the user is looking for a channel, not for a service. Auto-
 // pick is the one place that needs the split back, because its answer is
-// explicitly "the best few from each", and a reseller's Strong folders
-// and Trex folders are two services however few logins they arrive on.
+// explicitly "the best few from each".
+//
+// A tested provider gets no list, which is what keeps auto-pick off it.
+// Its readings are tests somebody chose to run on a handful of channels,
+// and ranking a network on those would pick whichever channel happened to
+// be tested rather than the best one there is.
 function channelsByProvider(user, channels) {
-  const groups = publishedSourcesFor(user).map(source => ({ ...source, channels: [] }));
+  const groups = providersOf(user)
+    .filter(provider => !isTestedProvider(provider))
+    .map(provider => ({ providerId: provider.id, channels: [] }));
   if (groups.length === 0) return [];
-  const byProvider = new Map();
-  for (const group of groups) {
-    if (!byProvider.has(group.providerId)) byProvider.set(group.providerId, []);
-    byProvider.get(group.providerId).push(group);
-  }
-  const primary = byProvider.get(groups[0].providerId);
+  const byId = new Map(groups.map(group => [group.providerId, group]));
+  const primary = providersOf(user)[0];
 
   for (const channel of channels) {
     // A channel with no providerId predates the split, or came from a
     // source that could not be stamped; it belongs to the primary, which
     // is the only provider such an account ever had.
-    const own = byProvider.get(channel.providerId) || primary;
-    if (!own[0].bundle) {
-      own[0].channels.push(channel);
-      continue;
-    }
-    // A reseller channel filed under no service's folder is left out.
-    // There is no table to read it from, so it could never be picked.
-    const where = bundles.folderOf(own[0].bundle, channel.categories);
-    const group = where && own.find(g => g.folder === where.folder);
+    const group = byId.get(channel.providerId || primary.id);
     if (group) group.channels.push(channel);
   }
   return groups;
@@ -5335,18 +5615,35 @@ function computeAutoPick(user, channels, options = {}) {
   // runs unattended has to be what was stored and reviewed.
   const rules = options.rules || settings.rules;
 
+  // An account whose every provider is tested has nothing auto-pick may
+  // choose from. Said separately from "no published data", which would
+  // send somebody to the Quality data panel to fix something that is not
+  // broken.
+  const groups = channelsByProvider(user, channels);
+  if (groups.length === 0) {
+    return { ready: false, reason: 'tested-only', settings, results: [] };
+  }
   if (!read) {
     return { ready: false, reason: 'no-published-data', settings, results: [] };
   }
 
-  const groups = channelsByProvider(user, channels);
   const limit = options.limit || autoPickLimitFor(groups.length);
   const labels = Object.fromEntries(providersOf(user).map(pr => [pr.id, pr.label]));
 
   const results = keys.map((key) => {
     const outcome = autopick.pickAcrossProviders(key, groups, read, { rules, limit });
     const current = (user.networkLinks || {})[key] || [];
-    const entries = outcome.picks.map(autoPickEntry);
+
+    // Links from a tested provider stay, ahead of the picks. Auto-pick
+    // rewrites a network's whole list, and on an account holding a
+    // reseller beside an ordinary provider that would throw away channels
+    // somebody tested and chose by hand, to replace them with ones picked
+    // from the other service alone.
+    const kept = current
+      .filter(link => isTestedProvider(providerFor(user, link.providerId)))
+      .map(link => ({ ...link, band: 'kept - tested by hand', matchedBy: 'kept' }));
+    const entries = [...kept, ...outcome.picks.map(autoPickEntry)]
+      .slice(0, networks.MAX_LINKS_PER_NETWORK);
 
     // Whether this would actually change anything, compared on stream
     // identity rather than on the objects. A run that picks the same
@@ -5366,14 +5663,15 @@ function computeAutoPick(user, channels, options = {}) {
       networkKey: key,
       label: networks.getNetworkLabel(key),
       picks: entries,
+      // How many of those auto-pick found, as against kept. A run that
+      // found nothing leaves a network alone - see applyAutoPick - and
+      // kept links are not a finding.
+      found: outcome.picks.length,
       considered: outcome.considered,
       rejected: outcome.rejected,
       usedSlow: outcome.usedSlow,
-      // A block's own label first: a reseller's two folders share one
-      // providerId, and naming both by it would read "Flix-Streams: 5,
-      // Flix-Streams: 5".
       perProvider: outcome.perProvider.map(entry => ({
-        ...entry, label: entry.label || labels[entry.providerId] || '',
+        ...entry, label: labels[entry.providerId] || '',
       })),
       currentCount: current.length,
       changed: before !== after,
@@ -5406,7 +5704,7 @@ function applyAutoPick(user, channels, options = {}) {
   const applied = [];
   for (const result of computed.results) {
     if (!enabled.has(result.networkKey)) continue;
-    if (result.picks.length === 0) continue;
+    if (result.found === 0) continue;
     if (!result.changed) continue;
 
     const validated = networks.validateNetworkLinks(result.networkKey, result.picks);
@@ -5463,11 +5761,11 @@ app.post('/api/streamcheck/select', async (req, res) => {
   const { providerId, table } = req.body;
   const provider = providersOf(auth.user).find(entry => entry.id === providerId);
   if (!provider) return res.status(400).json({ error: 'No such provider on this account.' });
-  // A reseller's tables come with its bundle, one per folder. A table
-  // chosen here would be stored and never read, which looks like a choice
-  // that took and did nothing.
-  if (bundles.bundleFor(provider.bundle)) {
-    return res.status(400).json({ error: `${provider.label} is set up as ${bundles.bundleFor(provider.bundle).label}, which chooses its published tables itself.` });
+  // A reseller's channels are tested rather than looked up, so a table
+  // chosen here would be stored and never read - a choice that looks like
+  // it took and does nothing.
+  if (isTestedProvider(provider)) {
+    return res.status(400).json({ error: `${provider.label} is set up as ${bundles.bundleFor(provider.bundle).label}, whose channels are tested rather than read from published data.` });
   }
   if (typeof table !== 'string') {
     return res.status(400).json({ error: 'A published table name is required.' });
@@ -5552,7 +5850,11 @@ app.post('/api/networks/search', async (req, res) => {
   );
   return res.json({
     success: true,
-    channels: enrichWithStreamcheck(auth.user, channels),
+    // With each hit's test state, which only the dashboard reads - it is
+    // where a channel that failed its test is hidden. The watch portal
+    // takes the badge and ignores the rest, so a hidden channel is still
+    // there to find and play from it.
+    channels: withTestState(auth.user, enrichWithStreamcheck(auth.user, channels)),
     // So a result list drawn from several services can say which one each
     // channel is on. Sent with every search rather than fetched once,
     // because it is four short strings and the alternative is a second
@@ -5776,11 +6078,7 @@ app.post('/api/user/register', async (req, res) => {
 // Providers panel draws its switch from the server's list rather than a
 // copy that could drift from it.
 function describeBundles() {
-  return bundles.BUNDLES.map(bundle => ({
-    key: bundle.key,
-    label: bundle.label,
-    folders: bundle.folders.map(({ prefix, table, label }) => ({ prefix, table, label })),
-  }));
+  return bundles.BUNDLES.map(bundle => ({ key: bundle.key, label: bundle.label }));
 }
 
 // The first provider in the pre-providers shape, for the parts of the
@@ -5871,6 +6169,7 @@ app.post('/api/user/login', async (req, res) => {
     pinnedTeams: readPinnedTeams(user),
     hiddenConferences: readHiddenConferences(user),
     autoPick: readAutoPick(user),
+    networkCategories: readNetworkCategories(user),
     networkLinks: tierNetworkLinks(user.networkLinks),
     savedChannels: (user.savedChannels || []).map(withQualityTier),
     manifestUrl: `/user/${uuid}/manifest.json` 
@@ -5933,15 +6232,6 @@ app.post('/api/user/update', async (req, res) => {
       return res.status(400).json({ error: 'Two providers cannot share an id.' });
     }
     user.providers = next;
-
-    // A reseller's tables are fixed by its bundle rather than chosen in
-    // the Quality data panel, so nothing else would ask for them until the
-    // next warm. Started here and not awaited: the save answers at once,
-    // and the dashboard's next load finds them in memory or joins the
-    // fetch already under way.
-    for (const table of streamcheckTablesFor(user)) {
-      if (!streamcheck.isLoaded(table)) streamcheck.ensureProvider(table).catch(() => {});
-    }
   }
 
   // The pre-providers fields, still accepted so the setup wizard keeps

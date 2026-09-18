@@ -601,6 +601,15 @@
     let networkNotReady = false;   // playlist cache empty; picker unusable
     let networkSearchGroups = {};  // key -> [{name, count, excluded}]
     let networkExcludedGroups = {};// key -> Set of group names hidden from results
+    // A network's chosen categories list every channel in them, loaded
+    // when its section opens; the search box then filters that list here
+    // rather than searching the whole playlist.
+    let networkCategoryChannels = {};  // key -> [channel, ...]
+    let networkCategoryPicker = {};    // key -> { draft: Set, filter } while choosing
+    let allPlaylistCategories = null;  // [{ name, channelCount }], fetched once
+    // Ticked for testing, by URL. A run tests them one at a time.
+    let networkTestSelection = {};     // key -> Set of URLs
+    let networkTestRun = null;         // { key, done, total, stop } while testing
 
     // Setup wizard state (new-account creation only)
     let wizardSelectedSports = [];
@@ -2338,14 +2347,18 @@
           <div id="network-body-${key}" class="${isOpen ? '' : 'hidden'} px-3 pb-3 space-y-2">
             <div id="network-links-list-${key}">${buildNetworkLinksListHtml(key)}</div>
             <div id="network-actions-${key}">${buildNetworkActionsHtml(key)}</div>
+            <div id="network-categories-${key}">${buildNetworkCategoriesHtml(key)}</div>
             <div class="pt-1">
               <input type="text" id="network-search-${key}"
                      value="${escapeHtml((document.getElementById(`network-search-${key}`) || {}).value || '')}"
                      oninput="onNetworkSearchInput('${key}')"
-                     placeholder="Search channels...  use &quot;quotes&quot; for an exact name"
+                     placeholder="${networkCategoriesOf(key).length
+                       ? 'Filter the channels in your categories...'
+                       : 'Search channels...  use &quot;quotes&quot; for an exact name'}"
                      class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
               <div id="network-groups-${key}">${buildSearchGroupChipsHtml(key)}</div>
-              <div id="network-results-${key}" class="mt-1 max-h-48 overflow-y-auto">${resultRows}</div>
+              <div id="network-testbar-${key}">${buildTestBarHtml(key)}</div>
+              <div id="network-results-${key}" class="mt-1 max-h-72 overflow-y-auto">${resultRows}</div>
             </div>
             <div class="flex gap-2 pt-1">
               <input type="text" id="network-paste-${key}"
@@ -2386,6 +2399,11 @@
       body.classList.toggle('hidden', !networkExpanded[key]);
       const chevron = document.querySelector(`#network-header-${key} i.fa-chevron-down`);
       if (chevron) chevron.classList.toggle('rotate-180', !!networkExpanded[key]);
+      // Loaded on first open rather than with the dashboard: two FOX
+      // folders are four hundred rows, and most sections are never opened.
+      if (networkExpanded[key] && networkCategoriesOf(key).length && !networkCategoryChannels[key]) {
+        loadCategoryChannels(key);
+      }
     }
 
     function removeNetworkLink(key, index) {
@@ -2601,7 +2619,7 @@
         const bundle = bundleOf(pr);
         const control = bundle
           ? `<span class="flex-1 text-[11px] text-[#e6e6e6]/60 px-1 py-2">
-               ${escapeHtml(bundle.label)}: ${bundle.folders.map(f => `${escapeHtml(f.prefix)} &rarr; ${escapeHtml(f.table)}`).join(', ')}, matched by channel name
+               ${escapeHtml(bundle.label)}: channels are tested with ffprobe, not read from published data
              </span>`
           : `<select onchange="saveStreamcheckTable(${quoteAttr(pr.id)}, this.value)"
                   class="flex-1 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
@@ -2627,11 +2645,10 @@
           ? `${label}: ${held.channels.toLocaleString()} channels from ${held.provider}, sweep dated ${held.runDate}.`
           : `${label}: ${table} selected, loading now.`;
       };
-      const lines = providers.flatMap(pr => {
-        const bundle = bundleOf(pr);
-        if (bundle) return bundle.folders.map(f => describeTable(`${pr.label} (${f.label})`, f.table));
-        if (!pr.streamcheckProvider) return [`${pr.label}: not using published data.`];
-        return [describeTable(pr.label, pr.streamcheckProvider)];
+      const lines = providers.map(pr => {
+        if (bundleOf(pr)) return `${pr.label}: tested with ffprobe.`;
+        if (!pr.streamcheckProvider) return `${pr.label}: not using published data.`;
+        return describeTable(pr.label, pr.streamcheckProvider);
       });
       note.textContent = providers.every(pr => !pr.streamcheckProvider && !bundleOf(pr))
         ? 'Pick the provider each of your services comes from. Its stream ids are what the lookup matches on.'
@@ -2790,14 +2807,13 @@
     }
 
     // One switch per reseller the server knows about. A reseller renumbers
-    // every channel, so its quality data can only be found by channel
-    // name, in the table of whichever service a folder is from - which is
-    // the whole of what this switch turns on, and why it has to be said
-    // rather than guessed from the server address.
+    // every channel, so no published data describes it and its channels
+    // are tested instead - which is the whole of what this switch turns
+    // on, and why it has to be said rather than guessed from the server
+    // address.
     function bundleSwitches(pr, i) {
       return ((activeUser && activeUser.bundles) || []).map(b => {
         const on = pr.bundle === b.key;
-        const folders = b.folders.map(f => `${escapeHtml(f.prefix)} folders use ${escapeHtml(f.table)}'s data`).join(', ');
         return `
           <label class="flex items-start gap-2 text-[11px] text-[#e6e6e6]/70 cursor-pointer">
             <input type="checkbox" ${on ? 'checked' : ''} class="mt-0.5 accent-[#3b8fc4]"
@@ -2805,11 +2821,21 @@
             <span>
               This is ${escapeHtml(b.label)}
               <span class="block text-[10px] text-[#e6e6e6]/35">
-                Quality data matched by channel name: ${folders}. Auto-pick picks from each separately.
+                Channels are tested with ffprobe from each network section instead of read from
+                published data, and auto-pick leaves them alone.
               </span>
             </span>
           </label>`;
       }).join('');
+    }
+
+    // Whether a channel's provider is one whose channels are tested. Only
+    // those rows get a test checkbox: the server refuses to test the rest,
+    // which have published data instead.
+    function isTestedProviderId(providerId) {
+      const providers = (activeUser && activeUser.providers) || [];
+      const provider = providers.find(pr => pr.id === providerId) || providers[0];
+      return !!(provider && bundleOf(provider));
     }
 
     function setProviderBundle(index, key) {
@@ -3213,6 +3239,15 @@
 
       const providers = autoPickData.providers || [];
       const named = providers.filter(pr => pr.table);
+      // Every provider tested by hand: there is nothing to fix, so the
+      // Quality data advice below would be wrong for this account.
+      if (providers.length > 0 && providers.every(pr => pr.tested)) {
+        note.textContent = 'Your channels are tested with ffprobe rather than read from published ' +
+          'data, so auto-pick leaves them alone. Test and choose them in each network section below.';
+        body.innerHTML = '';
+        summary.textContent = '';
+        return;
+      }
       if (named.length === 0) {
         note.innerHTML = 'No published data is named for this account, so nothing has been measured. ' +
           'Pick a table for each provider under <strong>Quality data</strong> first &mdash; auto-pick ' +
@@ -3236,10 +3271,12 @@
       // services where only one has published data still auto-picks - it
       // just quietly picks from one of them, and this is the only place
       // that would say so.
-      const heads = providers.map(pr => pr.table
+      const heads = providers.map(pr => pr.tested
+        ? `${pr.label}: tested by hand, not auto-picked`
+        : pr.table
         ? `${pr.label}: ${pr.table}, sweep ${pr.runDate || 'unknown'}${pr.loaded ? '' : ' (not loaded)'}`
         : `${pr.label}: no published data`);
-      const share = providers.length > 1
+      const share = providers.filter(pr => !pr.tested).length > 1
         ? ` Up to ${autoPickData.perProviderLimit} links from each provider, best provider first.`
         : '';
       note.textContent = `${heads.join('. ')}. ${last}${share}`;
@@ -3815,6 +3852,15 @@
       const query = input.value.trim();
       const resultsBox = document.getElementById(`network-results-${key}`);
 
+      // A section with categories chosen already holds every channel in
+      // them, so typing narrows that list here instead of searching the
+      // whole playlist - which would bring back the other four hundred
+      // FOX-named things the categories were chosen to leave out.
+      if (networkCategoriesOf(key).length) {
+        filterCategoryChannels(key);
+        return;
+      }
+
       if (query.length < 2) {
         networkSearchResults[key] = [];
         networkSearchGroups[key] = [];
@@ -3834,7 +3880,7 @@
           })
         });
         const data = await res.json();
-        networkSearchResults[key] = (data && data.channels) || [];
+        networkSearchResults[key] = hiddenLast(stampPositions((data && data.channels) || []));
         // Search hits arrive already measured when a provider is set, so
         // their badges are filled in before the list is drawn rather
         // than waiting for someone to check each one.
@@ -3865,8 +3911,29 @@
       // checking, the rest of the row adds it to the network. Nesting a
       // checkbox inside a button would make every tick also add the link.
 
-      const rows = results.map((c, i) => `
-            <div class="flex items-center gap-2 px-2 py-1.5 hover:bg-[#3b4d58] rounded transition">
+      // A channel that failed its test is drawn greyed with the reason and
+      // an Unhide button in place of its checkbox, so it cannot be swept
+      // into the next run by Select all. It can still be added: hiding it
+      // is a statement about the test, not a ban.
+      const selected = networkTestSelection[key] || new Set();
+      const running = !!networkTestRun;
+      const rows = results.map((c, i) => {
+        const test = c.test || {};
+        const testable = test.testable || isTestedProviderId(c.providerId);
+        const lead = test.hidden
+          ? `<button onclick="unhideNetworkChannel('${key}', ${i})" title="Show this channel again so it can be tested"
+                     class="text-[10px] px-1.5 py-0.5 rounded border border-[#e6e6e6]/20 text-[#e6e6e6]/60 hover:text-[#e6e6e6] shrink-0">Unhide</button>`
+          : testable
+            ? `<input type="checkbox" ${selected.has(c.url) ? 'checked' : ''} ${running ? 'disabled' : ''}
+                      onchange="toggleTestSelection('${key}', ${i}, this.checked)" title="Tick to test this channel"
+                      class="accent-[#3b8fc4] shrink-0">`
+            : '';
+        const note = test.hidden
+          ? `<span class="block text-[10px] text-[#e0a355]">Hidden &middot; tested ${escapeHtml(test.format || '')}, not 1080p60 or 720p60</span>`
+          : '';
+        return `
+            <div class="flex items-center gap-2 px-2 py-1.5 hover:bg-[#3b4d58] rounded transition ${test.hidden ? 'opacity-50' : ''}">
+              ${lead}
               <button onclick="addNetworkLink('${key}', ${i})" class="flex-1 min-w-0 text-left flex items-center gap-2">
                 <i class="fa-solid fa-plus text-[10px] text-[#5aa8d1] shrink-0"></i>
                 <span class="flex-1 min-w-0">
@@ -3875,9 +3942,11 @@
                     ${renderProbeBadge(key, c.url, true)}
                   </span>
                   <span class="block text-[10px] text-[#e6e6e6]/45 truncate">${providerTag(c.providerId)}<span class="font-mono text-[#5aa8d1]/70">#${escapeHtml(streamIdFromUrl(c.url))}</span> &middot; ${escapeHtml((c.groups || []).join(' | '))}</span>
+                  ${note}
                 </span>
               </button>
-            </div>`).join('');
+            </div>`;
+      }).join('');
 
       return rows;
     }
@@ -3930,6 +3999,382 @@
       // list they sit around.
       const chips = document.getElementById(`network-groups-${key}`);
       if (chips) chips.innerHTML = buildSearchGroupChipsHtml(key);
+      refreshTestBar(key);
+    }
+
+    // ---- Network categories -------------------------------------------
+    //
+    // Which playlist categories a network section lists its channels from
+    // - both "US| FOX NETWORK" folders for FOX, say. Saved on the account
+    // as soon as they are chosen, like search terms, because they decide
+    // what the section shows rather than anything Stremio sees.
+
+    function networkCategoriesOf(key) {
+      return ((activeUser && activeUser.networkCategories) || {})[key] || [];
+    }
+
+    function buildNetworkCategoriesHtml(key) {
+      const picker = networkCategoryPicker[key];
+      if (picker) {
+        return `
+          <div class="border border-[#e6e6e6]/10 rounded-lg p-2 space-y-2">
+            <div class="flex items-center gap-2">
+              <input type="text" id="network-catfilter-${key}" value="${escapeHtml(picker.filter || '')}"
+                     oninput="onCategoryPickerFilter('${key}', this.value)" placeholder="Filter categories..."
+                     class="flex-1 min-w-0 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-1.5 text-xs focus:border-[#3b8fc4] focus:outline-none">
+              <button onclick="saveNetworkCategories('${key}')" class="bg-[#3b8fc4] hover:bg-[#2f7fb3] text-white text-[11px] font-bold py-1.5 px-3 rounded-lg">Save</button>
+              <button onclick="closeCategoryPicker('${key}')" class="text-[11px] text-[#e6e6e6]/60 hover:text-[#e6e6e6] px-2">Cancel</button>
+            </div>
+            <div id="network-catlist-${key}" class="max-h-48 overflow-y-auto space-y-0.5">${buildCategoryPickerList(key)}</div>
+          </div>`;
+      }
+
+      const chosen = networkCategoriesOf(key);
+      const chips = chosen.length
+        ? chosen.map(name => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-[#3b8fc4]/20 text-[#5aa8d1]">${escapeHtml(name)}</span>`).join('')
+        : '<span class="text-[10px] text-[#e6e6e6]/35 italic">none &mdash; searching the whole playlist</span>';
+      return `
+        <div class="flex flex-wrap items-center gap-1 px-1">
+          <span class="text-[10px] text-[#e6e6e6]/35 mr-1">Categories:</span>${chips}
+          <button onclick="openCategoryPicker('${key}')" class="ml-auto text-[11px] font-bold text-[#5aa8d1] hover:text-[#8cc5e8]">
+            ${chosen.length ? 'Change' : 'Choose categories'}
+          </button>
+        </div>`;
+    }
+
+    function buildCategoryPickerList(key) {
+      const picker = networkCategoryPicker[key];
+      if (!picker) return '';
+      if (!allPlaylistCategories) return '<div class="text-[10px] text-[#e6e6e6]/40 italic px-1">Loading categories...</div>';
+      const words = String(picker.filter || '').toLowerCase().split(/\s+/).filter(Boolean);
+      // Ticked ones first, so what is already chosen stays in view however
+      // the list is filtered.
+      const matching = allPlaylistCategories
+        .filter(c => picker.draft.has(c.name) || words.every(w => c.name.toLowerCase().includes(w)))
+        .sort((a, b) => (picker.draft.has(b.name) ? 1 : 0) - (picker.draft.has(a.name) ? 1 : 0));
+      picker.shown = matching.slice(0, 200);
+      if (picker.shown.length === 0) return '<div class="text-[10px] text-[#e6e6e6]/40 italic px-1">No categories match.</div>';
+      return picker.shown.map((c, i) => `
+        <label class="flex items-center gap-2 text-[11px] px-1 py-0.5 rounded hover:bg-[#3b4d58] cursor-pointer">
+          <input type="checkbox" ${picker.draft.has(c.name) ? 'checked' : ''} class="accent-[#3b8fc4]"
+                 onchange="toggleCategoryDraft('${key}', ${i}, this.checked)">
+          <span class="flex-1 truncate">${escapeHtml(c.name)}</span>
+          <span class="text-[10px] text-[#e6e6e6]/35">${c.channelCount}</span>
+        </label>`).join('') +
+        (matching.length > picker.shown.length
+          ? `<div class="text-[10px] text-[#e6e6e6]/35 px-1">${matching.length - picker.shown.length} more - type to narrow the list.</div>`
+          : '');
+    }
+
+    function refreshNetworkCategories(key) {
+      const box = document.getElementById(`network-categories-${key}`);
+      if (box) box.innerHTML = buildNetworkCategoriesHtml(key);
+      const input = document.getElementById(`network-search-${key}`);
+      if (input) {
+        input.placeholder = networkCategoriesOf(key).length
+          ? 'Filter the channels in your categories...'
+          : 'Search channels...  use "quotes" for an exact name';
+      }
+    }
+
+    async function openCategoryPicker(key) {
+      networkCategoryPicker[key] = { draft: new Set(networkCategoriesOf(key)), filter: '' };
+      refreshNetworkCategories(key);
+      if (allPlaylistCategories) return;
+      try {
+        const res = await fetch('/api/networks/categories', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          showStatus((data && data.error) || 'Could not load your categories.', true);
+          return;
+        }
+        allPlaylistCategories = data.categories || [];
+      } catch (err) {
+        showStatus(`Could not load your categories: ${err.message}`, true);
+        return;
+      }
+      const list = document.getElementById(`network-catlist-${key}`);
+      if (list) list.innerHTML = buildCategoryPickerList(key);
+    }
+
+    function closeCategoryPicker(key) {
+      delete networkCategoryPicker[key];
+      refreshNetworkCategories(key);
+    }
+
+    // Only the list redraws, so the filter box keeps its caret.
+    function onCategoryPickerFilter(key, value) {
+      const picker = networkCategoryPicker[key];
+      if (!picker) return;
+      picker.filter = value;
+      const list = document.getElementById(`network-catlist-${key}`);
+      if (list) list.innerHTML = buildCategoryPickerList(key);
+    }
+
+    function toggleCategoryDraft(key, index, checked) {
+      const picker = networkCategoryPicker[key];
+      const category = picker && picker.shown && picker.shown[index];
+      if (!category) return;
+      if (checked) picker.draft.add(category.name); else picker.draft.delete(category.name);
+    }
+
+    async function saveNetworkCategories(key) {
+      const picker = networkCategoryPicker[key];
+      if (!picker) return;
+      try {
+        const res = await fetch('/api/networks/categories/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uuid: activeUser.uuid, password: activeUser.password,
+            key, categories: [...picker.draft]
+          })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          showStatus((data && data.error) || 'Could not save the categories.', true);
+          return;
+        }
+        activeUser.networkCategories = data.networkCategories || {};
+      } catch (err) {
+        showStatus(`Could not save the categories: ${err.message}`, true);
+        return;
+      }
+      delete networkCategoryPicker[key];
+      delete networkCategoryChannels[key];
+      networkSearchResults[key] = [];
+      networkSearchGroups[key] = [];
+      refreshNetworkCategories(key);
+      if (networkCategoriesOf(key).length) {
+        await loadCategoryChannels(key);
+      } else {
+        renderNetworkSearchResults(key);
+      }
+    }
+
+    async function loadCategoryChannels(key) {
+      const box = document.getElementById(`network-results-${key}`);
+      if (box) box.innerHTML = '<div class="text-[10px] text-[#e6e6e6]/40 italic px-3 py-1.5"><i class="fa-solid fa-spinner fa-spin mr-1"></i>Loading the channels in your categories...</div>';
+      try {
+        const res = await fetch('/api/networks/category-channels', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, key })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          if (box) box.innerHTML = `<div class="text-[10px] text-[#e56a6a] px-3 py-1.5">${escapeHtml((data && data.error) || 'Could not load the channels.')}</div>`;
+          return;
+        }
+        networkCategoryChannels[key] = stampPositions(data.channels);
+        absorbPublishedEntries(networkCategoryChannels[key]);
+        if (data.truncated) showStatus('Those categories hold more channels than can be listed at once; the first 1,500 are shown.', true);
+      } catch (err) {
+        if (box) box.innerHTML = `<div class="text-[10px] text-[#e56a6a] px-3 py-1.5">${escapeHtml(err.message)}</div>`;
+        return;
+      }
+      filterCategoryChannels(key);
+    }
+
+    // Every word typed has to appear in the channel's name or category.
+    function filterCategoryChannels(key) {
+      const input = document.getElementById(`network-search-${key}`);
+      const words = String((input && input.value) || '').toLowerCase().split(/\s+/).filter(Boolean);
+      const all = networkCategoryChannels[key] || [];
+      networkSearchResults[key] = hiddenLast(words.length === 0 ? all : all.filter(c => {
+        const text = `${c.name} ${(c.groups || []).join(' ')}`.toLowerCase();
+        return words.every(w => text.includes(w));
+      }));
+      networkSearchGroups[key] = [];
+      renderNetworkSearchResults(key);
+    }
+
+    // Channels that failed their test, moved below the rest.
+    //
+    // The hidden ones are put back in the order the list first came in,
+    // by the position stamped on each row when it arrived. Without that
+    // they stacked up in reverse: each failure during a run was re-sorted
+    // in ahead of the ones already hidden.
+    function hiddenLast(list) {
+      const shown = list.filter(c => !(c.test && c.test.hidden));
+      const hidden = list.filter(c => c.test && c.test.hidden)
+        .sort((a, b) => (a._pos || 0) - (b._pos || 0));
+      return [...shown, ...hidden];
+    }
+
+    function stampPositions(list) {
+      (list || []).forEach((c, i) => { c._pos = i; });
+      return list || [];
+    }
+
+    // ---- Testing -------------------------------------------------------
+    //
+    // Tick channels, then test them one at a time. Each test holds a
+    // connection to the provider for about twenty seconds - it counts the
+    // bitrate off the wire - and the server spaces them out on top, so a
+    // run of twenty is several minutes. That is why it is a selection and
+    // not a button on the whole list.
+    //
+    // A channel that is not 1080p60 or 720p60 comes back hidden: greyed,
+    // moved to the bottom and left out of Select all, with Unhide to put
+    // it back. Only here - the watch portal's search shows it like any
+    // other channel, since it may still be the only one showing the game.
+
+    const TEST_SECONDS_ESTIMATE = 25;
+
+    function testableRows(key) {
+      return (networkSearchResults[key] || [])
+        .filter(c => !(c.test && c.test.hidden) && ((c.test && c.test.testable) || isTestedProviderId(c.providerId)));
+    }
+
+    function buildTestBarHtml(key) {
+      const rows = testableRows(key);
+      const run = networkTestRun;
+      if (run && run.key === key) {
+        return `
+          <div class="flex items-center gap-2 px-2 py-1.5 text-[11px] text-[#e6e6e6]/70">
+            <i class="fa-solid fa-spinner fa-spin text-[#5aa8d1]"></i>
+            <span class="flex-1">Testing ${run.done + 1} of ${run.total}${run.stop ? ' - stopping after this one' : ''}...
+              about ${Math.max(1, Math.round(((run.total - run.done) * TEST_SECONDS_ESTIMATE) / 60))} min left</span>
+            ${run.stop ? '' : `<button onclick="stopNetworkTests()" class="text-[11px] font-bold text-[#e56a6a]/80 hover:text-[#e56a6a]">Stop</button>`}
+          </div>`;
+      }
+      if (rows.length === 0) return '';
+      const selected = networkTestSelection[key] || new Set();
+      const ticked = rows.filter(c => selected.has(c.url)).length;
+      const busy = !!run;
+      return `
+        <div class="flex items-center gap-3 px-2 py-1.5 text-[11px]">
+          <label class="flex items-center gap-1.5 text-[#e6e6e6]/60 cursor-pointer">
+            <input type="checkbox" ${ticked === rows.length ? 'checked' : ''} ${busy ? 'disabled' : ''}
+                   onchange="selectAllForTest('${key}', this.checked)" class="accent-[#3b8fc4]">
+            Select all (${rows.length})
+          </label>
+          <button onclick="runNetworkTests('${key}')" ${ticked === 0 || busy ? 'disabled' : ''}
+                  class="font-bold px-2.5 py-1 rounded-lg ${ticked === 0 || busy ? 'bg-[#3b4d58] text-[#e6e6e6]/30 cursor-not-allowed' : 'bg-[#3b8fc4] hover:bg-[#2f7fb3] text-white'}">
+            Test selected (${ticked})
+          </button>
+          ${ticked > 0 && !busy ? `<span class="text-[10px] text-[#e6e6e6]/35">about ${Math.max(1, Math.round((ticked * TEST_SECONDS_ESTIMATE) / 60))} min</span>` : ''}
+          ${busy ? '<span class="text-[10px] text-[#e6e6e6]/35">another section is testing</span>' : ''}
+        </div>`;
+    }
+
+    function refreshTestBar(key) {
+      const bar = document.getElementById(`network-testbar-${key}`);
+      if (bar) bar.innerHTML = buildTestBarHtml(key);
+    }
+
+    function toggleTestSelection(key, index, checked) {
+      const channel = (networkSearchResults[key] || [])[index];
+      if (!channel) return;
+      if (!networkTestSelection[key]) networkTestSelection[key] = new Set();
+      if (checked) networkTestSelection[key].add(channel.url); else networkTestSelection[key].delete(channel.url);
+      refreshTestBar(key);
+    }
+
+    function selectAllForTest(key, checked) {
+      networkTestSelection[key] = new Set(checked ? testableRows(key).map(c => c.url) : []);
+      renderNetworkSearchResults(key);
+    }
+
+    // A test result lands on every list holding that channel - the
+    // section's category list and whatever it is filtered down to share
+    // their rows, but a search list does not.
+    function applyTestResult(url, test) {
+      for (const lists of [networkSearchResults, networkCategoryChannels]) {
+        for (const list of Object.values(lists)) {
+          for (const channel of list || []) if (channel.url === url) channel.test = test;
+        }
+      }
+    }
+
+    async function runNetworkTests(key) {
+      if (networkTestRun) return;
+      const urls = testableRows(key).map(c => c.url).filter(url => (networkTestSelection[key] || new Set()).has(url));
+      if (urls.length === 0) return;
+      networkTestRun = { key, done: 0, total: urls.length, stop: false };
+      renderNetworkSearchResults(key);
+
+      let passed = 0;
+      let hidden = 0;
+      let failed = 0;
+      for (const url of urls) {
+        if (networkTestRun.stop) break;
+        probeResults[url] = { checking: true };
+        refreshProbeBadges(url);
+        try {
+          const res = await fetch('/api/networks/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, url })
+          });
+          const data = await res.json().catch(() => null);
+          if (!res.ok || !data || !data.success) {
+            probeResults[url] = { error: (data && data.error) || `The server answered ${res.status}.` };
+            failed++;
+          } else {
+            applyTestResult(url, data.test);
+            // No quality means the picture was read but not the bitrate,
+            // so there is no bpp to rate - the format alone still says
+            // whether it passed.
+            probeResults[url] = data.quality
+              ? { label: data.quality.label, tier: data.quality.tier, score: data.quality.score,
+                  detail: data.quality.detail, source: 'test' }
+              : { label: (data.test && data.test.format) || '?', tier: data.test && data.test.passes ? 'good' : 'low',
+                  detail: 'Bitrate could not be measured', source: 'test' };
+            if (data.test && data.test.passes) passed++;
+            if (data.test && data.test.hidden) hidden++;
+          }
+        } catch (err) {
+          probeResults[url] = { error: err.message };
+          failed++;
+        }
+        if (networkTestSelection[key]) networkTestSelection[key].delete(url);
+        networkTestRun.done++;
+        refreshProbeBadges(url);
+        // Re-sorted after every channel, so a failure drops to the bottom
+        // as it happens rather than all at once when the run ends.
+        networkSearchResults[key] = hiddenLast(networkSearchResults[key] || []);
+        renderNetworkSearchResults(key);
+      }
+
+      const tested = networkTestRun.done;
+      networkTestRun = null;
+      renderNetworkSearchResults(key);
+      showStatus(`Tested ${tested}: ${passed} passed, ${hidden} hidden` + (failed ? `, ${failed} could not be tested.` : '.'), failed > 0);
+    }
+
+    function stopNetworkTests() {
+      if (!networkTestRun) return;
+      networkTestRun.stop = true;
+      refreshTestBar(networkTestRun.key);
+    }
+
+    async function unhideNetworkChannel(key, index) {
+      const channel = (networkSearchResults[key] || [])[index];
+      if (!channel) return;
+      try {
+        const res = await fetch('/api/networks/test/unhide', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password,
+                                 url: channel.url, providerId: channel.providerId })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          showStatus((data && data.error) || 'Could not unhide that channel.', true);
+          return;
+        }
+        applyTestResult(channel.url, data.test);
+      } catch (err) {
+        showStatus(`Could not unhide that channel: ${err.message}`, true);
+        return;
+      }
+      renderNetworkSearchResults(key);
     }
 
     // Persists category folder selections. Returns true/false so callers

@@ -12,7 +12,7 @@ The repository is public. The accounts are not - see Secrets below.
 ## Layout
 
 Node 24, Express 4, five dependencies, no build step and no framework on
-either side of the wire.
+either side of the wire. The image also carries ffmpeg, for ffprobe.
 
 | File | What it owns |
 | --- | --- |
@@ -22,7 +22,8 @@ either side of the wire.
 | `m3u.js` | M3U/EPG parsing and the shared background playlist cache. |
 | `streamcheck.js` | Reads published stream sweeps from streamcheck.pro (a Metabase public dashboard) - alive/dead, codec, resolution, bitrate. |
 | `quality.js` | Turns one of those readings into a band, a score and a badge line. Measures nothing itself. |
-| `bundles.js` | Resellers that carry several services under one login (Flix-Streams: Strong + Trex). Which folder is which service, and finding a renumbered channel's published reading by its name. |
+| `bundles.js` | Resellers that carry other services under one login and renumber every channel (Flix-Streams: Strong + Trex). A provider marked as one is tested with ffprobe instead of read from published data, and auto-pick leaves it alone. |
+| `probe.js` | Measures one stream with ffprobe - resolution, frame rate, scan, bitrate counted off the wire. Only for a reseller's channels, one at a time, when somebody asks. Judges nothing; `quality.js` does that. |
 | `posters.js` | Matchup poster art drawn from team colours and marks. |
 | `wrestling.js` | Wrestling schedules, scraped from the promotions, because nothing publishes them. |
 | `bkfc.js` | Bare Knuckle FC's schedule, scraped for the same reason - ESPN carries no bare knuckle. Merged into the MMA section. |
@@ -52,7 +53,9 @@ image.
 
 Environment: `ENCRYPTION_KEY` (64 hex chars, AES-256-GCM, encrypts saved
 provider credentials), `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `PORT`, `HOST`,
-`SPORTIO_DATA_DIR`, `STREAMCHECK_REFRESH_TIME`, `STREAMCHECK_REFRESH_TZ`.
+`SPORTIO_DATA_DIR`, `STREAMCHECK_REFRESH_TIME`, `STREAMCHECK_REFRESH_TZ`,
+`PROBE_SAMPLE_SECONDS` (seconds of stream a test reads, default 20),
+`FFPROBE_PATH`.
 The app starts without an encryption key on purpose, so the first-run
 setup can generate one - registration and login stay blocked until it is
 real and persistent.

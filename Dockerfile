@@ -1,9 +1,11 @@
 FROM node:24-alpine
 
-# No ffmpeg. Stream quality used to be measured here with ffprobe, which
-# meant carrying the whole of ffmpeg to read two numbers off a video
-# stream. It now comes from published sweeps instead - see streamcheck.js
-# - so the image no longer needs it.
+# ffprobe, which ships in ffmpeg. It left the image once, when quality
+# came entirely from published sweeps, and is back for the providers
+# those sweeps cannot describe: a reseller like Flix-Streams renumbers
+# every channel, so its streams are opened and measured instead. Only
+# ever run when somebody asks to test a channel - see probe.js.
+RUN apk add --no-cache ffmpeg
 
 WORKDIR /usr/src/app
 

@@ -1,39 +1,29 @@
 // IPTV services that resell other services under one login.
 //
-// Flix-Streams sells Strong and Trex together. Every category is listed
-// twice - "Strong8K: US| SPORTS NETWORK" and "Trex: US| SPORTS NETWORK" -
-// and each folder really does play from the service it names: four
-// channels checked by hand in a player showed Strong's published
-// resolution and frame rate from the Strong8K copy and Trex's from the
-// Trex copy, every time.
+// Flix-Streams sells Strong and Trex together, every category listed
+// twice - "Strong8K: US| FOX NETWORK" and "Trex: US| FOX NETWORK" - and
+// each folder really does play from the service it names. What it does
+// not keep is the upstream stream ids: every channel is renumbered, and
+// the new ids bear no relation to the old ones. So streamcheck.pro's
+// published sweeps, keyed by the upstream id, describe none of these
+// channels.
 //
-// What the reseller does not keep is the upstream stream ids. Every
-// channel is renumbered - Strong's 1536908 is 407807884 here - and the
-// new ids are unrelated to the old: sorted by one, the other rises 49.9%
-// of the time, which is chance. So the published tables, which are keyed
-// by the upstream id, cannot be joined on id at all. They can be joined on
-// the channel's name, which the reseller mostly keeps.
+// Matching them by name was tried and taken out again. It read Trex's
+// copies well, but a Strong copy could only be tied to a station, not to
+// a feed - Strong carries several feeds of most stations - and the badge
+// it produced for FOX 28 Cedar Rapids said 1080p60 for a channel that
+// plays at 720p60. A reseller's channels are measured by ffprobe
+// instead, one at a time, when somebody asks. See probe.js.
 //
-// Pure logic over plain data, like networks.js and autopick.js, so a rule
-// can be run against a real reseller list offline.
-
-const { foldSuperscripts } = require('./networks.js');
+// Marking a provider as a reseller therefore means three things, all
+// decided in server.js: its channels can be tested, their readings come
+// from those tests rather than a published table, and auto-pick leaves
+// its links alone, because it has nothing trustworthy to pick with.
 
 // One entry per reseller. Adding another is an entry here and nothing
 // else.
-//
-// `prefix` is how the reseller marks a folder as belonging to a service,
-// and `table` is the streamcheck.pro table that service is published
-// under. Both are written exactly as they appear.
 const BUNDLES = [
-  {
-    key: 'flix-streams',
-    label: 'Flix-Streams',
-    folders: [
-      { prefix: 'Strong8K', table: 'Strong', label: 'Strong' },
-      { prefix: 'Trex', table: 'Trex', label: 'Trex' },
-    ],
-  },
+  { key: 'flix-streams', label: 'Flix-Streams' },
 ];
 
 const BUNDLE_BY_KEY = new Map(BUNDLES.map(bundle => [bundle.key, bundle]));
@@ -42,148 +32,7 @@ function bundleFor(key) {
   return BUNDLE_BY_KEY.get(String(key || '')) || null;
 }
 
-function escapeRegex(text) {
-  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-// Which of a bundle's folders a channel sits in, and its group as the
-// upstream service writes it - "Trex: US| PRIME" is Trex's own "US|
-// PRIME". Takes every category the channel carries, because an M3U
-// channel can be listed under several and only one needs to name a
-// folder. Null when none does.
-function folderOf(bundle, categories) {
-  if (!bundle) return null;
-  for (const category of categories || []) {
-    for (const folder of bundle.folders) {
-      const match = String(category || '').match(
-        new RegExp(`^\\s*${escapeRegex(folder.prefix)}\\s*:\\s*(.*)$`, 'i'));
-      if (match) return { folder, group: match[1] };
-    }
-  }
-  return null;
-}
-
-// ---------------------------------------------------------------------
-// Matching a channel to a published reading by name
-// ---------------------------------------------------------------------
-
-// Superscripts folded, case dropped, every run of punctuation one space.
-//
-// Needed because the two services punctuate the same name differently
-// and the reseller follows only one of them: its Strong8K folders are
-// named the way Trex names things, so Strong's "US: ESPN HD" arrives as
-// "US| ESPN HD". Keeps '+' for the same reason autopick.js does - ESPN+
-// is not ESPN.
-function loose(text) {
-  return foldSuperscripts(text).toLowerCase().replace(/[^a-z0-9+]+/g, ' ').trim();
-}
-
-// A US station's call sign, written in brackets after its name - "US|
-// FOX 10 PHOENIX AZ (KSAZ)", "US: CBS 19 (WOIO) SHAKER HEIGHTS HD".
-//
-// This is what reaches the Strong8K affiliates. Strong writes its
-// station names in a different order from the reseller - "FOX 10 (KSAZ)
-// PHOENIX HD" against "FOX 10 PHOENIX AZ (KSAZ)" - so no amount of
-// normalising the name lines them up, but both carry the call sign.
-// Measured over the 1,078 Strong8K channels auto-pick would look at, name
-// matching alone found 112 and the call sign another 463.
-//
-// Digital subchannel suffixes are allowed and dropped: "(KRQE-DT2)" is
-// KRQE.
-const CALL_SIGN = /\(([KW][A-Z]{2,3})(?:[-\s]?(?:DT|TV|LD|CD|D)?\d*)?\)/;
-
-function callSignOf(name) {
-  const match = String(name || '').toUpperCase().match(CALL_SIGN);
-  return match ? match[1] : null;
-}
-
-// Built once per published table and kept for as long as that table is.
-// A refreshed table is a new Map, so a stale index simply stops being
-// reachable - the same arrangement autopick.js uses for channel facts.
-const indexes = new WeakMap();
-
-// Keys each record five ways, strongest first. The lookup below walks
-// them in that order.
-function nameIndexFor(records) {
-  if (!records) return null;
-  let index = indexes.get(records);
-  if (index) return index;
-
-  index = { exact: new Map(), name: new Map(), looseExact: new Map(), looseName: new Map(), callSign: new Map() };
-  const add = (map, key, record) => {
-    if (!key) return;
-    const list = map.get(key);
-    if (list) list.push(record); else map.set(key, [record]);
-  };
-  for (const record of records.values()) {
-    const name = record.name || '';
-    const group = record.group || '';
-    add(index.exact, `${group}\u0000${name}`, record);
-    add(index.name, name, record);
-    add(index.looseExact, `${loose(group)}\u0000${loose(name)}`, record);
-    add(index.looseName, loose(name), record);
-    // American groups only. A call sign is a US station's, and it is
-    // only ever looked up for one.
-    if (/^us\b/.test(loose(group))) add(index.callSign, callSignOf(name), record);
-  }
-  indexes.set(records, index);
-  return index;
-}
-
-// Whether several published rows say the same thing about a channel.
-//
-// A table can list one name more than once - Strong carries three feeds
-// of WOIO Cleveland and two of KSAZ Phoenix - and there is nothing in the
-// reseller's listing to say which of them it relays. When they agree it
-// does not matter. When they do not, any answer is a guess: one of the
-// KSAZ feeds is Alive at 720p30 and the other is Blackscreen, and badging
-// the channel with either would be confidently wrong half the time.
-function agree(records) {
-  const first = records[0];
-  return records.every(r =>
-    r.status === first.status && r.height === first.height && r.fps === first.fps);
-}
-
-// Of rows that agree, the one with the lowest bitrate. They can agree on
-// everything above and still carry different bitrates, which rate
-// differently, and when it cannot be known which feed is the one being
-// relayed the smaller claim is the honest one.
-function leastOf(records) {
-  return records.reduce((low, r) => ((r.bitrate || 0) < (low.bitrate || 0) ? r : low));
-}
-
-// The published reading for a channel, found by its name and group, or
-// null.
-//
-// Walks the index strongest key first and stops at the first key that
-// finds anything - including when what it finds disagrees. A weaker key
-// only ever finds more rows than a stronger one, so falling through past
-// a disagreement would not resolve it, only hide it.
-function lookupByName(index, name, group) {
-  if (!index || !name) return null;
-  const sign = callSignOf(name);
-  const steps = [
-    [index.exact, `${group || ''}\u0000${name}`],
-    [index.name, name],
-    [index.looseExact, `${loose(group)}\u0000${loose(name)}`],
-    [index.looseName, loose(name)],
-    [index.callSign, sign],
-  ];
-  for (const [map, key] of steps) {
-    if (!key) continue;
-    const hits = map.get(key);
-    if (!hits) continue;
-    return agree(hits) ? leastOf(hits) : null;
-  }
-  return null;
-}
-
 module.exports = {
   BUNDLES,
   bundleFor,
-  folderOf,
-  nameIndexFor,
-  lookupByName,
-  callSignOf,
-  loose,
 };
