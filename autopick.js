@@ -655,6 +655,10 @@ const BANDS = [
 // another way of saying it is not the American channel being looked for.
 const MIN_FPS = 60;
 
+// Also how a tested channel is ranked in the dashboard's channel list -
+// the same ladder, so a channel tested by hand and one auto-picked from
+// published data are ordered by one standard. See testStateFor in
+// server.js.
 function bandFor(reading) {
   const height = reading.height || 0;
   for (let i = 0; i < BANDS.length; i++) {
@@ -842,6 +846,7 @@ module.exports = {
   DEFAULT_RULES,
   BANDS,
   MIN_FPS,
+  bandFor,
   autoPickableNetworks,
   rulesFor,
   candidatesFor,

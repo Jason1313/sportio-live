@@ -3880,7 +3880,7 @@
           })
         });
         const data = await res.json();
-        networkSearchResults[key] = hiddenLast(stampPositions((data && data.channels) || []));
+        networkSearchResults[key] = orderForPicking(stampPositions((data && data.channels) || []));
         // Search hits arrive already measured when a provider is set, so
         // their badges are filled in before the list is drawn rather
         // than waiting for someone to check each one.
@@ -4185,7 +4185,7 @@
       const input = document.getElementById(`network-search-${key}`);
       const words = String((input && input.value) || '').toLowerCase().split(/\s+/).filter(Boolean);
       const all = networkCategoryChannels[key] || [];
-      networkSearchResults[key] = hiddenLast(words.length === 0 ? all : all.filter(c => {
+      networkSearchResults[key] = orderForPicking(words.length === 0 ? all : all.filter(c => {
         const text = `${c.name} ${(c.groups || []).join(' ')}`.toLowerCase();
         return words.every(w => text.includes(w));
       }));
@@ -4193,17 +4193,41 @@
       renderNetworkSearchResults(key);
     }
 
-    // Channels that failed their test, moved below the rest.
+    // The order a channel list is shown in, best first.
     //
-    // The hidden ones are put back in the order the list first came in,
-    // by the position stamped on each row when it arrived. Without that
-    // they stacked up in reverse: each failure during a run was re-sorted
-    // in ahead of the ones already hidden.
-    function hiddenLast(list) {
-      const shown = list.filter(c => !(c.test && c.test.hidden));
-      const hidden = list.filter(c => c.test && c.test.hidden)
-        .sort((a, b) => (a._pos || 0) - (b._pos || 0));
-      return [...shown, ...hidden];
+    //   1. Passed its test, by the band the server put it in - 1080 at
+    //      0.060 bpp or more, then 720 at 0.080 or more, then the
+    //      remaining 1080, then the remaining 720 - and by bpp inside a
+    //      band. Auto-pick's own ladder, so the top of this list is what
+    //      it would have picked.
+    //   2. Not tested yet.
+    //   3. Failed, but unhidden to be looked at again.
+    //   4. Failed and hidden.
+    //
+    // Everything else stays in the order the list first came in, by the
+    // position stamped on each row when it arrived. Without that, re-
+    // sorting after every test in a run shuffled rows that had not
+    // changed, and failures stacked up in reverse.
+    function testRank(c) {
+      const t = c.test || {};
+      if (t.hidden) return 3;
+      if (t.tested && t.passes) return 0;
+      if (!t.tested) return 1;
+      return 2;
+    }
+
+    function orderForPicking(list) {
+      return [...list].sort((a, b) => {
+        const rank = testRank(a) - testRank(b);
+        if (rank) return rank;
+        if (testRank(a) === 0) {
+          const band = (a.test.band ?? 9) - (b.test.band ?? 9);
+          if (band) return band;
+          const bpp = (b.test.bpp || 0) - (a.test.bpp || 0);
+          if (bpp) return bpp;
+        }
+        return (a._pos || 0) - (b._pos || 0);
+      });
     }
 
     function stampPositions(list) {
@@ -4336,9 +4360,10 @@
         if (networkTestSelection[key]) networkTestSelection[key].delete(url);
         networkTestRun.done++;
         refreshProbeBadges(url);
-        // Re-sorted after every channel, so a failure drops to the bottom
-        // as it happens rather than all at once when the run ends.
-        networkSearchResults[key] = hiddenLast(networkSearchResults[key] || []);
+        // Re-sorted after every channel, so a good one rises into place
+        // and a failure drops to the bottom as it happens, rather than
+        // all at once when the run ends.
+        networkSearchResults[key] = orderForPicking(networkSearchResults[key] || []);
         renderNetworkSearchResults(key);
       }
 

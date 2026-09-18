@@ -5210,6 +5210,17 @@ function testRecordFor(result) {
 //   passes    the test met TEST_MIN_HEIGHT and TEST_MIN_RATE
 //   hidden    it failed and nobody has asked to see it again
 //   format    what the test found, "720p30", or why it could not
+//   band      for a channel that passed, its place on auto-pick's quality
+//             ladder: 0 is 1080 at 0.060 bpp or more, 1 is 720 at 0.080
+//             or more, 2 the remaining 1080, 3 the remaining 720
+//   bpp       what the band was read from, which orders a band inside
+//
+// The page orders its channel list by band, then bpp - the standard
+// auto-pick ranks published readings by, so a channel picked by hand
+// from the top of the list is the one auto-pick would have picked. A
+// test that could not count the bitrate has no bpp and lands in a
+// "remaining" band, which is the honest place for a reading with half
+// its numbers missing.
 function testStateFor(user, providerId, url) {
   const testable = isTestedProvider(providerFor(user, providerId));
   const result = testable && url
@@ -5218,11 +5229,16 @@ function testStateFor(user, providerId, url) {
   if (!result) return { testable, tested: false, passes: false, hidden: false };
   const passes = meetsTestBar(result);
   const rate = result.ok && result.fps ? (result.interlaced ? result.fps * 2 : result.fps) : null;
+  const bpp = result.ok
+    ? quality.bitsPerPixel({ bitrate: result.bitrate, width: result.width, height: result.height, fps: result.fps })
+    : null;
   return {
     testable,
     tested: true,
     passes,
     hidden: !passes && !result.shown,
+    band: passes ? autopick.bandFor({ height: result.height, bpp }) : null,
+    bpp: bpp ? Math.round(bpp * 1000) / 1000 : null,
     testedAt: result.testedAt || '',
     format: result.ok
       ? `${result.height}${result.interlaced ? 'i' : 'p'}${rate || ''}`
@@ -5369,8 +5385,10 @@ app.post('/api/networks/categories/save', async (req, res) => {
 // naming the categories themselves, and quietly dropping part of it would
 // read as the provider having lost channels.
 //
-// Channels that failed their test go to the bottom, in the order they
-// were in. The page greys them and keeps them out of the next test run.
+// Sent in playlist order. The page does the ordering - best tested
+// channels first, failures last - because it has to re-order after every
+// test in a run anyway, and one ordering in one place cannot disagree
+// with itself.
 const MAX_CATEGORY_CHANNELS = 1500;
 
 app.post('/api/networks/category-channels', async (req, res) => {
@@ -5401,11 +5419,9 @@ app.post('/api/networks/category-channels', async (req, res) => {
       };
     })));
 
-  const shown = entries.filter(e => !(e.test && e.test.hidden));
-  const hidden = entries.filter(e => e.test && e.test.hidden);
   return res.json({
     success: true,
-    channels: [...shown, ...hidden],
+    channels: entries,
     truncated: found.length > MAX_CATEGORY_CHANNELS,
   });
 });
