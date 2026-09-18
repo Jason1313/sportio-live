@@ -5210,17 +5210,38 @@ function testRecordFor(result) {
 //   passes    the test met TEST_MIN_HEIGHT and TEST_MIN_RATE
 //   hidden    it failed and nobody has asked to see it again
 //   format    what the test found, "720p30", or why it could not
-//   band      for a channel that passed, its place on auto-pick's quality
-//             ladder: 0 is 1080 at 0.060 bpp or more, 1 is 720 at 0.080
-//             or more, 2 the remaining 1080, 3 the remaining 720
+//   band      for a channel that passed, its place on TEST_BANDS below
 //   bpp       what the band was read from, which orders a band inside
 //
-// The page orders its channel list by band, then bpp - the standard
-// auto-pick ranks published readings by, so a channel picked by hand
-// from the top of the list is the one auto-pick would have picked. A
-// test that could not count the bitrate has no bpp and lands in a
-// "remaining" band, which is the honest place for a reading with half
-// its numbers missing.
+// The page orders its channel list by band, then bpp. A test that could
+// not count the bitrate has no bpp and lands in a "remaining" band, which
+// is the honest place for a reading with half its numbers missing.
+
+// Auto-pick's ladder (autopick.BANDS), with one rung it never needs:
+// interlaced 1080, which a published table never reports and a test does.
+//
+// It goes below every progressive 1080p60, even a starved one. Its bpp
+// is taken per full frame, thirty a second, where 1080p60 has sixty - so
+// on the same bitrate it read twice as well fed and was ranking above
+// true 1080p60, which is not how it looks: an interlaced picture combs on
+// exactly the motion a game is made of. It still goes above the remaining
+// 720p60, since it carries the same sixty pictures a second at a higher
+// resolution.
+const TEST_BANDS = [
+  '1080p60 at 0.060 bpp or more',
+  '720p60 at 0.080 bpp or more',
+  'remaining 1080p60',
+  '1080i60',
+  'remaining 720p60',
+];
+const TEST_BAND_FROM_AUTOPICK = [0, 1, 2, 4, 4];
+const INTERLACED_1080_BAND = 3;
+
+function testBandFor(result, bpp) {
+  if (result.interlaced && result.height >= 1080) return INTERLACED_1080_BAND;
+  return TEST_BAND_FROM_AUTOPICK[autopick.bandFor({ height: result.height, bpp })];
+}
+
 function testStateFor(user, providerId, url) {
   const testable = isTestedProvider(providerFor(user, providerId));
   const result = testable && url
@@ -5237,7 +5258,8 @@ function testStateFor(user, providerId, url) {
     tested: true,
     passes,
     hidden: !passes && !result.shown,
-    band: passes ? autopick.bandFor({ height: result.height, bpp }) : null,
+    band: passes ? testBandFor(result, bpp) : null,
+    bandName: passes ? TEST_BANDS[testBandFor(result, bpp)] : '',
     bpp: bpp ? Math.round(bpp * 1000) / 1000 : null,
     testedAt: result.testedAt || '',
     format: result.ok

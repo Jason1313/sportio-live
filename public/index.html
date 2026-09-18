@@ -4195,11 +4195,12 @@
 
     // The order a channel list is shown in, best first.
     //
-    //   1. Passed its test, by the band the server put it in - 1080 at
-    //      0.060 bpp or more, then 720 at 0.080 or more, then the
-    //      remaining 1080, then the remaining 720 - and by bpp inside a
-    //      band. Auto-pick's own ladder, so the top of this list is what
-    //      it would have picked.
+    //   1. Passed its test, by the band the server put it in - 1080p at
+    //      0.060 bpp or more, then 720p at 0.080 or more, then the
+    //      remaining 1080p, then 1080i, then the remaining 720p - and by
+    //      bpp inside a band. Auto-pick's ladder with a rung for
+    //      interlaced 1080, which ranks below every true 1080p60. See
+    //      TEST_BANDS in server.js.
     //   2. Not tested yet.
     //   3. Failed, but unhidden to be looked at again.
     //   4. Failed and hidden.
