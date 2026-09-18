@@ -252,7 +252,7 @@ const FOREIGN_PREFIX = new Set([
 
 // tvg-ids carry a country suffix - "espn.us", "wnywdt.us", "fox.uk" - and
 // where one exists it is the most direct statement of nationality on the
-// channel. networks.js reads the same suffix for its own purposes.
+// channel.
 const TVG_COUNTRY = /\.([a-z]{2})$/i;
 
 function tvgCountry(tvgId) {

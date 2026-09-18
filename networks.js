@@ -173,9 +173,10 @@ const BUCKET_KINDS = new Set(['event', 'search', 'hybrid']);
 //
 // This matters more than it looks. On a sampled FBS Saturday, ESPN+ was
 // the single most common national broadcast - 13 of 46 games, more than
-// ESPN and ABC combined. Those games fall through to the tier system,
-// which is the right place for them: providers list ESPN+ events as
-// individual per-event channels whose names carry the matchup.
+// ESPN and ABC combined. Those games get no slot, which is the right
+// answer for them: providers list ESPN+ events as individual per-event
+// channels whose names carry the matchup, and the team search finds
+// those where a network slot never could.
 //
 // `geoBroadcasts[].type.shortName` already reports 'Streaming' vs 'TV'
 // and is the primary signal; this list is a second gate for the case
@@ -294,9 +295,9 @@ function extractNationalBroadcasts(competition) {
 // Resolves the canonical network slot key for a game, or null.
 //
 // Returns null when the game is streaming-only, on a network with no slot
-// defined, or has no national broadcast at all. Null is not an error - it
-// is the signal to fall back to the tier system, which is the correct
-// outcome for all three of those cases.
+// defined, or has no national broadcast at all. Null is not an error -
+// there is simply no slot to serve, and buildStreamList says which of the
+// three it was.
 function resolveNetworkFromBroadcasts(nationalBroadcasts) {
   for (const b of nationalBroadcasts || []) {
     if (b.type === 'Streaming') continue;
@@ -346,11 +347,12 @@ function makeLinkEntry({ url, tvgId, name, group, streamId, type, probedQuality,
     tvgId: tvgId || '',
     name: name || '',
     group: group || '',
-    // Last measured resolution/frame rate, e.g. "1080p60". Stored so the
-    // label survives a restart - the probe cache is memory-only, so
-    // without this a stream would show its quality in Stremio only until
-    // the container next restarted. It is a record of the last check, not
-    // a live reading; the dashboard is where it gets refreshed.
+    // The last quality label read for this stream, e.g. "Good · 1080p60 ·
+    // 0.071bpp". Stored so the label survives a restart - published
+    // tables are held in memory only, so without this a stream would show
+    // no quality in Stremio until its provider's table was pulled again.
+    // It is a record of the last reading, not a live one. The name dates
+    // from when readings came from probing the stream itself.
     probedQuality: probedQuality || '',
   };
 }
@@ -590,25 +592,26 @@ function getNetworkLabel(networkKey) {
 // Automatic playlist search
 // ---------------------------------------------------------------------
 //
-// A third source of channels, sitting between the user's hand-picked
-// links and the tier system.
+// A second source of channels, sitting after the user's hand-picked
+// links and ahead of the team search.
 //
 // Some events never have a fixed channel to configure. Providers file
 // them as one throwaway listing per card, named after the promotion and
 // the card number, and both the name and the stream URL change every
-// event. A curated link list cannot track that, and the tier system
-// cannot find it either - tiers match on the two fighters' names, which a
-// listing called "UFC 320 PPV" never spells out.
+// event. A curated link list cannot track that, and a search on the two
+// fighters' names cannot find it either, because a listing called "UFC
+// 320 PPV" never spells them out.
 //
 // So a sport can declare a standing search instead: terms to look for in
 // a channel's name, optionally confined to particular playlist groups. It
 // runs fresh on every stream request, so tonight's card is found the
 // moment the provider lists it, with nothing to configure.
 //
-// Results rank BELOW the configured links and ABOVE the tier results. A
-// hand-picked, quality-checked channel is a deliberate choice and always
-// wins; but a name match confined to the right group is a much stronger
-// signal than a tier-4 nickname hit, which is inference over EPG text.
+// Results rank BELOW the configured links. A hand-picked, quality-checked
+// channel is a deliberate choice and always wins; but a name match
+// confined to the right group is a much stronger signal than a team
+// nickname hit, which is why the team search only runs when this and the
+// links have both come back empty.
 const AUTO_SEARCH = {
   // UFC cards land in the provider's Paramount+ PPV group, one listing
   // per card. Confining the search to that group is what keeps it useful:
@@ -1041,15 +1044,16 @@ function describeNothingFound(networkKey, nationalBroadcasts) {
 
 
 // ---------------------------------------------------------------------
-// Channel suggestion
+// Channel names
 // ---------------------------------------------------------------------
 
 // Providers decorate channel names heavily, and none of the decoration is
 // part of the network's identity. Stripping it lets an exact comparison
 // do the work, which is far safer here than fuzzy/substring matching:
 // "FOX Sports 2", "FOX Deportes" and "Fox Soccer Plus" all CONTAIN "FOX"
-// but none of them is FOX, and suggesting one would send the user to the
-// wrong channel with no obvious sign anything was wrong.
+// but none of them is FOX, and a quoted search for "FOX" that returned
+// one would send the user to the wrong channel with no obvious sign
+// anything was wrong. See matchesPhrase.
 //
 // Every pattern below is drawn from real observed names, not invented:
 //   "NCAAF 06: FOX"          -> sport-bundle slot prefix
@@ -1075,40 +1079,23 @@ function foldSuperscripts(text) {
     ch => SUPERSCRIPT_FOLD[ch] !== undefined ? SUPERSCRIPT_FOLD[ch] : ' ');
 }
 
-// Stream quality, read from the channel name. Ordered best-first and the
-// first match wins, so "UHD 3840P" scores as 4K rather than also matching
-// a lower tier.
+// The quality a channel's NAME claims, as a label - the badge a preset
+// channel shows before any published reading has been matched to it.
+// A claim, not a measurement: quality.js rates what was actually swept.
 //
-// Weighted to matter without overriding identity: a strong quality signal
-// can outrank a weaker group hint, but never turns a wrong channel into
-// the suggested one. If these want tuning later, this table is the only
-// place to change.
-// 4K is DEMOTED, not promoted, despite being the highest resolution.
-// This provider's 4K feeds are World Cup leftovers that no longer run,
-// and an unavailable stream at any resolution is worse than a working
-// one. Most sit in the "4K Channels" group and are dropped outright by
-// isDeadChannel; this penalty covers the stragglers listed elsewhere -
-// they stay reachable but rank last. If live 4K feeds appear later, move
-// this back above 1080p.
+// These carried weights once, when suggestions were scored and a name's
+// quality marker was one term in the score. The scoring is gone (see
+// presetChannelsForNetwork) and the label is all that is read now.
 //
-// 1080p is now the top tier, which is what "best available and actually
-// up" means here.
-// Bare "HD" is scored separately from, and far below, an explicit 720p.
-// It reads like a resolution but carries almost no information - nearly
-// every channel in the playlist is HD, and providers append it as
-// decoration rather than as a spec. Treating it as equivalent to 720p
-// gave it enough weight to overturn a TV Guide (USA) listing, which is a
-// much stronger signal: "US: NFL NETWORK ᴴᴰ" was outranking the TV Guide
-// NFL Network feed purely on the strength of two decorative characters.
-//
-// Checked in order, first match wins - so "FHD" resolves as 1080p rather
-// than falling through to the bare-HD tier.
+// Checked in order, first match wins - so "UHD 3840P" reads as 4K rather
+// than also matching a lower row, and "FHD" as 1080p rather than falling
+// through to bare HD.
 const QUALITY_TIERS = [
-  { pattern: /\b(?:4k|uhd|2160p?|3840p?)\b/i, weight: -30, label: '4K' },
-  { pattern: /\b(?:fhd|1080p?)\b/i,           weight: 25,  label: '1080p' },
-  { pattern: /\b720p?\b/i,                    weight: 10,  label: '720p' },
-  { pattern: /\bhd\b/i,                       weight: 2,   label: 'HD' },
-  { pattern: /\b(?:sd|480p?|360p?)\b/i,       weight: -10, label: 'SD' },
+  { pattern: /\b(?:4k|uhd|2160p?|3840p?)\b/i, label: '4K' },
+  { pattern: /\b(?:fhd|1080p?)\b/i,           label: '1080p' },
+  { pattern: /\b720p?\b/i,                    label: '720p' },
+  { pattern: /\bhd\b/i,                       label: 'HD' },
+  { pattern: /\b(?:sd|480p?|360p?)\b/i,       label: 'SD' },
 ];
 
 function detectQuality(name) {
@@ -1116,7 +1103,7 @@ function detectQuality(name) {
   for (const tier of QUALITY_TIERS) {
     if (tier.pattern.test(folded)) return tier;
   }
-  return { weight: 0, label: '' };
+  return { label: '' };
 }
 
 function stripChannelDecorations(name) {
@@ -1130,147 +1117,6 @@ function stripChannelDecorations(name) {
     .trim();
 }
 
-// tvg-ids carry a country suffix ("espn.us", "tnt.uk"). Stripping it lets
-// the id itself be compared against the network's aliases - which turns
-// out to identify every cable network exactly: secnetwork.us -> secnetwork
-// matches the alias "SEC Network", accnetwork.us matches "ACC Network",
-// and so on. Broadcast networks don't work this way (their ids are
-// affiliate call signs like wnywdt.us), which is precisely why they need
-// the user to choose a market and cable networks largely don't.
-const COUNTRY_SUFFIX = /\.(us|uk|ca|au|nz|ie|mx|es|de|fr|it|gr|br|ar|in|pt|nl|se|no|dk|fi|pl|tr|za|jp|kr)$/i;
-
-function normalizeTvgId(id) {
-  return normalizeNetworkName(String(id || '').replace(COUNTRY_SUFFIX, ''));
-}
-
-function tvgIdCountry(id) {
-  const match = String(id || '').match(COUNTRY_SUFFIX);
-  return match ? match[1].toLowerCase() : null;
-}
-
-// Groups that make a channel MORE likely to be the right pick, weighted
-// by how specific the signal actually is. These are hints only - a
-// channel is never suggested on group alone, and never excluded for
-// lacking one. They exist mainly to break ties among the hundreds of
-// identical-scoring broadcast affiliates, where a feed that lives in the
-// provider's own college-football bundle is a far better default than an
-// arbitrary local market.
-//
-// A sport-specific bundle is a much stronger signal than a generic
-// national listing: a channel sitting in "College Football" was put
-// there to carry college football, whereas "TV Guide (USA)" says only
-// that it's American.
-const PREFERRED_GROUP_HINTS = [
-  // The provider's main US listing, and confirmed in practice to be the
-  // reliable, consistently-live, good-quality feeds - so it outranks
-  // every other hint rather than acting as the weak generic signal it
-  // was first treated as.
-  { pattern: /tv guide \(usa\)/i,   weight: 30 },
-  { pattern: /nfl sunday ticket/i,  weight: 25 },
-  { pattern: /\bnfl\b/i,            weight: 20 },
-  { pattern: /sport networks/i,     weight: 15 },
-];
-
-// Groups whose channels are dead in practice, whatever their names claim.
-//
-//   "4K Channels"      - World Cup leftovers; the feeds no longer run.
-//   "College Football" - the NCAAF nn: slots, dark out of season.
-//
-// Applied ONLY when the channel has no strong-US group alongside them,
-// because membership is not exclusive and the same URL is often listed
-// in several groups at once. The provider's real ESPN feed
-// (espn.us, .../605011.ts) sits in TV Guide (USA), College Football AND
-// Sport Networks simultaneously - excluding on any single dead-group
-// match would throw away a perfectly good channel along with the dead
-// ones. Being listed somewhere live is proof enough that it is live.
-//
-// These are excluded from SUGGESTIONS only. Search still finds them, so
-// when college football returns they can be added by hand - or moved
-// back into PREFERRED_GROUP_HINTS to be suggested again.
-const DEAD_GROUP_HINTS = [
-  /4k channels/i,
-  /college football/i,
-];
-
-// Groups that positively confirm a channel is a live US feed. Used both
-// to rescue a channel from DEAD_GROUP_HINTS above and to suppress the
-// soft penalties below.
-const STRONG_US_GROUP_HINTS = [
-  /tv guide \(usa\)/i,
-  /nfl sunday ticket/i,
-];
-
-// Groups that make a channel LESS likely: foreign feeds, and the
-// Spanish-language and Latin-America variants that share a network's name
-// but not its commentary.
-// The bare country names matter as much as the prefixed/parenthesized
-// forms: a Canadian NBC feed was surfacing in suggestions because its
-// group is "Canada ᴳᴬᴺᴶᴬ" (no pipe, no parentheses) and its tvg-id is a
-// "dummy-" placeholder carrying no country suffix to penalize either.
-// News-channel groups are excluded for a different reason - "ABC" in a
-// news bundle is ABC News, not the network carrying the game.
-// Wrong-country or wrong-language feeds. These always apply - no amount
-// of being listed in a US group makes a Spanish-language or Canadian feed
-// the right answer for an NFL game.
-const HARD_PENALTY_HINTS = [
-  /^(?:uk|ca|au|ie|nz)\s*\|/i, /\((?:uk|canada|australia|ireland)\)/i,
-  /\b(?:canada|australia|ireland|mexico|brasil|brazil)\b/i,
-  /deportes|espanol|español/i,
-  // Free ad-supported streaming bundles. A channel here named for a
-  // league or promotion carries highlights, replays and studio filler -
-  // never the live event. Left as a penalty rather than a dead group so
-  // one can still be added by hand, but they should never be suggested:
-  // the UFC bucket was proposing "Ufc" from Prime, Roku and Tubi, none of
-  // which ever carries a live card.
-  /\b(?:prime|roku|tubi|pluto|plex|xumo|freevee)\s+channels\b/i,
-];
-
-// Lower-confidence listings rather than wrong ones. Suppressed when the
-// channel also appears in a strong-US group, because that membership
-// already answers the question these were guarding against.
-//
-// This mattered concretely: the provider's NFL Network sits in TV Guide
-// (USA), NFL Sunday Ticket, DirecTV GO and Sport Networks at once, and
-// an unconditional DirecTV penalty dragged it below feeds with far
-// weaker credentials.
-const SOFT_PENALTY_HINTS = [
-  /directv go/i, /entertainment/i, /news networks/i,
-];
-
-function matchesAny(categories, patterns) {
-  return (categories || []).some(group => patterns.some(re => re.test(group)));
-}
-
-// Takes the STRONGEST preferred hint rather than summing them. Summing
-// let two weak generic hints outrank one strong specific one - membership
-// in several generic groups says a channel is popular, not that it's the
-// right one.
-function scoreGroups(categories) {
-  let best = 0;
-  for (const group of categories || []) {
-    for (const hint of PREFERRED_GROUP_HINTS) {
-      if (hint.pattern.test(group)) best = Math.max(best, hint.weight);
-    }
-  }
-
-  let penalty = 0;
-  if (matchesAny(categories, HARD_PENALTY_HINTS)) penalty -= 20;
-  if (!matchesAny(categories, STRONG_US_GROUP_HINTS) && matchesAny(categories, SOFT_PENALTY_HINTS)) {
-    penalty -= 20;
-  }
-  return best + penalty;
-}
-
-// True when every group this channel belongs to is a dead one - see
-// DEAD_GROUP_HINTS. A channel listed anywhere live is kept.
-function isDeadChannel(categories) {
-  if (!matchesAny(categories, DEAD_GROUP_HINTS)) return false;
-  return !matchesAny(categories, STRONG_US_GROUP_HINTS);
-}
-
-// Scores one channel as a candidate for one network. Returns null when
-// the channel isn't a plausible match at all, which is the common case -
-// only an exact match on the cleaned name or on the tvg-id qualifies.
 // The trailing id from a stream URL (".../429939.ts" -> "429939").
 //
 // This is what distinguishes one feed from another. A channel id is
@@ -1288,15 +1134,6 @@ function streamIdFromUrl(url) {
   const match = String(url || '').match(/\/([^\/?#]+?)(?:\.[a-z0-9]+)?(?:[?#].*)?$/i);
   return match ? match[1] : '';
 }
-
-// A channel whose stream the user has previously chosen for this network
-// outranks everything else. Carried across IPTV providers because tvg-ids
-// come from shared EPG naming ("espn.us", "secnetwork.us") rather than
-// from any one provider's playlist - which is what makes them portable,
-// and why they are the only thing stored as a default. No URL, no
-// credentials, nothing account-specific.
-const PREFERRED_STREAM_BONUS = 200;
-
 
 // Which of a preset's channels this playlist actually has, for one
 // network, in the order the operator arranged them.
@@ -1555,11 +1392,9 @@ module.exports = {
   resolveNetworkLinks,
   getNetworkLabel,
   MAX_SAVED_CHANNELS,
-  PREFERRED_STREAM_BONUS,
   streamIdFromUrl,
   validateSavedChannels,
   resolveSavedChannels,
-  isDeadChannel,
   getEventNetworkForSport,
   getPinnedNetworksForSport,
   isPinnedNetwork,
@@ -1580,7 +1415,6 @@ module.exports = {
   stripChannelDecorations,
   foldSuperscripts,
   detectQuality,
-  normalizeTvgId,
   searchChannels,
   parseSearchQuery,
   matchesPhrase,

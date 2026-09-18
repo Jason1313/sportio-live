@@ -3076,22 +3076,14 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
       const homeAbbr = homeTeam.abbreviation || '';
       const awayAbbr = awayTeam.abbreviation || '';
 
-      // Flattened, deduplicated list of every broadcast name ESPN lists for
-      // this game across all markets (national/home/away) - a match against
-      // any of these counts, per how broadcast rights actually work (a
-      // single national feed can carry the game on multiple channels at
-      // once, e.g. ["MLB.TV", "FS1"]).
-      const broadcastNames = [...new Set(
-        (competition.broadcasts || []).flatMap(b => b.names || [])
-      )];
-
-      // National-only, type-aware view of the same data, plus the network
-      // slot it resolves to. Kept separate from broadcastNames above
-      // rather than replacing it: that field mixes in local affiliates,
-      // which is wrong for picking a channel but is exactly the broad
-      // net the tier system would want if broadcast matching is ever
-      // revisited there. `network` is null for streaming-only games and
-      // for networks with no slot defined - both mean "use the tiers".
+      // The national broadcasts, tagged TV or streaming, and the network
+      // slot they resolve to. `network` is null for streaming-only games
+      // and for networks with no slot defined; the stream route then says
+      // what the game IS on rather than pointing at a slot to fill.
+      //
+      // A flattened list of every broadcast name across all markets used
+      // to ride along beside this, kept for the tier system's broad
+      // matching. The tier system went and nothing read the list again.
       const { nationalBroadcasts, network } = networks.resolveNetworkFromCompetition(competition);
 
       const gameUtcDate = event.date || '';
@@ -3252,15 +3244,14 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
         // gave every fixture "portrait" while the route rendered a
         // square - and the grid cropped the logos off to fit.
         posterShape: DRAWN_POSTER_SPORTS.has(sport.toUpperCase()) ? 'square' : 'portrait',
-        // Just the nickname (e.g. "Suns"), not the full "Phoenix Suns" -
-        // needed for tier 4's city/state exclusion rule in stream ranking.
+        // Both halves of each name - "Hurricanes" and "Miami" - for the
+        // team search, which tries each. See networks.teamSearchTerms.
         homeNick,
         awayNick,
         homeLocation,
         awayLocation,
         homeAbbr,
         awayAbbr,
-        broadcastNames,
         nationalBroadcasts,
         network,
         poster,
@@ -3368,15 +3359,13 @@ async function fetchTodayLeagueEvents(league, hostUrl, userTimeZone = 'America/N
       const fighterAFlagUrl = competitorA.athlete?.flag?.href || '';
       const fighterBFlagUrl = competitorB.athlete?.flag?.href || '';
 
-      const broadcastNames = [...new Set(
-        (competition.broadcasts || []).flatMap(b => b.names || [])
-      )];
-
       // UFC resolves a network the same way every other sport does, even
       // though its answer is usually a streaming service (Paramount+ for
       // Fight Nights, confirmed live) and therefore usually null. That's
-      // fine: UFC combines links with tiers rather than replacing them,
-      // so a null network costs nothing here.
+      // fine: the stream route serves a fight card from the UFC bucket or
+      // the claiming promotion's, never from this, so a null network
+      // costs nothing. The broadcasts still name the service for the
+      // "Only on ..." line when nothing is configured.
       const { nationalBroadcasts, network } = networks.resolveNetworkFromCompetition(competition);
 
       // `name` is what the poster prints now. home/away/flags stay for the
@@ -3433,7 +3422,6 @@ async function fetchTodayLeagueEvents(league, hostUrl, userTimeZone = 'America/N
         awayNick: fighterBName,
         homeAbbr: '',
         awayAbbr: '',
-        broadcastNames,
         nationalBroadcasts,
         network,
         posterShape: 'square',
@@ -3543,7 +3531,6 @@ async function fetchBkfcEvents(hostUrl, userTimeZone) {
       // the same position DWCS is in. Measured across four of the
       // promotion's event pages: every one offers DAZN and the
       // promotion's own service, and nothing linear.
-      broadcastNames: ['DAZN', 'BKFC+'],
       nationalBroadcasts: [
         { name: 'DAZN', type: 'Streaming' },
         { name: 'BKFC+', type: 'Streaming' },
@@ -3647,13 +3634,10 @@ async function fetchWrestlingEvents(hostUrl, userTimeZone) {
       // launched, so there is no per-event broadcast to resolve - it is
       // a fact about the promotion, not about the fixture.
       //
-      // The two fields are not the same shape, which is easy to miss
-      // because they hold the same fact. broadcastNames is a list of
-      // names; nationalBroadcasts is what resolveNetworkFromCompetition
-      // returns, entries of { name, type }. Written as a bare string
-      // here, the name read back as undefined and a card with no terms
-      // configured offered "Only on " with nothing after it.
-      broadcastNames: ['Fox Nation'],
+      // Entries of { name, type }, the shape resolveNetworkFromCompetition
+      // returns, and not bare names. Written as a bare string here, the
+      // name read back as undefined and a card with no terms configured
+      // offered "Only on " with nothing after it.
       nationalBroadcasts: [{ name: 'Fox Nation', type: 'Streaming' }],
       network: null,
       // Which bucket in the dashboard holds this card's channels. The
@@ -4521,7 +4505,7 @@ async function authenticateForChannels(req, res) {
   // Xtream reaches the same features through its own channel list rather
   // than a parsed playlist. Both arrive here in the same shape, and so do
   // all of an account's providers, so everything downstream -
-  // suggestions, search, probing, link healing - is one implementation
+  // presets, search, quality lookups, link healing - is one implementation
   // serving every combination.
   const providers = providersOf(user);
   if (providers.length === 0) {
@@ -4595,26 +4579,6 @@ app.get('/api/networks', (req, res) => {
   });
 });
 
-// Suggested channels for every network at once. One pass over the
-// playlist serves the whole registry, which is far cheaper than one round
-// trip per network and means the dashboard can populate the entire
-// section in a single request.
-// The account's category allowlist, applied to everything that SEARCHES
-// the playlist - the network suggestions and the channel search, on both
-// the dashboard and the watch portal.
-//
-// Deliberately not applied to the source itself. A saved channel has to
-// keep resolving, and the quality probe validates a URL against the
-// channel list before opening it; filtering there would make a channel
-// the user had already chosen look missing, and make probing it fail,
-// purely because its group is not one they browse. The filter belongs on
-// the question "what should I offer you", never on "is this thing you
-// already picked still real".
-//
-// Empty means no filter rather than no channels. Somebody who unticks
-// everything has made a mistake, not expressed a preference, and a
-// search that silently returns nothing forever is a bad way to find that
-// out.
 // How a published reading is named as a format, e.g. "1080p60". The one
 // spelling shared by the filter, the counts the picker shows and the
 // labels on the badges, so a format can never be offered under one name
@@ -4701,18 +4665,6 @@ function readQualityFilter(user) {
   };
 }
 
-// The published-quality filter as a predicate, or null when there is
-// nothing to apply - so the ordinary case does no work at all rather
-// than walking the playlist to keep every channel in it.
-//
-// An empty list means "no restriction on this", not "allow nothing".
-// The two readings only differ when every box is unticked, and of the
-// two, the one that cannot silently empty an account's playlist is the
-// one worth having.
-//
-// Nothing is filtered while the provider's table is not loaded either.
-// The alternative is judging every channel on an absence of data and
-// hiding the lot, which looks exactly like the playlist having broken.
 // A reading for one channel, link or search hit, from the published
 // table belonging to ITS provider.
 //
@@ -4754,6 +4706,18 @@ function streamcheckLookup(user) {
   };
 }
 
+// The published-quality filter as a predicate, or null when there is
+// nothing to apply - so the ordinary case does no work at all rather
+// than walking the playlist to keep every channel in it.
+//
+// An empty list means "no restriction on this", not "allow nothing".
+// The two readings only differ when every box is unticked, and of the
+// two, the one that cannot silently empty an account's playlist is the
+// one worth having.
+//
+// Nothing is filtered while the provider's table is not loaded either.
+// The alternative is judging every channel on an absence of data and
+// hiding the lot, which looks exactly like the playlist having broken.
 function publishedQualityFilter(user) {
   const f = readQualityFilter(user);
   const active = f.statuses.length || f.tiers.length || f.formats.length
@@ -4794,6 +4758,22 @@ function publishedQualityFilter(user) {
   };
 }
 
+// The account's category allowlist and published-quality filter, applied
+// to everything that SEARCHES the playlist - the preset channels, the
+// channel search and the team search, on both the dashboard and the
+// watch portal.
+//
+// Deliberately not applied to the source itself. A saved channel has to
+// keep resolving, and the link healer looks for it in the channel list;
+// filtering there would make a channel the user had already chosen look
+// missing purely because its group is not one they browse. The filter
+// belongs on the question "what should I offer you", never on "is this
+// thing you already picked still real".
+//
+// Empty means no filter rather than no channels. Somebody who unticks
+// everything has made a mistake, not expressed a preference, and a
+// search that silently returns nothing forever is a bad way to find that
+// out.
 function channelsForSearch(user, channels) {
   let result = channels;
 
@@ -4923,10 +4903,10 @@ app.post('/api/networks/quality-filter', async (req, res) => {
   });
 });
 
-// Turns a published streamcheck record into the same shape a probe
-// produces, so everything downstream - the badge, the rating, the
-// persisted label, the Stremio title - cannot tell where a reading came
-// from and needs no branch for it.
+// Turns a published streamcheck record into the shape ffprobe readings
+// had, back when streams were probed, so everything downstream - the
+// badge, the rating, the persisted label, the Stremio title - kept
+// working unchanged when the source did.
 //
 // A dead or blackscreen channel has no bitrate to rate, but "it does not
 // work" is the most useful thing anyone can be told about a channel, so
@@ -5418,6 +5398,10 @@ app.post('/api/streamcheck/select', async (req, res) => {
   });
 });
 
+// Every saved preset's channels for every network at once. One pass over
+// the playlist serves the whole registry, which is far cheaper than one
+// round trip per network and means the dashboard can populate the entire
+// section in a single request.
 app.post('/api/networks/suggest', async (req, res) => {
   const auth = await authenticateForChannels(req, res);
   if (!auth) return;
@@ -6209,20 +6193,16 @@ const NETWORKS_CATALOG_ID = 'networks';
 
 // The quality label to show against a link in Stremio, or '' if unknown.
 //
-// Prefers a live reading from the probe cache, falling back to whatever
-// was recorded on the link when it was last checked in the dashboard. The
-// cache is memory-only and expires, so after a restart the stored value is
-// all there is - without it, quality labels would silently vanish from
-// Stremio until the user happened to re-check every channel.
+// The published reading first, then whatever was last stored on the
+// link. The stored one is written from the same source, so this is really
+// "the freshest copy" rather than two competing opinions - it matters
+// after a restart, when the provider table has not been pulled yet and
+// the stored label is all there is. Without it, quality labels would
+// vanish from Stremio until the table came back.
 //
 // Never opens a connection. This runs on every stream request and only
 // ever reads what is already in memory.
 function qualityLabelForLink(user, link) {
-  // The published reading first, then whatever was last stored on the
-  // link. The stored one is written from the same source, so this is
-  // really "the freshest copy" rather than two competing opinions - it
-  // matters after a restart, when the provider table has not been
-  // pulled yet and the stored label is all there is.
   const published = publishedLabelFor(user, link);
   return published || quality.restateQualityLabel(link.probedQuality) || '';
 }
@@ -6254,10 +6234,10 @@ function buildLinkTitle(user, networkKey, link) {
 // 🔎 entry is one a standing search turned up this minute and nobody has
 // ever looked at. Both are playable; only one has been vouched for.
 //
-// Quality comes from the probe cache alone - an auto-found channel has no
-// stored reading to fall back on, because it was never saved anywhere to
-// store one against. It fills in once the channel is checked in the watch
-// portal.
+// Quality comes from the published table alone - an auto-found channel
+// has no stored reading to fall back on, because it was never saved
+// anywhere to store one against. It shows nothing until that provider's
+// table is in memory.
 function buildAutoSearchTitle(user, channel) {
   const label = publishedLabelFor(user, channel);
   const searchPart = `🔎 Auto${label ? ` · ${label}` : ''}`;
@@ -6803,9 +6783,6 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
     );
     linkProblems = problems;
 
-    // Reordered for this specific sport, so a college-football game
-    // prefers the CFB bundle feed and an NFL game prefers the Sunday
-    // Ticket one - from the same single saved list.
     // The user's own slot order, unchanged. There used to be a per-sport
     // reorder here that floated a network's sport-specific feeds to the
     // top - an NFL game preferring the Sunday Ticket copy of FOX over the
