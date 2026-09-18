@@ -2061,10 +2061,21 @@
         ? `<span class="text-[11px] text-[#e6e6e6]/45">${pinned.length} channel${pinned.length === 1 ? '' : 's'} available from a saved preset</span>`
         : `<span class="text-[11px] text-[#e6e6e6]/35 italic">Search below to add a channel</span>`;
 
+      // Offered once anything in the section has passed a test, and says
+      // how many it would take from each service before it is pressed.
+      const best = bestTestedFor(key);
+      const bestBtn = best.picks.length > 0
+        ? `<button onclick="applyBestTested('${key}')" title="Replace this network's links with the best tested channels, up to five from each service, best first"
+                   class="text-[11px] font-bold text-[#7fc98a] hover:text-[#a6e0ae] transition">
+             <i class="fa-solid fa-wand-magic-sparkles mr-1"></i>Use best tested (${best.counts.join(' + ')})
+           </button>`
+        : '';
+
       return `
         <div class="flex items-center justify-between gap-3 px-1 pt-1">
           ${suggestBtn}
           <span class="flex items-center gap-3 shrink-0">
+            ${bestBtn}
             ${links.length > 0 ? `<button onclick="clearNetworkLinks('${key}')" class="text-[11px] font-bold text-[#e56a6a]/70 hover:text-[#e56a6a] transition">Clear all</button>` : ''}
           </span>
         </div>`;
@@ -4000,6 +4011,9 @@
       const chips = document.getElementById(`network-groups-${key}`);
       if (chips) chips.innerHTML = buildSearchGroupChipsHtml(key);
       refreshTestBar(key);
+      // The best-tested button counts what has passed, which changes with
+      // every test and every unhide.
+      refreshNetworkActions(key);
     }
 
     // ---- Network categories -------------------------------------------
@@ -4217,18 +4231,109 @@
       return 2;
     }
 
+    // Better of two channels that both passed: band, then bpp. Shared by
+    // the list order and the best-tested button, so the button's first
+    // pick is always the top of the list.
+    function compareTested(a, b) {
+      const band = (a.test.band ?? 9) - (b.test.band ?? 9);
+      if (band) return band;
+      return (b.test.bpp || 0) - (a.test.bpp || 0);
+    }
+
     function orderForPicking(list) {
       return [...list].sort((a, b) => {
         const rank = testRank(a) - testRank(b);
         if (rank) return rank;
         if (testRank(a) === 0) {
-          const band = (a.test.band ?? 9) - (b.test.band ?? 9);
-          if (band) return band;
-          const bpp = (b.test.bpp || 0) - (a.test.bpp || 0);
-          if (bpp) return bpp;
+          const better = compareTested(a, b);
+          if (better) return better;
         }
         return (a._pos || 0) - (b._pos || 0);
       });
+    }
+
+    // ---- Best tested ---------------------------------------------------
+    //
+    // Fills a network with the best channels that passed their test: up
+    // to bestPerFolder from each of the reseller's services - five Strong
+    // and five Trex for Flix-Streams - then all of them ordered by quality
+    // alone, whichever service each is on. So the list can run Strong,
+    // Strong, Strong, Trex, Strong: slot order is the order a player
+    // tries, and it should try the best stream first.
+    //
+    // A service with fewer than five passes contributes what it has
+    // rather than letting the other fill its share. The split is the
+    // point - five from each is what keeps half the list working when one
+    // service has a bad night.
+
+    // Which of a reseller's services a channel plays from, by the folder
+    // prefix on any of its categories.
+    function folderOfRow(bundle, row) {
+      const categories = [row.group, ...(row.groups || [])].filter(Boolean);
+      for (const folder of bundle.folders || []) {
+        const prefix = new RegExp(`^\\s*${folder.prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:`, 'i');
+        if (categories.some(category => prefix.test(category))) return folder;
+      }
+      return null;
+    }
+
+    // Every channel this section knows has passed a test - the category
+    // list when there is one, otherwise the current search results.
+    function bestTestedFor(key) {
+      const source = networkCategoryChannels[key] || networkSearchResults[key] || [];
+      const providers = (activeUser && activeUser.providers) || [];
+      const byService = new Map();
+      const seen = new Set();
+      for (const row of source) {
+        if (!row.test || !row.test.tested || !row.test.passes || row.test.hidden) continue;
+        if (seen.has(row.url)) continue;
+        seen.add(row.url);
+        const provider = providers.find(pr => pr.id === row.providerId) || providers[0];
+        const bundle = provider && bundleOf(provider);
+        const folder = bundle && folderOfRow(bundle, row);
+        if (!folder) continue;
+        const service = `${provider.id}|${folder.prefix}`;
+        if (!byService.has(service)) byService.set(service, { bundle, folder, rows: [] });
+        byService.get(service).rows.push(row);
+      }
+
+      const picks = [];
+      const counts = [];
+      for (const { bundle, folder, rows } of byService.values()) {
+        const best = rows.sort(compareTested).slice(0, bundle.bestPerFolder || 5);
+        picks.push(...best);
+        counts.push(`${best.length} ${folder.label}`);
+      }
+      return { picks: picks.sort(compareTested).slice(0, networkMaxLinks), counts };
+    }
+
+    function applyBestTested(key) {
+      const { picks, counts } = bestTestedFor(key);
+      const label = (networkRegistry.find(n => n.key === key) || {}).label || key;
+      if (picks.length === 0) {
+        showStatus(`No ${label} channels have passed a test yet.`, true);
+        return;
+      }
+      const current = readNetworkLinks(key);
+      if (current.length > 0 &&
+          !confirm(`Replace ${label}'s ${current.length} link${current.length === 1 ? '' : 's'} with the ${picks.length} best tested (${counts.join(', ')})?`)) {
+        return;
+      }
+      // Each carries the reading that put it here, the way a channel added
+      // by hand does, so the badges and Stremio titles have it at once.
+      activeUser.networkLinks[key] = picks.map(row => {
+        const measured = probeResults[row.url];
+        const probedQuality = (measured && !measured.error && measured.label) || row.probedQuality || '';
+        return probedQuality ? { ...row, probedQuality } : { ...row };
+      });
+      markDashboardDirty();
+      refreshNetworkLinksRegion(key);
+      showStatus(`${label} now has the ${picks.length} best tested channels (${counts.join(', ')}). Click Save and Copy Link to keep them.`);
+    }
+
+    function refreshNetworkActions(key) {
+      const actions = document.getElementById(`network-actions-${key}`);
+      if (actions) actions.innerHTML = buildNetworkActionsHtml(key);
     }
 
     function stampPositions(list) {

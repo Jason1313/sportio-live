@@ -6134,7 +6134,11 @@ app.post('/api/user/register', async (req, res) => {
 // copy that could drift from it.
 function describeBundles() {
   return bundles.BUNDLES.map(bundle => ({
-    key: bundle.key, label: bundle.label, testsAtOnce: bundle.testsAtOnce || 1,
+    key: bundle.key,
+    label: bundle.label,
+    testsAtOnce: bundle.testsAtOnce || 1,
+    folders: (bundle.folders || []).map(({ prefix, label }) => ({ prefix, label })),
+    bestPerFolder: bundle.bestPerFolder || 5,
   }));
 }
 

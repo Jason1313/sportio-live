@@ -28,8 +28,23 @@
 // two and leaves one, so somebody can go on watching while a run is
 // under way. Taking all three would make every run a reason the stream
 // they are watching drops.
+//
+// `folders` says which service a channel plays from, by the prefix the
+// reseller puts on its category - "Strong8K: US| FOX NETWORK" is Strong.
+// The dashboard's "best tested" button takes up to `bestPerFolder` from
+// each, so a network ends up with links on both services and one of them
+// having a bad night leaves the other half of the list working.
 const BUNDLES = [
-  { key: 'flix-streams', label: 'Flix-Streams', testsAtOnce: 2 },
+  {
+    key: 'flix-streams',
+    label: 'Flix-Streams',
+    testsAtOnce: 2,
+    folders: [
+      { prefix: 'Strong8K', label: 'Strong' },
+      { prefix: 'Trex', label: 'Trex' },
+    ],
+    bestPerFolder: 5,
+  },
 ];
 
 const BUNDLE_BY_KEY = new Map(BUNDLES.map(bundle => [bundle.key, bundle]));
