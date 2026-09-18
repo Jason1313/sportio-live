@@ -341,6 +341,10 @@ const DEFAULT_RULES = {
       'FOX CRICKET', 'FOX LEAGUE', 'FOX FOOTY', 'FOX RACING', 'FOX SOCCER',
       'FOX DEPORTES', 'FOX WEATHER', 'FOX NATION', 'FOX AIRE', 'FOX SP',
       'FOXTEL', 'FOXI', 'FOX FIRE', 'FOX ACTION',
+      // Fox's streaming lifestyle channel. Filed under US| ENTERTAINMENT,
+      // alive at 720p60, and on a Flix-Streams list it took a FOX slot in
+      // both the Strong and the Trex block.
+      'FOX SOUL',
     ],
   },
   CBS: {
@@ -770,9 +774,14 @@ function comparePicks(a, b) {
 // one - if slot 1 was the best link either provider had, its stablemates
 // are the next most likely thing to work.
 //
-// `channelsByProvider` is [{ providerId, channels }] in the account's own
-// provider order, which is the tie-break when two providers' best picks
-// are indistinguishable.
+// `channelsByProvider` is [{ providerId, channels, label? }] in the
+// account's own provider order, which is the tie-break when two
+// providers' best picks are indistinguishable.
+//
+// One provider can contribute more than one block. A reseller carrying
+// two services under one login arrives as two - same providerId, since
+// both play through that login, told apart by `label` - and gets the same
+// per-service redundancy two separate providers would.
 function pickAcrossProviders(networkKey, channelsByProvider, read, options = {}) {
   const groups = (channelsByProvider || []).filter(g => g && g.channels);
   if (groups.length === 0) {
@@ -781,6 +790,7 @@ function pickAcrossProviders(networkKey, channelsByProvider, read, options = {})
 
   const blocks = groups.map(group => ({
     providerId: group.providerId,
+    label: group.label || '',
     outcome: pickForNetwork(networkKey, group.channels, read, options),
   }));
 
@@ -826,6 +836,7 @@ function pickAcrossProviders(networkKey, channelsByProvider, read, options = {})
     // having nothing to offer rather than the whole pick having failed.
     perProvider: ordered.map(block => ({
       providerId: block.providerId,
+      label: block.label,
       picked: block.outcome.picks.length,
       considered: block.outcome.considered,
       rejected: block.outcome.rejected,

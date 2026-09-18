@@ -143,6 +143,10 @@ async function fetchProviderTable(provider) {
     byId.set(String(id), {
       status: get(row, 'channel_status') || null,
       name: get(row, 'channel_name') || '',
+      // Kept for a reseller's channels, which carry new ids and can only
+      // be found by name - and a name is ambiguous without the folder it
+      // sits in. See bundles.js.
+      group: get(row, 'group_name') || '',
       height,
       // Assumed, not measured - see heightFromResolution.
       width: height ? Math.round((height * 16) / 9) : null,

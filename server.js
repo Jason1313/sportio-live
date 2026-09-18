@@ -11,6 +11,7 @@ const networks = require('./networks.js');
 const quality = require('./quality.js');
 const streamcheck = require('./streamcheck.js');
 const autopick = require('./autopick.js');
+const bundles = require('./bundles.js');
 const posters = require('./posters.js');
 const wrestling = require('./wrestling.js');
 const bkfc = require('./bkfc.js');
@@ -228,12 +229,17 @@ function normaliseProvider(raw, kind, index) {
   const id = str(raw.id) || makeProviderId();
   const label = str(raw.label).slice(0, 40) || `Provider ${index + 1}`;
   const streamcheckProvider = str(raw.streamcheckProvider);
+  // A reseller carrying several services under this one login, named by
+  // its key in bundles.BUNDLES, or '' for an ordinary provider. It
+  // replaces streamcheckProvider rather than sitting beside it: a
+  // reseller's folders each have their own table, fixed by the bundle.
+  const bundle = bundles.bundleFor(raw.bundle) ? str(raw.bundle) : '';
 
   if (kind === 'm3u') {
     const playlistUrl = str(raw.playlistUrl) || str(raw.m3u && raw.m3u.playlistUrl);
     if (!playlistUrl) return null;
     return {
-      id, label, kind: 'm3u', streamcheckProvider,
+      id, label, kind: 'm3u', streamcheckProvider, bundle,
       playlistUrl,
       epgUrl: str(raw.epgUrl) || str(raw.m3u && raw.m3u.epgUrl),
     };
@@ -243,7 +249,7 @@ function normaliseProvider(raw, kind, index) {
   const url = str(src.url).replace(/\/+$/, '');
   if (!url) return null;
   return {
-    id, label, kind: 'xtream', streamcheckProvider,
+    id, label, kind: 'xtream', streamcheckProvider, bundle,
     url,
     username: str(src.username),
     password: typeof src.password === 'string' ? src.password : '',
@@ -318,19 +324,46 @@ function providerLabelFor(user, providerId) {
   return provider ? provider.label : '';
 }
 
-// The streamcheck.pro table a given provider's stream ids belong to, and
-// whether it is in memory to be read.
-function streamcheckTableFor(user, providerId) {
-  const provider = providerFor(user, providerId);
-  const table = (provider && provider.streamcheckProvider) || '';
-  return (table && streamcheck.isLoaded(table)) ? table : '';
+// The published tables behind one provider: one entry for an ordinary
+// provider, whether or not it has chosen a table, and one per folder for
+// a reseller carrying several services.
+//
+// Each entry is also a block auto-pick fills on its own. A reseller's
+// folders play from different services - which is the point of it
+// carrying both - so they get the redundancy two separate providers
+// would, and a network gets its best few from each rather than ten from
+// whichever service happened to measure better that week.
+function publishedSourcesOf(provider) {
+  const bundle = bundles.bundleFor(provider.bundle);
+  if (bundle) {
+    return bundle.folders.map(folder => ({
+      providerId: provider.id,
+      label: `${provider.label} · ${folder.label}`,
+      table: folder.table,
+      bundle,
+      folder,
+    }));
+  }
+  return [{
+    providerId: provider.id,
+    label: provider.label,
+    table: provider.streamcheckProvider || '',
+    bundle: null,
+    folder: null,
+  }];
+}
+
+function publishedSourcesFor(user) {
+  return providersOf(user).flatMap(publishedSourcesOf);
 }
 
 // Every streamcheck table this account names, deduplicated. Used by the
-// panels that describe the account as a whole rather than one link.
+// panels that describe the account as a whole rather than one link, and
+// by the warmers and the daily refresh, which is how a reseller's tables
+// get loaded without anyone choosing them.
 function streamcheckTablesFor(user) {
-  return [...new Set(providersOf(user)
-    .map(entry => entry.streamcheckProvider)
+  return [...new Set(publishedSourcesFor(user)
+    .map(source => source.table)
     .filter(Boolean))];
 }
 
@@ -362,6 +395,7 @@ function describeProvider(provider, { withConnection = false, withSecrets = fals
     label: provider.label,
     kind: provider.kind,
     streamcheckProvider: provider.streamcheckProvider || '',
+    bundle: provider.bundle || '',
   };
   if (provider.kind === 'm3u') {
     return (withConnection || withSecrets)
@@ -1944,14 +1978,19 @@ app.post('/api/networks/autopick', async (req, res) => {
     // service and none for the other, and a single "loaded" flag would
     // have to lie about one of them. `loaded` stays as the answer to "is
     // there anything at all to judge by", which is what gates the panel.
-    providers: providersOf(user).map(entry => ({
-      id: entry.id,
-      label: entry.label,
-      table: entry.streamcheckProvider || '',
-      loaded: !!entry.streamcheckProvider && streamcheck.isLoaded(entry.streamcheckProvider),
-      runDate: streamcheckRunDate(entry.streamcheckProvider),
+    //
+    // One row per block auto-pick fills, which for a reseller is one per
+    // service it carries - the same split the limit below is worked out
+    // over, so the panel cannot promise five each over a split it is not
+    // making.
+    providers: publishedSourcesFor(user).map(source => ({
+      id: source.providerId,
+      label: source.label,
+      table: source.table,
+      loaded: !!source.table && streamcheck.isLoaded(source.table),
+      runDate: streamcheckRunDate(source.table),
     })),
-    perProviderLimit: autoPickLimitFor(providersOf(user).length),
+    perProviderLimit: autoPickLimitFor(publishedSourcesFor(user).length),
     loaded: tables.some(table => streamcheck.isLoaded(table)),
     runDate: accountRunDate(user),
     enabled: settings.networks,
@@ -4675,23 +4714,25 @@ function readQualityFilter(user) {
 // come back empty - it comes back confidently wrong, which is the failure
 // mode worth spending a field to avoid.
 //
+// A reseller's channels are the exception: it renumbers every channel, so
+// its ids appear in no table and are looked up by name instead, in the
+// table of whichever service the channel's folder names. See bundles.js.
+// Never by id as well - a reseller id that happened to exist in the
+// upstream table would be exactly the confident wrong answer above.
+//
 // Returns null when NO provider on the account has a table in memory, so
 // the ordinary case - published data switched off - costs one call rather
 // than a closure per channel.
 function streamcheckLookup(user) {
   const providers = providersOf(user);
-  const tables = new Map(providers.map(provider => [
-    provider.id,
-    (provider.streamcheckProvider && streamcheck.isLoaded(provider.streamcheckProvider))
-      ? provider.streamcheckProvider : '',
-  ]));
-  if (![...tables.values()].some(Boolean)) return null;
+  const readers = new Map(providers.map(provider => [provider.id, publishedReaderFor(provider)]));
+  if (![...readers.values()].some(Boolean)) return null;
 
   // Links saved before the account had a second provider carry no
   // providerId, and the primary is the only service they could have come
   // from. An id naming a provider since deleted lands here too, which is
   // the same guess and the only one available.
-  const fallback = providers.length > 0 ? tables.get(providers[0].id) : '';
+  const fallback = providers.length > 0 ? readers.get(providers[0].id) : null;
 
   return (entry) => {
     // streamUrl on a catalog channel, url on an entry that has already
@@ -4700,10 +4741,36 @@ function streamcheckLookup(user) {
     // whatever is built on it looks switched off.
     const url = entry && (entry.streamUrl || entry.url);
     if (!url) return null;
-    const table = entry.providerId ? tables.get(entry.providerId) : fallback;
-    if (!table) return null;
-    return streamcheck.lookupCached(table, networks.streamIdFromUrl(url));
+    const read = entry.providerId ? readers.get(entry.providerId) : fallback;
+    return read ? read(entry, url) : null;
   };
+}
+
+// Every group an entry is filed under, whichever shape it arrived in: a
+// catalog channel carries `categories`, a stored link `group`, and a
+// search hit both `group` and `groups`.
+function categoriesOfEntry(entry) {
+  return [entry.group, ...(entry.categories || []), ...(entry.groups || [])].filter(Boolean);
+}
+
+// How one provider's channels are read, or null when it has nothing in
+// memory to read from.
+function publishedReaderFor(provider) {
+  const bundle = bundles.bundleFor(provider.bundle);
+  if (bundle) {
+    if (!bundle.folders.some(folder => streamcheck.isLoaded(folder.table))) return null;
+    return (entry) => {
+      const where = bundles.folderOf(bundle, categoriesOfEntry(entry));
+      if (!where) return null;
+      const index = bundles.nameIndexFor(streamcheck.snapshot(where.folder.table));
+      const record = bundles.lookupByName(index, entry.name, where.group);
+      return record ? { ...record, provider: where.folder.table } : null;
+    };
+  }
+
+  const table = provider.streamcheckProvider;
+  if (!table || !streamcheck.isLoaded(table)) return null;
+  return (entry, url) => streamcheck.lookupCached(table, networks.streamIdFromUrl(url));
 }
 
 // The published-quality filter as a predicate, or null when there is
@@ -5087,23 +5154,38 @@ function autoPickLimitFor(providerCount) {
     Math.floor(networks.MAX_LINKS_PER_NETWORK / providerCount)));
 }
 
-// The account's channel list, split back into one list per provider.
+// The account's channel list, split back into one list per provider - or
+// per folder, for a reseller carrying several services under one login.
 //
 // Everything upstream works on the merged list, which is right for
 // searching - the user is looking for a channel, not for a service. Auto-
 // pick is the one place that needs the split back, because its answer is
-// explicitly "the best few from each".
+// explicitly "the best few from each", and a reseller's Strong folders
+// and Trex folders are two services however few logins they arrive on.
 function channelsByProvider(user, channels) {
-  const groups = providersOf(user).map(provider => ({ providerId: provider.id, channels: [] }));
+  const groups = publishedSourcesFor(user).map(source => ({ ...source, channels: [] }));
   if (groups.length === 0) return [];
-  const byId = new Map(groups.map(group => [group.providerId, group]));
+  const byProvider = new Map();
+  for (const group of groups) {
+    if (!byProvider.has(group.providerId)) byProvider.set(group.providerId, []);
+    byProvider.get(group.providerId).push(group);
+  }
+  const primary = byProvider.get(groups[0].providerId);
 
   for (const channel of channels) {
     // A channel with no providerId predates the split, or came from a
     // source that could not be stamped; it belongs to the primary, which
     // is the only provider such an account ever had.
-    const group = byId.get(channel.providerId) || groups[0];
-    group.channels.push(channel);
+    const own = byProvider.get(channel.providerId) || primary;
+    if (!own[0].bundle) {
+      own[0].channels.push(channel);
+      continue;
+    }
+    // A reseller channel filed under no service's folder is left out.
+    // There is no table to read it from, so it could never be picked.
+    const where = bundles.folderOf(own[0].bundle, channel.categories);
+    const group = where && own.find(g => g.folder === where.folder);
+    if (group) group.channels.push(channel);
   }
   return groups;
 }
@@ -5287,8 +5369,11 @@ function computeAutoPick(user, channels, options = {}) {
       considered: outcome.considered,
       rejected: outcome.rejected,
       usedSlow: outcome.usedSlow,
+      // A block's own label first: a reseller's two folders share one
+      // providerId, and naming both by it would read "Flix-Streams: 5,
+      // Flix-Streams: 5".
       perProvider: outcome.perProvider.map(entry => ({
-        ...entry, label: labels[entry.providerId] || '',
+        ...entry, label: entry.label || labels[entry.providerId] || '',
       })),
       currentCount: current.length,
       changed: before !== after,
@@ -5378,6 +5463,12 @@ app.post('/api/streamcheck/select', async (req, res) => {
   const { providerId, table } = req.body;
   const provider = providersOf(auth.user).find(entry => entry.id === providerId);
   if (!provider) return res.status(400).json({ error: 'No such provider on this account.' });
+  // A reseller's tables come with its bundle, one per folder. A table
+  // chosen here would be stored and never read, which looks like a choice
+  // that took and did nothing.
+  if (bundles.bundleFor(provider.bundle)) {
+    return res.status(400).json({ error: `${provider.label} is set up as ${bundles.bundleFor(provider.bundle).label}, which chooses its published tables itself.` });
+  }
   if (typeof table !== 'string') {
     return res.status(400).json({ error: 'A published table name is required.' });
   }
@@ -5676,9 +5767,21 @@ app.post('/api/user/register', async (req, res) => {
     // dashboard needs before it can offer to add a second.
     providers: providersOf(userConfigs[uuid]).map(entry => describeProvider(entry, { withSecrets: true })),
     maxProviders: MAX_PROVIDERS,
+    bundles: describeBundles(),
     manifestUrl: `/user/${uuid}/manifest.json`
   });
 });
+
+// The resellers a provider can be marked as, sent with the account so the
+// Providers panel draws its switch from the server's list rather than a
+// copy that could drift from it.
+function describeBundles() {
+  return bundles.BUNDLES.map(bundle => ({
+    key: bundle.key,
+    label: bundle.label,
+    folders: bundle.folders.map(({ prefix, table, label }) => ({ prefix, table, label })),
+  }));
+}
 
 // The first provider in the pre-providers shape, for the parts of the
 // dashboard that still speak it. Derived rather than stored, so the two
@@ -5755,6 +5858,7 @@ app.post('/api/user/login', async (req, res) => {
     // exactly one connection, keeps working unchanged.
     providers: providersOf(user).map(entry => describeProvider(entry, { withSecrets: true })),
     maxProviders: MAX_PROVIDERS,
+    bundles: describeBundles(),
     xtream: legacyConnectionFields(user, 'xtream'),
     m3u: legacyConnectionFields(user, 'm3u'),
     selectedSports: user.selectedSports, 
@@ -5829,6 +5933,15 @@ app.post('/api/user/update', async (req, res) => {
       return res.status(400).json({ error: 'Two providers cannot share an id.' });
     }
     user.providers = next;
+
+    // A reseller's tables are fixed by its bundle rather than chosen in
+    // the Quality data panel, so nothing else would ask for them until the
+    // next warm. Started here and not awaited: the save answers at once,
+    // and the dashboard's next load finds them in memory or joins the
+    // fetch already under way.
+    for (const table of streamcheckTablesFor(user)) {
+      if (!streamcheck.isLoaded(table)) streamcheck.ensureProvider(table).catch(() => {});
+    }
   }
 
   // The pre-providers fields, still accepted so the setup wizard keeps
@@ -6210,12 +6323,14 @@ function qualityLabelForLink(user, link) {
 // One channel's published label, from whatever is already in memory.
 // Never loads a provider table: this runs on every stream request, and
 // a catalog click is not the place to wait twenty megabytes.
+//
+// Through streamcheckLookup like every other reading, so a reseller's
+// links are found by name here too rather than silently missing a Stremio
+// title that the dashboard badge beside the same link shows.
 function publishedLabelFor(user, link) {
-  const table = streamcheckTableFor(user, link && link.providerId);
-  const url = link && (link.url || link.streamUrl);
-  if (!table || !url) return '';
-  const record = streamcheck.lookupCached(table, networks.streamIdFromUrl(url));
-  const reading = qualityFromStreamcheck(record);
+  const lookup = streamcheckLookup(user);
+  if (!lookup || !link) return '';
+  const reading = qualityFromStreamcheck(lookup(link));
   return reading ? reading.label : '';
 }
 

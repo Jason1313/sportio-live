@@ -1044,6 +1044,7 @@
             // with no id, and every per-provider control keys off that.
             providers: data.providers || [],
             maxProviders: data.maxProviders || 4,
+            bundles: data.bundles || [],
             xtream: connectionType === 'xtream' ? wizardXtream : undefined,
             m3u: connectionType === 'm3u' ? wizardM3u : undefined,
             selectedSports: wizardSelectedSports,
@@ -2593,30 +2594,46 @@
       if (!box) return;
 
       const providers = activeUser.providers || [];
-      box.innerHTML = providers.map(pr => `
+      // A reseller gets no dropdown. Its tables come with it, one per
+      // service it carries, so the row says what it is using instead of
+      // offering a choice the server would refuse.
+      box.innerHTML = providers.map(pr => {
+        const bundle = bundleOf(pr);
+        const control = bundle
+          ? `<span class="flex-1 text-[11px] text-[#e6e6e6]/60 px-1 py-2">
+               ${escapeHtml(bundle.label)}: ${bundle.folders.map(f => `${escapeHtml(f.prefix)} &rarr; ${escapeHtml(f.table)}`).join(', ')}, matched by channel name
+             </span>`
+          : `<select onchange="saveStreamcheckTable(${quoteAttr(pr.id)}, this.value)"
+                  class="flex-1 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
+               <option value="">Not using published data</option>
+               ${streamcheckTables.map(t =>
+                 `<option value="${escapeHtml(t)}" ${t === pr.streamcheckProvider ? 'selected' : ''}>${escapeHtml(t)}</option>`).join('')}
+             </select>`;
+        return `
         <div class="flex items-center gap-2">
           ${providers.length > 1
             ? `<span class="text-[11px] text-[#e6e6e6]/55 w-24 shrink-0 truncate">${escapeHtml(pr.label)}</span>`
             : ''}
-          <select onchange="saveStreamcheckTable(${quoteAttr(pr.id)}, this.value)"
-                  class="flex-1 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
-            <option value="">Not using published data</option>
-            ${streamcheckTables.map(t =>
-              `<option value="${escapeHtml(t)}" ${t === pr.streamcheckProvider ? 'selected' : ''}>${escapeHtml(t)}</option>`).join('')}
-          </select>
-        </div>`).join('');
+          ${control}
+        </div>`;
+      }).join('');
 
-      // One line per provider that names a table, because an account
-      // holding two can easily have one loaded and one not - a state that
-      // is otherwise indistinguishable from both being fine.
-      const lines = providers.map(pr => {
-        if (!pr.streamcheckProvider) return `${pr.label}: not using published data.`;
-        const held = streamcheckHeld.find(c => c.provider === pr.streamcheckProvider);
+      // One line per table in use, because an account holding two can
+      // easily have one loaded and one not - a state that is otherwise
+      // indistinguishable from both being fine.
+      const describeTable = (label, table) => {
+        const held = streamcheckHeld.find(c => c.provider === table);
         return held
-          ? `${pr.label}: ${held.channels.toLocaleString()} channels from ${held.provider}, sweep dated ${held.runDate}.`
-          : `${pr.label}: ${pr.streamcheckProvider} selected, loading on the next refresh.`;
+          ? `${label}: ${held.channels.toLocaleString()} channels from ${held.provider}, sweep dated ${held.runDate}.`
+          : `${label}: ${table} selected, loading now.`;
+      };
+      const lines = providers.flatMap(pr => {
+        const bundle = bundleOf(pr);
+        if (bundle) return bundle.folders.map(f => describeTable(`${pr.label} (${f.label})`, f.table));
+        if (!pr.streamcheckProvider) return [`${pr.label}: not using published data.`];
+        return [describeTable(pr.label, pr.streamcheckProvider)];
       });
-      note.textContent = providers.every(pr => !pr.streamcheckProvider)
+      note.textContent = providers.every(pr => !pr.streamcheckProvider && !bundleOf(pr))
         ? 'Pick the provider each of your services comes from. Its stream ids are what the lookup matches on.'
         : lines.join('  ');
     }
@@ -2701,7 +2718,7 @@
 
     function blankProvider() {
       const kind = (activeUser && activeUser.connectionType === 'm3u') ? 'm3u' : 'xtream';
-      return { id: '', label: '', kind, streamcheckProvider: '',
+      return { id: '', label: '', kind, streamcheckProvider: '', bundle: '',
                url: '', username: '', password: '', playlistUrl: '', epgUrl: '' };
     }
 
@@ -2758,10 +2775,47 @@
                      <option value="ts" ${pr.streamFormat === 'ts' ? 'selected' : ''}>.ts (MPEG-TS)</option>
                    </select>
                  </label>`}
-          ${pr.id ? `<p class="text-[10px] text-[#e6e6e6]/35">
+          ${bundleSwitches(pr, i)}
+          ${pr.id && !bundleOf(pr) ? `<p class="text-[10px] text-[#e6e6e6]/35">
               Quality data: ${escapeHtml(pr.streamcheckProvider || 'none chosen')} &mdash; chosen under Quality data.
             </p>` : ''}
         </div>`).join('');
+    }
+
+    // The reseller this provider is marked as, or null. The list comes
+    // from the server with the account, so a reseller added there appears
+    // here without the page knowing its name.
+    function bundleOf(pr) {
+      return ((activeUser && activeUser.bundles) || []).find(b => b.key === pr.bundle) || null;
+    }
+
+    // One switch per reseller the server knows about. A reseller renumbers
+    // every channel, so its quality data can only be found by channel
+    // name, in the table of whichever service a folder is from - which is
+    // the whole of what this switch turns on, and why it has to be said
+    // rather than guessed from the server address.
+    function bundleSwitches(pr, i) {
+      return ((activeUser && activeUser.bundles) || []).map(b => {
+        const on = pr.bundle === b.key;
+        const folders = b.folders.map(f => `${escapeHtml(f.prefix)} folders use ${escapeHtml(f.table)}'s data`).join(', ');
+        return `
+          <label class="flex items-start gap-2 text-[11px] text-[#e6e6e6]/70 cursor-pointer">
+            <input type="checkbox" ${on ? 'checked' : ''} class="mt-0.5 accent-[#3b8fc4]"
+                   onchange="setProviderBundle(${i}, this.checked ? ${quoteAttr(b.key)} : '')">
+            <span>
+              This is ${escapeHtml(b.label)}
+              <span class="block text-[10px] text-[#e6e6e6]/35">
+                Quality data matched by channel name: ${folders}. Auto-pick picks from each separately.
+              </span>
+            </span>
+          </label>`;
+      }).join('');
+    }
+
+    function setProviderBundle(index, key) {
+      if (!providerDraft || !providerDraft[index]) return;
+      providerDraft[index].bundle = key;
+      renderProviders();
     }
 
     function updateProviderField(index, key, value) {

@@ -22,12 +22,13 @@ either side of the wire.
 | `m3u.js` | M3U/EPG parsing and the shared background playlist cache. |
 | `streamcheck.js` | Reads published stream sweeps from streamcheck.pro (a Metabase public dashboard) - alive/dead, codec, resolution, bitrate. |
 | `quality.js` | Turns one of those readings into a band, a score and a badge line. Measures nothing itself. |
+| `bundles.js` | Resellers that carry several services under one login (Flix-Streams: Strong + Trex). Which folder is which service, and finding a renumbered channel's published reading by its name. |
 | `posters.js` | Matchup poster art drawn from team colours and marks. |
 | `wrestling.js` | Wrestling schedules, scraped from the promotions, because nothing publishes them. |
 | `bkfc.js` | Bare Knuckle FC's schedule, scraped for the same reason - ESPN carries no bare knuckle. Merged into the MMA section. |
 | `public/*.html` | `index.html` the account dashboard, `watch.html` the watch portal, `admin.html` the operator page. Tailwind from CDN, Font Awesome from CDN, vanilla JS inline at the bottom of each file. |
 
-`networks.js`, `autopick.js`, `posters.js` and `quality.js` are pure
+`networks.js`, `autopick.js`, `bundles.js`, `posters.js` and `quality.js` are pure
 logic over plain data with no Express and no filesystem, deliberately, so
 a rule can be run against a real provider table offline. That is the
 testing story here: there is no test suite, no linter and no CI. A change
