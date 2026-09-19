@@ -490,7 +490,38 @@ if (fs.existsSync(DATA_FILE)) {
   }
 }
 
+// Writes are batched: a call marks the accounts dirty and the file is
+// written once, SAVE_DELAY_MS after the first call, however many more
+// arrive in between.
+//
+// Every call used to write the whole file there and then, synchronously,
+// and blocked the server while it did. That was harmless while an
+// account was a few links, and stopped being so: the Stremio manifest
+// route saved on every manifest fetch just to stamp lastAccessedAt, and
+// each channel test saves its result, so a run of twenty tests was twenty
+// full rewrites of a file that now also holds up to 3,000 test results
+// per account. Batched, a run's saves collapse into one write every
+// second or so.
+//
+// The cost is that a change is on disk up to a second after the request
+// that made it answered. A crash in that second loses it; a clean stop
+// does not - see flushUserConfigs and the signal handlers.
+const SAVE_DELAY_MS = 1000;
+let saveTimer = null;
+
 function saveUserConfigs() {
+  if (saveTimer) return;
+  saveTimer = setTimeout(flushUserConfigs, SAVE_DELAY_MS);
+}
+
+// Writes now. Through a temporary file and a rename, so a write cut short
+// - the container stopped, the disk full - leaves the previous users.json
+// whole rather than half of a new one.
+function flushUserConfigs() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
   try {
     const toWrite = {};
     for (const [uuid, user] of Object.entries(userConfigs)) {
@@ -503,10 +534,22 @@ function saveUserConfigs() {
         savedChannels: encryptSavedChannelsForStorage(user.savedChannels)
       };
     }
-    fs.writeFileSync(DATA_FILE, JSON.stringify(toWrite, null, 2), 'utf8');
+    const temp = `${DATA_FILE}.tmp`;
+    fs.writeFileSync(temp, JSON.stringify(toWrite, null, 2), 'utf8');
+    fs.renameSync(temp, DATA_FILE);
   } catch (err) {
     console.error('[Storage] Failed to save users.json:', err.message);
   }
+}
+
+// A pending batch is written before the process goes. docker stop sends
+// SIGTERM, and Ctrl+C on npm start sends SIGINT; without this the last
+// second of changes before either would be lost.
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => {
+    if (saveTimer) flushUserConfigs();
+    process.exit(0);
+  });
 }
 
 // Any accounts loaded with legacy plaintext Xtream credentials get
@@ -6667,6 +6710,8 @@ app.get('/network/:key/background.svg', (req, res) => {
     NETWORK_BACKDROP.width, NETWORK_BACKDROP.height));
 });
 
+const LAST_ACCESS_SAVE_MS = 60 * 60 * 1000;
+
 app.get('/user/:uuid/manifest.json', (req, res) => {
   const user = userConfigs[req.params.uuid];
   if (!user) return res.status(404).json({ error: 'Invalid manifest UUID' });
@@ -6675,8 +6720,13 @@ app.get('/user/:uuid/manifest.json', (req, res) => {
   // use. Nuvio re-fetches the manifest periodically (not just once at
   // install), so this is a reasonable proxy for real activity without
   // needing to instrument every catalog/stream route too.
+  //
+  // Stamped in memory every time but only saved for when the stored one
+  // is an hour old - the admin page reads it as a date, and a rewrite of
+  // every account on every manifest fetch bought nothing for that.
+  const previous = Date.parse(user.lastAccessedAt || '') || 0;
   user.lastAccessedAt = new Date().toISOString();
-  saveUserConfigs();
+  if (Date.now() - previous > LAST_ACCESS_SAVE_MS) saveUserConfigs();
 
   const targetDateStr = getLocalDateDash(user.timeZone);
 
