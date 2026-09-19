@@ -412,6 +412,36 @@
           <i class="fa-solid fa-satellite-dish"></i>
           Providers
         </button>
+        <button id="link-check-btn" onclick="toggleLinkCheckPanel()" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 text-xs font-bold py-2.5 rounded-lg transition flex items-center justify-center gap-2">
+          <i class="fa-solid fa-heart-pulse"></i>
+          Nightly Check
+        </button>
+      </div>
+
+      <!-- The nightly link check. The server opens every broadcast and
+           cable network's links each night, re-sorts each list by what
+           they measured and moves the dead ones to the bottom; this sets
+           when, in the account's own timezone, and says what the last run
+           found. -->
+      <div id="link-check-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-6">
+        <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Nightly link check</h4>
+        <p id="link-check-intro" class="text-[11px] text-[#e6e6e6]/45 mb-3 leading-relaxed"></p>
+        <div class="flex flex-wrap items-center gap-x-5 gap-y-2 mb-3">
+          <label class="flex items-center gap-2 text-xs cursor-pointer">
+            <input type="checkbox" id="link-check-enabled" onchange="saveLinkCheckSettings()" class="accent-[#3b8fc4]">
+            Check every night at
+          </label>
+          <span class="flex items-center gap-2 text-xs">
+            <input type="time" id="link-check-time" onchange="saveLinkCheckSettings()" style="color-scheme: dark"
+                   class="bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-2 py-1 text-xs focus:border-[#3b8fc4] focus:outline-none">
+            <span id="link-check-zone" class="text-[11px] text-[#e6e6e6]/45"></span>
+          </span>
+        </div>
+        <div id="link-check-status" class="text-[11px] text-[#e6e6e6]/60 mb-2 leading-relaxed"></div>
+        <div id="link-check-dead" class="space-y-1 mb-3"></div>
+        <button id="link-check-run-btn" onclick="runLinkCheckNow()" class="w-full bg-[#56707d] hover:bg-[#66818f] font-bold py-2.5 rounded-lg text-xs transition">
+          Check all links now
+        </button>
       </div>
 
       <!-- Several IPTV services under one login.
@@ -1095,6 +1125,9 @@
           };
           applyConnectionType();
           showView('dashboard');
+          // A run already under way - started by the schedule or from
+          // another tab - is followed from here, so its re-sort lands.
+          scheduleLinkCheckPoll();
 
           showStatus('Successfully authenticated!');
         } else {
@@ -1169,7 +1202,8 @@
         ['edit-m3u-trigger-btn', 'edit-m3u-panel'],
         ['manage-sports-btn', 'manage-sports-panel'],
         ['change-timezone-btn', 'change-timezone-panel'],
-        ['manage-providers-btn', 'providers-panel']
+        ['manage-providers-btn', 'providers-panel'],
+        ['link-check-btn', 'link-check-panel']
       ];
       pairs.forEach(([btnId, panelId]) => {
         const btn = document.getElementById(btnId);
@@ -1999,6 +2033,10 @@
       const healedNote = healed
         ? `<div class="text-[10px] text-[#c9992e] mt-0.5"><i class="fa-solid fa-wrench mr-1"></i>Channel moved - relinked automatically (${escapeHtml(healed.note)})</div>`
         : '';
+      const dead = deadLinkFor(key, link);
+      const deadNote = dead
+        ? `<div class="text-[10px] text-[#e56a6a] mt-0.5"><i class="fa-solid fa-triangle-exclamation mr-1"></i>Did not play in the nightly check - moved to the bottom (${escapeHtml(dead.reason)})</div>`
+        : '';
 
       return `
         <div class="flex items-center gap-2 bg-[#2f3e47] border border-[#e6e6e6]/10 rounded-lg px-3 py-2">
@@ -2015,6 +2053,7 @@
               ${link.group ? '&middot; ' + escapeHtml(link.group) : ''}
             </div>
             ${healedNote}
+            ${deadNote}
           </div>
           <button onclick="moveNetworkLink('${key}', ${index}, -1)" ${index === 0 ? 'disabled' : ''} class="text-xs px-1.5 py-1 rounded ${index === 0 ? 'text-[#e6e6e6]/20 cursor-not-allowed' : 'text-[#e6e6e6]/60 hover:text-[#e6e6e6] hover:bg-[#3b4d58]'} transition" title="Move up">
             <i class="fa-solid fa-chevron-up"></i>
@@ -4402,6 +4441,184 @@
       markDashboardDirty();
       refreshNetworkLinksRegion(key);
       showStatus(`${label} now has the ${picks.length} best tested channels (${counts.join(', ')}).`);
+    }
+
+    // ---- Nightly link check -------------------------------------------
+    //
+    // The server does the work - see "Nightly link check" in server.js.
+    // This sets when, shows what the last run found, and starts one now.
+    //
+    // A run rewrites the order of this account's lists on the server, so
+    // a page open while one finishes is holding the old order, and its
+    // next autosave would put that order back. When a run it is watching
+    // finishes, the page saves anything of its own that is pending and
+    // then takes the server's lists in place of its copy.
+    const LINK_CHECK_POLL_MS = 10000;
+    let linkCheckPollTimer = null;
+
+    function toggleLinkCheckPanel() {
+      const panel = document.getElementById('link-check-panel');
+      const opening = panel.classList.contains('hidden');
+      panel.classList.toggle('hidden', !opening);
+      updateSettingsButtonStates();
+      if (opening) {
+        renderLinkCheckPanel();
+        refreshLinkCheck();
+      }
+    }
+
+    async function linkCheckRequest(body) {
+      const res = await fetch('/api/networks/link-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token, ...body })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) throw new Error(data.error || 'Could not reach the link check.');
+      return data;
+    }
+
+    async function refreshLinkCheck() {
+      try {
+        applyLinkCheck(await linkCheckRequest({ action: 'status' }));
+      } catch (err) {
+        // A poll that misses is tried again on the next one.
+        scheduleLinkCheckPoll();
+      }
+    }
+
+    async function applyLinkCheck(data) {
+      const wasRunning = !!(activeUser.linkCheck && activeUser.linkCheck.running);
+      activeUser.linkCheck = data.linkCheck;
+      if (wasRunning && !data.linkCheck.running) {
+        await flushAutosave();
+        try {
+          const fresh = await linkCheckRequest({ action: 'status', withLinks: true });
+          activeUser.linkCheck = fresh.linkCheck;
+          if (fresh.networkLinks) activeUser.networkLinks = fresh.networkLinks;
+        } catch (err) { /* the order on screen is stale until a reload */ }
+        const last = activeUser.linkCheck.lastRun || {};
+        showStatus(last.error || `Link check finished: ${last.checked || 0} checked, ${last.dead || 0} dead.`, !!(last.error || last.dead));
+      }
+      // Every section, since a run can move links in any of them and the
+      // dead markers have to follow.
+      // Only sections that are drawn: refreshNetworkLinksRegion falls
+      // back to redrawing the whole list for one that is not, which here
+      // would be once per network.
+      for (const key of Object.keys(activeUser.networkLinks || {})) {
+        if (document.getElementById(`network-links-list-${key}`)) refreshNetworkLinksRegion(key);
+      }
+      renderLinkCheckPanel();
+      scheduleLinkCheckPoll();
+    }
+
+    function scheduleLinkCheckPoll() {
+      clearTimeout(linkCheckPollTimer);
+      linkCheckPollTimer = null;
+      if (activeUser && activeUser.linkCheck && activeUser.linkCheck.running) {
+        linkCheckPollTimer = setTimeout(refreshLinkCheck, LINK_CHECK_POLL_MS);
+      }
+    }
+
+    function linkCheckWhen(iso, timeZone) {
+      if (!iso) return '';
+      try {
+        return new Date(iso).toLocaleString('en-US', {
+          timeZone, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+        });
+      } catch (err) {
+        return new Date(iso).toLocaleString();
+      }
+    }
+
+    function renderLinkCheckPanel() {
+      const check = (activeUser && activeUser.linkCheck) || null;
+      if (!check || !document.getElementById('link-check-panel')) return;
+      const zone = check.timeZone || activeUser.timeZone || 'America/New_York';
+
+      document.getElementById('link-check-intro').textContent =
+        `Every link in your broadcast and cable networks is played for ${check.seconds} seconds, ` +
+        `${check.atOnce} at a time per provider login, and each list is re-sorted best first - resolution and ` +
+        `frame rate, then bits per pixel. Links that do not play move to the bottom and are named on the watch page.`;
+      document.getElementById('link-check-enabled').checked = !!check.enabled;
+      const timeInput = document.getElementById('link-check-time');
+      // Not while it has focus: a poll landing mid-edit would put the old
+      // time back under somebody's cursor.
+      if (document.activeElement !== timeInput) timeInput.value = check.time;
+      timeInput.disabled = !check.enabled;
+      document.getElementById('link-check-zone').textContent =
+        `${zone.replace(/_/g, ' ')} - change it with Change Timezone`;
+
+      const lines = [];
+      if (check.running) {
+        const { done, total } = check.running;
+        lines.push(`<i class="fa-solid fa-spinner fa-spin text-[#5aa8d1] mr-1"></i>Checking now: ${done} of ${total || '?'} tested` +
+          `${total ? ` - about ${Math.max(1, Math.round(((total - done) / Math.max(1, check.atOnce)) * (check.seconds + 5) / 60))} min left` : ''}.`);
+      }
+      const last = check.lastRun;
+      if (last && last.error) {
+        lines.push(`<span class="text-[#e56a6a]">Last run ${escapeHtml(linkCheckWhen(last.at, zone))}: ${escapeHtml(last.error)}</span>`);
+      } else if (last) {
+        const moved = (last.reordered || []).length
+          ? ` Reordered ${escapeHtml(last.reordered.join(', '))}.`
+          : ' No list needed reordering.';
+        lines.push(`Last run ${escapeHtml(linkCheckWhen(last.at, zone))}: ${last.checked} checked, ${last.alive} played, ${last.dead} dead.${moved}`);
+      } else {
+        lines.push('Not run yet.');
+      }
+      if (check.enabled && check.nextRun) lines.push(`Next run ${escapeHtml(linkCheckWhen(check.nextRun, zone))}.`);
+      document.getElementById('link-check-status').innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+
+      document.getElementById('link-check-dead').innerHTML = (check.dead || []).map(d => `
+        <div class="flex items-start gap-2 text-[11px] text-[#e56a6a] bg-[#c0392b]/10 border border-[#c0392b]/30 rounded px-2 py-1.5">
+          <i class="fa-solid fa-triangle-exclamation mt-0.5"></i>
+          <span><span class="font-bold">${escapeHtml(d.network)}</span> - ${escapeHtml(d.name || 'unnamed channel')}${d.providers > 1 ? ` (${escapeHtml(d.provider)})` : ''}
+            <span class="text-[#e56a6a]/70">&middot; ${escapeHtml(d.reason)}</span></span>
+        </div>`).join('');
+
+      const runBtn = document.getElementById('link-check-run-btn');
+      runBtn.disabled = !!check.running;
+      runBtn.className = check.running
+        ? 'w-full bg-[#56707d] text-[#e6e6e6]/40 font-bold py-2.5 rounded-lg text-xs cursor-not-allowed'
+        : 'w-full bg-[#56707d] hover:bg-[#66818f] font-bold py-2.5 rounded-lg text-xs transition';
+    }
+
+    async function saveLinkCheckSettings() {
+      const enabled = document.getElementById('link-check-enabled').checked;
+      const time = document.getElementById('link-check-time').value || '06:00';
+      try {
+        const data = await linkCheckRequest({ action: 'save', enabled, time });
+        await applyLinkCheck(data);
+        showStatus(enabled ? `Links will be checked every night at ${time}.` : 'Nightly link check switched off.');
+      } catch (err) {
+        showStatus(err.message, true);
+        renderLinkCheckPanel();
+      }
+    }
+
+    async function runLinkCheckNow() {
+      try {
+        const data = await linkCheckRequest({ action: 'run' });
+        await applyLinkCheck(data);
+        showStatus('Checking every network link now. The lists re-sort when it finishes.');
+      } catch (err) {
+        showStatus(err.message, true);
+      }
+    }
+
+    // The same key the server files a dead link under: provider and
+    // stream id, with a link saved before providers existed belonging to
+    // the first one.
+    function linkCheckKeyFor(link) {
+      const providers = (activeUser && activeUser.providers) || [];
+      const providerId = (providers.find(pr => pr.id === link.providerId) || providers[0] || {}).id || '';
+      return `${providerId}|${link.streamId || streamIdFromUrl(link.url)}`;
+    }
+
+    function deadLinkFor(key, link) {
+      const dead = (activeUser && activeUser.linkCheck && activeUser.linkCheck.dead) || [];
+      const id = linkCheckKeyFor(link);
+      return dead.find(d => d.networkKey === key && d.key === id) || null;
     }
 
     function refreshNetworkActions(key) {

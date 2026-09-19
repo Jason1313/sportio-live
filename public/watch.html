@@ -569,6 +569,12 @@
 
 <!-- Main browsing area -->
 <main id="browse" class="hidden max-w-[1600px] mx-auto px-5 py-6">
+  <!-- Links the nightly check could not play. Named one by one, because
+       "some links are dead" sends somebody hunting through every network
+       for them, and they have already been moved to the bottom of their
+       lists - this is so the person who can replace them knows to. -->
+  <div id="link-check-banner" class="hidden mb-5 bg-[#c0392b]/15 border border-[#e56a6a]/40 rounded-xl px-4 py-3"></div>
+
   <!-- A plain search of the whole playlist, for one-off events that
        have no network of their own. Results play straight from the
        list; saving one is an optional shortcut for next time. -->
@@ -1760,6 +1766,7 @@ end)
     document.getElementById('grid').innerHTML = '';
     document.getElementById('saved-list').innerHTML = '';
     document.getElementById('saved-results').innerHTML = '';
+    renderLinkCheckBanner(null);
     showEmpty('');
 
     forgetAccount('');
@@ -1839,6 +1846,10 @@ end)
     }
     if (renewed.ok && renewed.data && renewed.data.token) storeToken(renewed.data.token);
 
+    // Not awaited: it is a warning beside the page, not part of it, and
+    // the schedule should not wait on it.
+    loadLinkCheckBanner();
+
     const savedRes = await postJson('/api/networks/saved');
     savedChannels = (savedRes.data && savedRes.data.channels) || [];
     seedProbeResultsFromSaved();
@@ -1869,6 +1880,69 @@ end)
 
     // Home handles the no-leagues-configured case itself.
     selectCatalog(HOME_CATALOG_ID);
+  }
+
+  // --- Nightly link check banner ------------------------------------
+  //
+  // Stays until the next night's check, the link is removed from its
+  // network, or it is tested by hand and plays - the server stops
+  // reporting it on any of those. Dismissing it hides this morning's
+  // list on this browser only; a link still dead tomorrow brings it back.
+  const LINK_CHECK_DISMISSED_KEY = 'sportio.linkCheckDismissed';
+
+  async function loadLinkCheckBanner() {
+    const res = await postJson('/api/networks/link-check');
+    const check = res.ok && res.data && res.data.linkCheck;
+    renderLinkCheckBanner(check || null);
+  }
+
+  function renderLinkCheckBanner(check) {
+    const el = document.getElementById('link-check-banner');
+    const dead = (check && check.dead) || [];
+    let dismissed = '';
+    try { dismissed = localStorage.getItem(LINK_CHECK_DISMISSED_KEY) || ''; } catch (err) { /* private window */ }
+    const run = (check && check.lastRun && check.lastRun.at) || '';
+    if (dead.length === 0 || (run && dismissed === run)) {
+      el.classList.add('hidden');
+      el.innerHTML = '';
+      return;
+    }
+    const when = (() => {
+      try {
+        return new Date(run).toLocaleString('en-US', {
+          timeZone: check.timeZone, weekday: 'long', hour: 'numeric', minute: '2-digit'
+        });
+      } catch (err) { return ''; }
+    })();
+    el.innerHTML = `
+      <div class="flex items-start gap-3">
+        <i class="fa-solid fa-triangle-exclamation text-[#e56a6a] mt-0.5"></i>
+        <div class="flex-1 min-w-0">
+          <p class="text-sm font-bold text-[#f0b0b0]">
+            ${dead.length === 1 ? 'A link' : `${dead.length} links`} did not play in the nightly check${when ? ` (${escapeHtml(when)})` : ''}
+          </p>
+          <p class="text-xs text-[#e6e6e6]/60 mb-1.5">
+            ${dead.length === 1 ? 'It has' : 'They have'} been moved to the bottom of ${dead.length === 1 ? 'its network' : 'their networks'}, so the player tries every other link first.
+            Replace ${dead.length === 1 ? 'it' : 'them'} from the dashboard if ${dead.length === 1 ? 'it stays' : 'they stay'} dead.
+          </p>
+          <ul class="space-y-0.5">
+            ${dead.map(d => `
+              <li class="text-xs text-[#e6e6e6]/85">
+                <span class="font-bold">${escapeHtml(d.network)}</span> -
+                ${escapeHtml(d.name || 'unnamed channel')}${d.providers > 1 ? ` <span class="text-[#e6e6e6]/45">(${escapeHtml(d.provider)})</span>` : ''}
+                <span class="text-[#e56a6a]/80">&middot; ${escapeHtml(d.reason)}</span>
+              </li>`).join('')}
+          </ul>
+        </div>
+        <button onclick="dismissLinkCheckBanner('${escapeHtml(run)}')" title="Hide until the next check"
+                class="text-[#e6e6e6]/45 hover:text-[#e6e6e6] text-sm px-1"><i class="fa-solid fa-xmark"></i></button>
+      </div>`;
+    el.classList.remove('hidden');
+  }
+
+  function dismissLinkCheckBanner(run) {
+    try { localStorage.setItem(LINK_CHECK_DISMISSED_KEY, run); } catch (err) { /* private window */ }
+    document.getElementById('link-check-banner').classList.add('hidden');
   }
 
   function renderTabs() {
