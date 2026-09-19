@@ -695,6 +695,8 @@
   // whole point of averaging: the samples have to be of different moments.
 
   let savedChannels = [];
+  // Whether the answer has arrived, as against the account having none.
+  let savedChannelsLoaded = false;
   let savedResults = [];
   let savedGroups = [];
   let savedExcluded = new Set();
@@ -1756,6 +1758,7 @@ end)
     catalogLens = {};
     leaguePrefs = { conferences: {}, pinnedTeams: {}, hiddenConferences: {} };
     savedChannels = [];
+    savedChannelsLoaded = false;
     savedResults = [];
     savedGroups = [];
     savedExcluded = new Set();
@@ -1850,9 +1853,20 @@ end)
     // the schedule should not wait on it.
     loadLinkCheckBanner();
 
-    const savedRes = await postJson('/api/networks/saved');
-    savedChannels = (savedRes.data && savedRes.data.channels) || [];
-    seedProbeResultsFromSaved();
+    // Nor is this one. It resolves the account's saved channels against
+    // the provider's whole channel list, and on a list this server has
+    // not got in hand that is the slowest request the portal makes -
+    // nine seconds for fifty thousand channels, more for a reseller's
+    // twenty-odd megabytes. Awaiting it here meant a sign-in showed the
+    // header and then nothing at all until it landed, while the schedule
+    // it was holding up needed nothing from it. A refresh looked instant
+    // only because the first visit had left the list in the server's
+    // cache.
+    //
+    // Started before the tabs are drawn rather than after, so it is
+    // already under way while the leagues load, and it warms that same
+    // list for the first card anybody opens.
+    loadSavedChannels();
 
     // The filter bar is drawn from these, so they are fetched before the
     // first tab renders rather than after. Small enough to be worth
@@ -1943,6 +1957,19 @@ end)
   function dismissLinkCheckBanner(run) {
     try { localStorage.setItem(LINK_CHECK_DISMISSED_KEY, run); } catch (err) { /* private window */ }
     document.getElementById('link-check-banner').classList.add('hidden');
+  }
+
+  // Filled in when it lands. Only the Search Channels tab and the quality
+  // badges read it, and both are drawn again below once it has.
+  async function loadSavedChannels() {
+    const savedRes = await postJson('/api/networks/saved');
+    savedChannels = (savedRes.data && savedRes.data.channels) || [];
+    savedChannelsLoaded = true;
+    seedProbeResultsFromSaved();
+    if (activeCatalog === SAVED_CATALOG_ID) {
+      renderSavedList();
+      renderSavedResults();
+    }
   }
 
   function renderTabs() {
@@ -2089,9 +2116,33 @@ end)
     }
 
     showEmpty('Loading...');
-    const results = await Promise.all(sources.map(async c => {
+    // Painted as each league answers rather than once they all have. A
+    // league nobody can reach waits out its own timeout, and a single
+    // slow one used to hold every other league's games off the screen
+    // with nothing to look at but "Loading...".
+    const shownSoFar = [];
+    let answered = 0;
+    let failures = 0;
+    const paint = () => {
+      if (activeCatalog !== HOME_CATALOG_ID) return;
+      const waiting = answered < sources.length;
+      if (shownSoFar.length === 0) {
+        if (waiting) return;
+        showEmpty(failures === sources.length
+          ? 'Could not reach the server for any league.'
+          : 'Nothing on right now. Open a league tab for its full schedule.');
+        document.getElementById('grid').innerHTML = '';
+        return;
+      }
+      showEmpty(waiting ? 'Loading the rest...' : (failures > 0
+        ? `${failures} league${failures === 1 ? '' : 's'} could not be loaded.` : ''));
+      renderGameGrid(sortMetasByRelevance(shownSoFar));
+    };
+
+    await Promise.all(sources.map(async c => {
       const metas = await fetchCatalogMetas(c.id);
-      if (metas === null) return { failed: true, metas: [] };
+      answered++;
+      if (metas === null) { failures++; return paint(); }
       // The league name doubles as the badge on each card, so a game is
       // attributable at a glance when three leagues are mixed together.
       const league = c.name || '';
@@ -2113,22 +2164,11 @@ end)
       // are untouched beyond their own hidden conferences.
       const sport = sportOfCatalog(c.id);
       const shown = homeLensFor(sport, metas.filter(m => !m.pinned && m.isToday !== false));
-      return { failed: false, metas: shown.map(m => ({ ...m, league })) };
+      shownSoFar.push(...shown.map(m => ({ ...m, league })));
+      // Re-sorted over everything held each time, so a league answering
+      // late still lands in kickoff order rather than on the end.
+      paint();
     }));
-
-    const games = results.flatMap(r => r.metas);
-    const failures = results.filter(r => r.failed).length;
-
-    if (games.length === 0) {
-      showEmpty(failures === sources.length
-        ? 'Could not reach the server for any league.'
-        : 'Nothing on right now. Open a league tab for its full schedule.');
-      document.getElementById('grid').innerHTML = '';
-      return;
-    }
-
-    showEmpty(failures > 0 ? `${failures} league${failures === 1 ? '' : 's'} could not be loaded.` : '');
-    renderGameGrid(sortMetasByRelevance(games));
   }
 
   // The conferences present in a set of metas, each with how many games
@@ -3021,7 +3061,12 @@ end)
     const box = document.getElementById('saved-list');
     if (!box) return;
     if (savedChannels.length === 0) {
-      box.innerHTML = '<p class="text-xs text-[#e6e6e6]/40 italic">Nothing saved yet. Search above and hit Save on anything worth keeping.</p>';
+      // Told apart on purpose: an empty list and a list still on its way
+      // look identical, and "Nothing saved yet" to somebody who has saved
+      // twenty channels reads as having lost them.
+      box.innerHTML = savedChannelsLoaded
+        ? '<p class="text-xs text-[#e6e6e6]/40 italic">Nothing saved yet. Search above and hit Save on anything worth keeping.</p>'
+        : '<p class="text-xs text-[#e6e6e6]/40 italic"><i class="fa-solid fa-spinner fa-spin mr-1.5"></i>Loading your saved channels...</p>';
       return;
     }
     box.innerHTML = savedChannels.map(c => `

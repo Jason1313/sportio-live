@@ -3980,6 +3980,20 @@ function buildXtreamChannelSource(provider, catalog) {
 // take the full lifetime; the warmer asks for less, which is what lets it
 // replace a list before it expires - see warmChannelSources - and the
 // dashboard's refresh asks for zero.
+//
+// An expired list is still SERVED, and replaced behind the request that
+// found it stale. Waiting for the refetch was costing a visitor the
+// whole catalog - nine seconds for fifty thousand channels on a fast
+// connection, and the watch portal draws nothing until it lands - to
+// replace a list that was minutes old with one that is seconds old. A
+// provider's channel list does not change in the ten minutes it takes to
+// notice, and the list held is the same one the previous request was
+// happily served.
+//
+// `mustBeFresh` is for the two callers that exist to do the fetching:
+// the warmer, whose whole job is to have waited so nobody else does, and
+// the dashboard's Refresh channels button, which is a person asking for
+// the provider's list as it is right now.
 async function getProviderChannelSource(provider, options = {}) {
   if (!provider || provider.kind !== 'xtream' || !provider.url) return null;
   const key = xtreamCacheKey(provider);
@@ -3987,6 +4001,14 @@ async function getProviderChannelSource(provider, options = {}) {
 
   const cached = xtreamSourceCache.get(key);
   if (cached && Date.now() - cached.fetchedAt < maxAgeMs) {
+    return buildXtreamChannelSource(provider, cached);
+  }
+  if (cached && !options.mustBeFresh) {
+    // Kicked off and deliberately not awaited. It shares the in-flight
+    // map below, so the refresh this starts is the one a later request
+    // joins rather than a second fetch of the same catalog.
+    getProviderChannelSource(provider, { ...options, mustBeFresh: true })
+      .catch(err => console.error('[Xtream] Background catalog refresh failed:', err.message));
     return buildXtreamChannelSource(provider, cached);
   }
 
@@ -6188,7 +6210,7 @@ app.post('/api/providers/refresh', async (req, res) => {
     // until this said otherwise.
     const held = xtreamSourceCache.get(xtreamCacheKey(provider));
     const before = held ? held.fetchedAt : 0;
-    source = await getProviderChannelSource(provider, { maxAgeMs: 0 });
+    source = await getProviderChannelSource(provider, { maxAgeMs: 0, mustBeFresh: true });
     if (!source || source.fetchedAt <= before || source.channels.length === 0) {
       return res.status(502).json({
         error: `${provider.label} could not be reached or sent an empty list` +
@@ -7995,7 +8017,7 @@ async function warmChannelSources() {
         warmed++;
         continue;
       }
-      const source = await getProviderChannelSource(provider, { maxAgeMs: CHANNEL_SOURCE_MAX_AGE_MS });
+      const source = await getProviderChannelSource(provider, { maxAgeMs: CHANNEL_SOURCE_MAX_AGE_MS, mustBeFresh: true });
       if (source) warmed++;
     } catch (err) {
       console.error(`[Warm] Could not warm a channel source: ${err.message}`);
