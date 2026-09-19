@@ -28,18 +28,26 @@ const { execFile } = require('child_process');
 // surfacing as an ENOENT.
 const FFPROBE_BIN = process.env.FFPROBE_PATH || 'ffprobe';
 
-// How much of the stream to read, in seconds of media.
+// How much of the stream to read, in seconds of media, when the caller
+// does not say.
 //
 // Bitrate cannot be taken from metadata on a live feed, so it is counted
-// off the wire over this window. Twenty was settled on last time against
-// a real provider: it bursts roughly the first thirty seconds of media
-// and then serves in real time, so twenty sits inside the burst and a
-// channel comes back in about ten seconds, while sixty cost about forty.
-// Overridable, because the right answer depends on the provider.
-const PROBE_SAMPLE_SECONDS = Math.max(
-  5,
-  Math.min(300, Number(process.env.PROBE_SAMPLE_SECONDS) || 20)
-);
+// off the wire over this window; resolution and frame rate need only the
+// first few seconds. Twenty was settled on against a real provider: it
+// bursts roughly the first thirty seconds of media and then serves in
+// real time, so twenty sits inside the burst, while sixty cost about
+// forty seconds a channel.
+//
+// A caller can ask for less - a reseller's testSeconds in bundles.js -
+// and the environment variable, when set, wins over both, because it is
+// the operator saying what their provider needs.
+const DEFAULT_SAMPLE_SECONDS = 20;
+const ENV_SAMPLE_SECONDS = Number(process.env.PROBE_SAMPLE_SECONDS) || 0;
+
+function sampleSecondsFor(asked) {
+  const seconds = ENV_SAMPLE_SECONDS || Number(asked) || DEFAULT_SAMPLE_SECONDS;
+  return Math.max(5, Math.min(300, seconds));
+}
 
 // Has to clear the sample window with room for connect time on top, and
 // is sized for a provider that paces its output in real time, so one
@@ -129,7 +137,7 @@ function measureVideoBitrate(packets, videoIndex, fps) {
 // only then, still gets a resolution rather than failing every test.
 const FFPROBE_OPTION_ERROR = /unrecognized option|unknown option|failed to set value|option .* not found/i;
 
-function ffprobeArgs(url, legacy) {
+function ffprobeArgs(url, legacy, seconds) {
   if (legacy) {
     return [
       '-v', 'error',
@@ -150,7 +158,7 @@ function ffprobeArgs(url, legacy) {
     ':packet=size,dts_time,stream_index',
     // The bitrate window. Without it ffprobe reads to the end of the
     // stream, which for a live one is never.
-    '-read_intervals', `%+${PROBE_SAMPLE_SECONDS}`,
+    '-read_intervals', `%+${seconds}`,
     '-of', 'json',
     '-analyzeduration', '3000000',
     '-probesize', '3000000',
@@ -160,9 +168,9 @@ function ffprobeArgs(url, legacy) {
   ];
 }
 
-function runFfprobe(url, legacy) {
+function runFfprobe(url, legacy, seconds) {
   return new Promise((resolve, reject) => {
-    execFile(FFPROBE_BIN, ffprobeArgs(url, legacy), {
+    execFile(FFPROBE_BIN, ffprobeArgs(url, legacy, seconds), {
       timeout: PROBE_TIMEOUT_MS,
       maxBuffer: 16 * 1024 * 1024,
     }, (err, stdout, stderr) => {
@@ -224,7 +232,8 @@ function pump(lane) {
 // here - finding those is half of what testing is for.
 //
 // `lane` names the login the stream plays through and `limit` how many
-// probes it may have open at once. A caller that names neither gets one
+// probes it may have open at once. `seconds` is how much stream to read;
+// see sampleSecondsFor. A caller that names neither gets one
 // shared lane of one, which is what everything was before lanes existed.
 async function probeStream(url, options = {}) {
   const lane = laneFor(options.lane || 'default', options.limit || 1);
@@ -235,22 +244,22 @@ async function probeStream(url, options = {}) {
     const startAt = Math.max(Date.now(), lane.nextStart);
     lane.nextStart = startAt + MIN_PROBE_INTERVAL_MS;
     if (startAt > Date.now()) await new Promise(r => setTimeout(r, startAt - Date.now()));
-    return await measure(url);
+    return await measure(url, sampleSecondsFor(options.seconds));
   } finally {
     lane.active--;
     pump(lane);
   }
 }
 
-async function measure(url) {
+async function measure(url, seconds) {
   try {
     let stdout;
     try {
-      stdout = await runFfprobe(url, false);
+      stdout = await runFfprobe(url, false, seconds);
     } catch (err) {
       if (!err.optionError) throw err;
       console.error('[Probe] ffprobe rejected the detailed options, falling back:', err.message);
-      stdout = await runFfprobe(url, true);
+      stdout = await runFfprobe(url, true, seconds);
     }
     const parsed = JSON.parse(stdout);
     const video = (parsed.streams || []).find(s => s.codec_type === 'video') || (parsed.streams || [])[0];
@@ -278,6 +287,6 @@ module.exports = {
   parseFrameRate,
   isInterlaced,
   measureVideoBitrate,
-  PROBE_SAMPLE_SECONDS,
+  sampleSecondsFor,
   MIN_PROBE_INTERVAL_MS,
 };

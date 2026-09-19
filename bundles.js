@@ -29,6 +29,14 @@
 // under way. Taking all three would make every run a reason the stream
 // they are watching drops.
 //
+// `testSeconds` is how much of a stream a test reads. Ten rather than the
+// default twenty: resolution and frame rate - which decide whether a
+// channel passes - are read in the first few seconds either way, and the
+// longer window only steadies the bitrate. Halving it roughly halves a
+// run, at the price of a noisier bpp, which can swap two channels that
+// sit close together inside a band but cannot move one across the pass
+// line.
+//
 // `folders` says which service a channel plays from, by the prefix the
 // reseller puts on its category - "Strong8K: US| FOX NETWORK" is Strong.
 // The dashboard's "best tested" button takes up to `bestPerFolder` from
@@ -39,6 +47,7 @@ const BUNDLES = [
     key: 'flix-streams',
     label: 'Flix-Streams',
     testsAtOnce: 2,
+    testSeconds: 10,
     folders: [
       { prefix: 'Strong8K', label: 'Strong' },
       { prefix: 'Trex', label: 'Trex' },

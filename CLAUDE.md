@@ -19,7 +19,7 @@ either side of the wire. The image also carries ffmpeg, for ffprobe.
 | `server.js` | Everything with a route, a schedule or a file on disk: accounts, providers, ESPN schedules, poster rendering, the Stremio resources, the background warmers. |
 | `networks.js` | Which national network is carrying a game, and which of the account's saved links stand behind that network. |
 | `autopick.js` | Re-choosing a network's channels from the newest published sweep - the rules deciding which channels *are* a network, then the quality ladder over those. |
-| `m3u.js` | M3U/EPG parsing and the shared background playlist cache. |
+| `m3u.js` | M3U playlist parsing and the shared background playlist cache. |
 | `streamcheck.js` | Reads published stream sweeps from streamcheck.pro (a Metabase public dashboard) - alive/dead, codec, resolution, bitrate. |
 | `quality.js` | Turns one of those readings into a band, a score and a badge line. Measures nothing itself. |
 | `bundles.js` | Resellers that carry other services under one login and renumber every channel (Flix-Streams: Strong + Trex). A provider marked as one is tested with ffprobe instead of read from published data, and auto-pick leaves it alone. |
@@ -54,7 +54,8 @@ image.
 Environment: `ENCRYPTION_KEY` (64 hex chars, AES-256-GCM, encrypts saved
 provider credentials), `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `PORT`, `HOST`,
 `SPORTIO_DATA_DIR`, `STREAMCHECK_REFRESH_TIME`, `STREAMCHECK_REFRESH_TZ`,
-`PROBE_SAMPLE_SECONDS` (seconds of stream a test reads, default 20),
+`PROBE_SAMPLE_SECONDS` (seconds of stream a test reads, overriding a
+reseller's `testSeconds`; unset, 10 for Flix-Streams and 20 otherwise),
 `FFPROBE_PATH`.
 The app starts without an encryption key on purpose, so the first-run
 setup can generate one - registration and login stay blocked until it is
@@ -88,8 +89,8 @@ Other habits worth keeping:
   wrestling sites are all somebody else's interface and can change
   without notice. A failure keeps what is already held and lets the app
   carry on; it does not take a page down.
-- **Nothing slow on a visitor's request.** Playlists, EPGs, league
-  schedules and provider catalogs are warmed on timers and read from
+- **Nothing slow on a visitor's request.** Playlists, league schedules
+  and provider catalogs are warmed on timers and read from
   cache. If a change puts a fetch back on the request path, warm it
   instead.
 - **Migrate on read.** Stored accounts are folded into the current shape

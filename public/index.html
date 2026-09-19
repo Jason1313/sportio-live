@@ -4346,12 +4346,30 @@
     // it back. Only here - the watch portal's search shows it like any
     // other channel, since it may still be the only one showing the game.
 
-    const TEST_SECONDS_ESTIMATE = 25;
+    // A test's cost is the stream it reads - the reseller's testSeconds -
+    // plus connecting and the gap the server keeps between starts. The
+    // overhead is a guess from a bursting provider, where a twenty-second
+    // read came back in about ten; one that paces in real time takes the
+    // full read, and this errs toward that.
+    const TEST_OVERHEAD_SECONDS = 5;
+
+    function testSecondsFor(key) {
+      const providers = (activeUser && activeUser.providers) || [];
+      const rows = networkSearchResults[key] || [];
+      let seconds = 0;
+      for (const row of rows) {
+        const provider = providers.find(pr => pr.id === row.providerId) || providers[0];
+        const bundle = provider && bundleOf(provider);
+        if (bundle) seconds = Math.max(seconds, bundle.testSeconds || 20);
+      }
+      return (seconds || 20) + TEST_OVERHEAD_SECONDS;
+    }
 
     // Tests running side by side finish together, so the wait is the
     // count divided across the slots rather than the sum.
-    function minutesFor(count, atOnce) {
-      return Math.max(1, Math.round((Math.ceil(count / Math.max(1, atOnce || 1)) * TEST_SECONDS_ESTIMATE) / 60));
+    function minutesFor(count, atOnce, key) {
+      const each = testSecondsFor(key);
+      return Math.max(1, Math.round((Math.ceil(count / Math.max(1, atOnce || 1)) * each) / 60));
     }
 
     function testableRows(key) {
@@ -4367,7 +4385,7 @@
           <div class="flex items-center gap-2 px-2 py-1.5 text-[11px] text-[#e6e6e6]/70">
             <i class="fa-solid fa-spinner fa-spin text-[#5aa8d1]"></i>
             <span class="flex-1">${run.done} of ${run.total} tested${run.active ? `, ${run.active} testing now` : ''}${run.stop ? ' - stopping once these finish' : ''}...
-              about ${minutesFor(run.total - run.done, run.atOnce)} min left</span>
+              about ${minutesFor(run.total - run.done, run.atOnce, key)} min left</span>
             ${run.stop ? '' : `<button onclick="stopNetworkTests()" class="text-[11px] font-bold text-[#e56a6a]/80 hover:text-[#e56a6a]">Stop</button>`}
           </div>`;
       }
@@ -4386,7 +4404,7 @@
                   class="font-bold px-2.5 py-1 rounded-lg ${ticked === 0 || busy ? 'bg-[#3b4d58] text-[#e6e6e6]/30 cursor-not-allowed' : 'bg-[#3b8fc4] hover:bg-[#2f7fb3] text-white'}">
             Test selected (${ticked})
           </button>
-          ${ticked > 0 && !busy ? `<span class="text-[10px] text-[#e6e6e6]/35">about ${minutesFor(ticked, testsAtOnceFor(rows.filter(c => selected.has(c.url)).map(c => c.url), key))} min</span>` : ''}
+          ${ticked > 0 && !busy ? `<span class="text-[10px] text-[#e6e6e6]/35">about ${minutesFor(ticked, testsAtOnceFor(rows.filter(c => selected.has(c.url)).map(c => c.url), key), key)} min</span>` : ''}
           ${busy ? '<span class="text-[10px] text-[#e6e6e6]/35">another section is testing</span>' : ''}
         </div>`;
     }

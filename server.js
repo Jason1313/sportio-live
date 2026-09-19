@@ -5188,9 +5188,11 @@ app.post('/api/networks/test', async (req, res) => {
     });
   }
 
+  const bundle = bundles.bundleFor(provider.bundle);
   const result = await probe.probeStream(url, {
     lane: connectionKeyFor(provider),
-    limit: bundles.bundleFor(provider.bundle).testsAtOnce,
+    limit: bundle.testsAtOnce,
+    seconds: bundle.testSeconds,
   });
   const stored = storeTestResult(auth.user, provider.id, url, result);
   saveUserConfigs();
@@ -5987,6 +5989,9 @@ function describeBundles() {
     key: bundle.key,
     label: bundle.label,
     testsAtOnce: bundle.testsAtOnce || 1,
+    // What a test will actually read, for the page's time estimates - the
+    // environment override included, so the estimate matches the wait.
+    testSeconds: probe.sampleSecondsFor(bundle.testSeconds),
     folders: (bundle.folders || []).map(({ prefix, label }) => ({ prefix, label })),
     bestPerFolder: bundle.bestPerFolder || 5,
   }));
