@@ -332,23 +332,12 @@
         <button onclick="copyBox('ps1-box','Script copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
         <pre id="ps1-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre max-h-72 overflow-y-auto"></pre>
       </div>
-      <div id="file-reload">
-        <span class="font-bold text-[#e6e6e6]">The reconnect script</span>
-        <span class="text-[#e6e6e6]/45">&mdash; <code id="reload-path-label" class="text-[#5aa8d1]"></code></span>
-        <button onclick="copyBox('lua-box','Reconnect script copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
-        <p class="text-[#e6e6e6]/45 mt-1">A provider dropping a channel ends playback like a file ending, and mpv falls
-        back to its empty window. This puts the same address back on within a few seconds, and keeps trying for as long
-        as the window is open. It also holds the picture near live: every stall leaves playback permanently further
-        behind, so any surplus that builds up is played off again at up to 3% fast, which is pitch-corrected and
-        inaudible.</p>
-        <pre id="lua-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre max-h-72 overflow-y-auto"></pre>
-      </div>
       <div id="file-mpvconf">
         <span class="font-bold text-[#e6e6e6]">The mpv profile</span>
         <span class="text-[#e6e6e6]/45">&mdash; appended to <code id="mpvconf-path-label" class="text-[#5aa8d1]"></code></span>
         <button onclick="copyBox('mpv-box','Profile copied.')" class="ml-2 text-[#5aa8d1] hover:text-[#6bb5dd] font-bold">Copy</button>
-        <p class="text-[#e6e6e6]/45 mt-1">Buffering, reconnect and low-latency settings for a live stream, which the
-        player file selects with <code>--profile=sportio</code>. Setup manages only this block, between its two marker
+        <p class="text-[#e6e6e6]/45 mt-1">Reconnect settings for a live stream, which the player file selects with
+        <code>--profile=sportio</code>. Setup manages only this block, between its two marker
         lines, and leaves the rest of the file alone &mdash; a profile runs to the end of the file, so it is always
         re-appended last rather than edited in place.</p>
         <pre id="mpv-box" class="mt-2 bg-[#0f171e] border border-white/10 rounded p-3 text-[11px] overflow-x-auto whitespace-pre max-h-72 overflow-y-auto"></pre>
@@ -1031,7 +1020,9 @@
   // site run an arbitrary program with an arbitrary argument. Keeping the
   // choice local means a link can only ever start the player you configured.
   const CONFIG_FILENAME = 'sportio-player.txt';
-  const RELOAD_FILENAME = 'sportio-reload.lua';
+  // Written by setup until it was dropped, and removed by setup since, so
+  // a machine that had it installed is cleaned up by running setup again.
+  const RETIRED_RELOAD_FILENAME = 'sportio-reload.lua';
   const SETUP_FILENAME = 'sportio-setup.ps1';
 
   function dirOf(scriptPath) {
@@ -1055,9 +1046,9 @@
     return `'${String(text).replace(/'/g, "''")}'`;
   }
 
-  // Gates everything mpv-shaped: --script, which VLC and PotPlayer
-  // would read as another file to play, and the mpv.conf profile, which
-  // nothing else reads at all. Keyed off the executable name so choosing
+  // Gates everything mpv-shaped: --profile=sportio, which VLC and
+  // PotPlayer would read as another file to play, and the mpv.conf
+  // profile, which nothing else reads at all. Keyed off the executable name so choosing
   // a player from the presets above is the whole of the decision - a
   // checkbox for it would be a second thing to get wrong.
   function playerIsMpv(player) {
@@ -1100,217 +1091,32 @@
   // .ts does not resume but starts again at the head of whatever the
   // provider has buffered, and against a server that went quiet for 15s
   // without closing the socket a 10s timeout reconnected and replayed
-  // 20s, where no timeout rode the gap out on the buffer. A picture that
-  // is genuinely frozen is caught by sportio-reload.lua's watchdog.
+  // 20s, where no timeout rode the gap out on the buffer.
   const MPV_PROFILE = `[sportio]
 profile-desc=Live IPTV
 # Reconnect instead of dying when the provider drops a packet. This is
-# ffmpeg's own retry and it is the cheap one - mpv's cache covers the
-# gap, so a recovery here is invisible. It only reaches a request that
-# broke mid-read though; a clean close reads as EOF and a refused
-# connection as an error, and sportio-reload.lua is what handles those.
+# ffmpeg's own retry - mpv's cache covers the gap, so a recovery here is
+# invisible. It only reaches a request that broke mid-read though; a
+# stream the provider closes cleanly ends playback, and the channel is
+# opened again from the page.
 stream-lavf-o-append=reconnect=1
 stream-lavf-o-append=reconnect_streamed=1
 stream-lavf-o-append=reconnect_delay_max=5
 stream-lavf-o-append=reconnect_on_network_error=1
 `;
 
-  // The reconnect script, verbatim. It is offered for copying rather
-  // than served from this app on purpose: the helper only ever runs
-  // files already sitting on the machine, and a player argument that
-  // pointed at a URL would undo that.
-  const RELOAD_LUA = `-- sportio-reload.lua - put a dropped live stream back on screen, and
--- keep it as close to live as it can be held.
---
--- A provider closing a stream looks exactly like a file ending:
--- libavformat returns EOF, mpv fires end-file, and with nothing else
--- queued the player falls back to its idle screen - "Drop files or URLs
--- to play here" on mpv.net. ffmpeg's own reconnect=1 does not cover it:
--- that retries a request that broke mid-read, not one the server closed
--- cleanly, and not one that never opened at all.
---
--- So the address is remembered and put back. eof and error both retry,
--- because a channel coming back up goes through a stretch of refused
--- connections and 5xx first. A stream that freezes with the socket
--- still open reports neither, and is caught by the watchdog instead.
-
-local mp = require "mp"
-local msg = require "mp.msg"
-local options = require "mp.options"
-
-local o = {
-    delay = 3,
-    -- A provider that is down stays down for minutes, not seconds.
-    -- Quick retries get through a channel restart; past that they are
-    -- only hammering somebody's server, so the interval opens out.
-    slow_delay = 15,
-    fast_for = 30,
-    -- Frames stop arriving long before the socket admits it. 20s is
-    -- past any normal rebuffer and short of a commercial break.
-    stall = 20,
-    retries = 0, -- 0 = keep trying for as long as the window is open
-
-    governor = true,
-    -- Ten rather than four. The surplus a provider hands you on connect
-    -- is also the only thing standing between a hiccup and a stall, and
-    -- draining it to four seconds left almost none - on a feed that
-    -- jitters, that turns an invisible gap into a rebuffer. Ten still
-    -- gives back the drift that stalls leave behind without spending the
-    -- cushion that stops the next one.
-    target = 10,
-    gain = 0.004,
-    max_boost = 0.03,
-    window = 10,
-}
-options.read_options(o, "sportio-reload")
-
-local url, attempts, pending = nil, 0, nil
-local last_pos, still_since, last_cache = nil, nil, nil
-local samples, set_speed = {}, nil
-
-local function reconnect()
-    if not url or pending then return end
-    if o.retries > 0 and attempts >= o.retries then
-        msg.warn("giving up after " .. attempts .. " attempts")
-        return
-    end
-    attempts = attempts + 1
-    local wait = (attempts * o.delay <= o.fast_for) and o.delay or o.slow_delay
-    msg.info(("stream gone, retrying in %ds (attempt %d)"):format(wait, attempts))
-    mp.osd_message(("Stream dropped - reconnecting (%d)"):format(attempts), wait)
-    pending = mp.add_timeout(wait, function()
-        pending = nil
-        mp.commandv("loadfile", url, "replace")
-    end)
-end
-
--- Hand playback speed back and forget the history. Called wherever the
--- surplus stops meaning what the governor thinks it means - a pause, a
--- rebuffer, a different file - so speed is never left raised across a
--- gap the viewer can see.
-local function ungovern()
-    samples = {}
-    if set_speed and mp.get_property_number("speed") == set_speed then
-        mp.set_property_number("speed", 1.0)
-    end
-    set_speed = nil
-end
-
--- The latency governor.
---
--- Latency only ever ratchets up. Measured against a server bursting 8s
--- of content on connect and then sending at 1x, a 5s stall left playback
--- exactly 5.00s further behind live half a minute later and it never
--- came back. Cache size has nothing to do with it: a 60s readahead and a
--- 1s readahead sat at the same position to within 0.02s, the large one
--- simply holding 6.3s in hand where the small one held 1.0s. So the only
--- route back to live, short of rejoining the channel, is to play the
--- surplus off - which is what this does, running up to 3% fast while
--- more than "target" seconds are banked ahead of the picture. Pitch is
--- corrected by scaletempo2, so commentary sounds normal; the ceiling is
--- there because speech starts to sound hurried somewhere past it.
---
--- It is deliberately slow. At the default gain a second of surplus takes
--- about half a minute to give back, which over a match is nothing and
--- within a single play is unnoticeable.
-local function govern()
-    if not o.governor then return end
-
-    local cache = mp.get_property_number("demuxer-cache-duration")
-    if not cache or mp.get_property_bool("paused-for-cache", false) then
-        ungovern()
-        return
-    end
-
-    -- The low-water mark over the last few seconds, not the reading of
-    -- the moment. HLS arrives a whole segment at a time and sags in
-    -- between, so chasing the peak would drain exactly the runway that
-    -- stops the gap between two segments from becoming a stall.
-    samples[#samples + 1] = cache
-    while #samples > o.window do table.remove(samples, 1) end
-    if #samples < o.window then return end
-    local low = samples[1]
-    for _, v in ipairs(samples) do if v < low then low = v end end
-
-    local speed = 1.0
-    if low > o.target then
-        speed = 1 + math.min((low - o.target) * o.gain, o.max_boost)
-    end
-    speed = math.floor(speed * 1000 + 0.5) / 1000
-
-    -- A speed somebody set by hand is theirs. Engage only from 1.0, and
-    -- stand down the moment the current speed is not the one left here,
-    -- rather than fighting the keyboard a tenth of a percent at a time.
-    local now = mp.get_property_number("speed") or 1.0
-    local mine = set_speed or 1.0
-    if math.abs(now - mine) > 0.0005 then
-        set_speed = nil
-        return
-    end
-
-    if math.abs(now - speed) > 0.0005 then
-        mp.set_property_number("speed", speed)
-    end
-    set_speed = speed
-end
-
-local function watch_stall()
-    local pos = mp.get_property_number("time-pos")
-    -- No position means idle or still opening, and end-file owns both.
-    if not pos then return end
-    if not last_pos or pos > last_pos + 0.01 then
-        last_pos, still_since, last_cache = pos, nil, nil
-        return
-    end
-    -- A frozen picture with the cache still filling behind it is a
-    -- stream rebuffering, not a stream that has died, and reloading it
-    -- throws away the recovery already in progress - then lands on the
-    -- head of the provider's buffer and replays everything since. Only
-    -- a picture that is stopped with nothing arriving counts as dead.
-    local cache = mp.get_property_number("demuxer-cache-duration")
-    if cache and last_cache and cache > last_cache + 0.01 then
-        still_since = nil
-    end
-    last_cache = cache
-    still_since = still_since or mp.get_time()
-    if mp.get_time() - still_since >= o.stall then
-        msg.warn("no progress for " .. o.stall .. "s with nothing arriving, treating the stream as dead")
-        still_since = nil
-        reconnect()
-    end
-end
-
-mp.register_event("start-file", function()
-    -- Read it back rather than trusting the stored copy: a playlist or
-    -- a redirect can hand mpv a different address than the one asked
-    -- for, and that resolved one is what is actually playing.
-    url = mp.get_property("path") or url
-    last_pos, still_since, last_cache = nil, nil, nil
-    ungovern()
-end)
-
--- Only a file that really opened clears the counter, so a run of
--- failures keeps backing off instead of dropping to three seconds
--- again every time mpv tries and fails.
-mp.register_event("file-loaded", function() attempts = 0 end)
-
-mp.register_event("end-file", function(e)
-    -- "stop" is this script's own loadfile, or the viewer picking
-    -- something else; retrying either would fight whoever asked.
-    if e.reason == "eof" or e.reason == "error" then reconnect() end
-end)
-
-mp.add_periodic_timer(1, function()
-    if pending or not url then return end
-    if mp.get_property_bool("pause", false) then
-        last_pos, still_since, last_cache = nil, nil, nil
-        ungovern()
-        return
-    end
-    watch_stall()
-    govern()
-end)
-`;
+  // There was a reconnect script here, sportio-reload.lua, written by
+  // setup beside the handler and loaded with --script. It reopened a
+  // stream the provider closed, restarted one whose picture had frozen,
+  // and ran playback up to 3% fast whenever more than ten seconds were
+  // banked, to claw back the delay every stall leaves behind.
+  //
+  // It came out on request. The catch-up spent the very cushion that a
+  // reseller delivering at barely real time - Flix-Streams, measured at
+  // about 3.5Mbps against a stream running 1.9 to 4.3Mbps - has nothing
+  // to rebuild with, and a player that simply plays what arrives is the
+  // one that held on it. A dropped stream now ends playback, and the
+  // channel is opened again from the page.
 
   function usePreset(path) {
     document.getElementById('player-path').value = path;
@@ -1328,48 +1134,36 @@ end)
     // --profile=sportio is dropped if it is typed here too: it used to
     // be the reader's job to add it, and setup now passes it, so a file
     // carried over from before would otherwise list it twice.
+    //
+    // So are the reconnect script's own arguments, for the same reason:
+    // a player file from when setup wrote them would otherwise go on
+    // pointing mpv at a script that is no longer there.
+    const RETIRED_ARGS = new Set(['--profile=sportio', '--idle=yes', '--force-window=yes']);
     const extraArgs = document.getElementById('player-args').value
       .split('\n').map(l => l.trim())
-      .filter(l => l && !l.startsWith("'@") && l !== '--profile=sportio');
+      .filter(l => l && !l.startsWith("'@") && !RETIRED_ARGS.has(l)
+        && !(l.startsWith('--script=') && l.endsWith(RETIRED_RELOAD_FILENAME)));
 
     const scripted = playerIsMpv(player);
-    // Plain mpv shuts down when the playlist runs out, and would take
-    // the reconnect script down with it before it could reload
-    // anything. idle keeps the process alive and force-window keeps
-    // something on screen while it does. mpv.net is already idle, so
-    // both are free there.
-    //
-    // One --script only. mpv.net applies command line options after it
-    // has finished loading scripts, so --scripts-append silently loads
-    // nothing at all, and a second --script replaces the first rather
-    // than adding to it - which looks exactly like the script being
-    // broken. Anyone wanting another script has to merge the files.
-    //
     // --profile=sportio is here rather than left to the reader because
     // setup is what writes the profile. A profile written into mpv.conf
     // and then selected by nobody is worse than not writing one: every
     // option in it silently does nothing.
-    const reloadArgs = scripted
-      ? ['--profile=sportio', '--idle=yes', '--force-window=yes',
-         `--script=${beside(script, RELOAD_FILENAME)}`]
-      : [];
+    const profileArgs = scripted ? ['--profile=sportio'] : [];
 
     document.getElementById('ps1-path-label').textContent = script;
     document.getElementById('config-path-label').textContent = beside(script, CONFIG_FILENAME);
-    document.getElementById('reload-path-label').textContent = beside(script, RELOAD_FILENAME);
     document.getElementById('setup-path-label').textContent = beside(script, SETUP_FILENAME);
-    document.getElementById('lua-box').textContent = RELOAD_LUA;
     document.getElementById('mpv-box').textContent = MPV_PROFILE;
     document.getElementById('mpvconf-path-label').textContent =
       `%APPDATA%\\${mpvConfLeaf(player)}\\mpv.conf`;
-    document.getElementById('file-reload').classList.toggle('hidden', !scripted);
     document.getElementById('file-mpvconf').classList.toggle('hidden', !scripted);
 
     document.getElementById('cfg-box').textContent = [
       '# First non-comment line: full path to the player.',
       '# Any lines after it: extra arguments, one per line, passed before the URL.',
       player,
-      ...reloadArgs,
+      ...profileArgs,
       ...extraArgs,
       ''
     ].join('\n');
@@ -1505,7 +1299,7 @@ end)
       '',
       '# Not Set-Content: in Windows PowerShell it writes the system ANSI',
       '# codepage by default, and its -Encoding utf8 writes a BOM, which',
-      '# LuaJIT reads as part of the first line and refuses to compile.',
+      '# would land at the head of the first line of every file written.',
       'function Write-Utf8($path, $text) {',
       '  [IO.File]::WriteAllText($path, $text, (New-Object Text.UTF8Encoding($false)))',
       '}',
@@ -1520,29 +1314,22 @@ end)
       '',
       `$playPath = Join-Path $Dir ${psQuote(basename(script))}`,
       `$configPath = Join-Path $Dir ${psQuote(CONFIG_FILENAME)}`,
-      ...(scripted ? [`$reloadPath = Join-Path $Dir ${psQuote(RELOAD_FILENAME)}`] : []),
       '',
       ...here('playScript', body('ps1-box')),
       ...here('playerFile', body('cfg-box')),
-      ...(scripted ? here('reloadScript', body('lua-box')) : []),
       ...(scripted ? here('mpvProfile', body('mpv-box')) : []),
       'Write-Utf8 $playPath $playScript',
       'Write-Host "wrote $playPath"',
       '',
-      ...(scripted ? [
-        'Write-Utf8 $reloadPath $reloadScript',
-        'Write-Host "wrote $reloadPath"',
-        '',
-        '# --script wants an absolute path, and the one written into the',
-        '# player file is wherever the watch page was pointed when this was',
-        '# copied. -Dir may since have put the reconnect script somewhere',
-        '# else, and a stale path here is silent - mpv just carries on',
-        '# without the script, which reads as the reconnecting being broken.',
-        '$playerFile = ($playerFile -split "`n" | ForEach-Object {',
-        '  if ($_ -like "--script=*") { "--script=$reloadPath" } else { $_ }',
-        '}) -join "`n"',
-        ''
-      ] : []),
+      '# The reconnect script earlier versions of this setup wrote here.',
+      '# Nothing loads it any more, and a stale copy only misleads whoever',
+      '# looks in this folder later.',
+      `$retiredReload = Join-Path $Dir ${psQuote(RETIRED_RELOAD_FILENAME)}`,
+      'if (Test-Path -LiteralPath $retiredReload) {',
+      '  Remove-Item -LiteralPath $retiredReload -Force',
+      '  Write-Host "removed $retiredReload"',
+      '}',
+      '',
       'if (Test-Path -LiteralPath $configPath) {',
       '  if ([IO.File]::ReadAllText($configPath) -ne $playerFile) {',
       '    Copy-Item -LiteralPath $configPath -Destination "$configPath.bak" -Force',
