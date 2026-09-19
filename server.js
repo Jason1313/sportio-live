@@ -3975,12 +3975,18 @@ function buildXtreamChannelSource(provider, catalog) {
 // provider. The dashboard alone fires /suggest and /status together on
 // load, so without the in-flight map below one page view would fetch the
 // entire service twice, in parallel, for no gain.
-async function getProviderChannelSource(provider) {
+//
+// `maxAgeMs` is how old a held list may be and still be served. Requests
+// take the full lifetime; the warmer asks for less, which is what lets it
+// replace a list before it expires - see warmChannelSources - and the
+// dashboard's refresh asks for zero.
+async function getProviderChannelSource(provider, options = {}) {
   if (!provider || provider.kind !== 'xtream' || !provider.url) return null;
   const key = xtreamCacheKey(provider);
+  const maxAgeMs = options.maxAgeMs !== undefined ? options.maxAgeMs : XTREAM_SOURCE_TTL_MS;
 
   const cached = xtreamSourceCache.get(key);
-  if (cached && Date.now() - cached.fetchedAt < XTREAM_SOURCE_TTL_MS) {
+  if (cached && Date.now() - cached.fetchedAt < maxAgeMs) {
     return buildXtreamChannelSource(provider, cached);
   }
 
@@ -7447,7 +7453,18 @@ async function warmGameCaches() {
 //
 // Warmed a little inside the lifetime rather than on it, so an entry is
 // replaced before it can expire under somebody's request.
+//
+// Which only works if the warm actually fetches. It used to ask for the
+// list the way a request does, and at 25 minutes a 30-minute entry is
+// still fresh, so every warm was handed the cached copy and did nothing:
+// the list was really re-fetched only when a request found it expired,
+// every 30 to 50 minutes, and that request paid for it. A category added
+// on the provider's side took as long to appear. The warm now asks for a
+// list no older than CHANNEL_SOURCE_MAX_AGE_MS - under the interval, so
+// the copy the previous warm fetched is always replaced, and over zero, so
+// one a request fetched a moment ago is left alone.
 const CHANNEL_SOURCE_WARM_MS = 25 * 60 * 1000;
+const CHANNEL_SOURCE_MAX_AGE_MS = 20 * 60 * 1000;
 
 // One entry per distinct service, across every account.
 //
@@ -7485,7 +7502,7 @@ async function warmChannelSources() {
         warmed++;
         continue;
       }
-      const source = await getProviderChannelSource(provider);
+      const source = await getProviderChannelSource(provider, { maxAgeMs: CHANNEL_SOURCE_MAX_AGE_MS });
       if (source) warmed++;
     } catch (err) {
       console.error(`[Warm] Could not warm a channel source: ${err.message}`);
