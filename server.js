@@ -956,58 +956,6 @@ function getInlineSvgOverlay(filePath, idPrefix) {
   }
 }
 
-// Replaces every fill="..." within a named group's subtree with a new
-// color - the fill can live on a child element deeper in the subtree
-// (confirmed directly - the group wrapper itself often has no fill of
-// its own, only its inner path does, and a child's own explicit fill
-// always wins over anything set on the parent), so this searches the
-// whole subtree rather than assuming the fill sits on the group itself.
-function recolorSvgGroup(markup, groupId, newColor) {
-  const pattern = new RegExp(`(<g id="${groupId}"[^>]*>)([\\s\\S]*?)(</g>)`);
-  const match = markup.match(pattern);
-  if (!match) return markup;
-  const recoloredInner = match[2].replace(/fill="[^"]*"/g, `fill="${newColor}"`);
-  return markup.slice(0, match.index) + match[1] + recoloredInner + match[3] + markup.slice(match.index + match[0].length);
-}
-
-// display="none" on the group itself correctly cascades to every child
-// (confirmed - unlike fill, which only inherits when a child doesn't
-// already specify its own), so this only needs to touch the group's own
-// opening tag, not search its subtree.
-function hideSvgGroup(markup, groupId) {
-  const pattern = new RegExp(`<g id="${groupId}"([^>]*)>`);
-  return markup.replace(pattern, `<g id="${groupId}"$1 display="none">`);
-}
-
-// Removes a single self-closing element by id, marker or otherwise.
-//
-// hideSvgGroup and replaceSvgGroup work on <g> wrappers; this is for a
-// bare element with no group of its own. Used for the poster's time
-// plaque, which is real rendered art rather than a marker - with nothing
-// printed on it any more, leaving it puts an empty black box across the
-// bottom of every card.
-function removeSvgElementById(markup, elementId) {
-  const pattern = new RegExp(`<[a-zA-Z]+[^>]*\\bid="${elementId}"[^>]*/>`);
-  return markup.replace(pattern, '');
-}
-
-// Extracts a named marker group's bounding box for placement purposes -
-// e.g. a "home_logo" marker rect defines exactly where and how large to
-// place the real, dynamic logo image instead. Looks for the first
-// x/y/width/height on any element within the group's subtree.
-function getSvgGroupBounds(markup, groupId) {
-  const pattern = new RegExp(`<g id="${groupId}"[^>]*>([\\s\\S]*?)</g>`);
-  const match = markup.match(pattern);
-  if (!match) return null;
-  const inner = match[1];
-  const x = inner.match(/x="([^"]+)"/);
-  const y = inner.match(/y="([^"]+)"/);
-  const width = inner.match(/width="([^"]+)"/);
-  const height = inner.match(/height="([^"]+)"/);
-  if (!x || !y || !width || !height) return null;
-  return { x: parseFloat(x[1]), y: parseFloat(y[1]), width: parseFloat(width[1]), height: parseFloat(height[1]) };
-}
-
 function getBackgroundOverlayInline() {
   const filePath = path.join(__dirname, 'assets', 'background', 'overlay_background.svg');
   return getInlineSvgOverlay(filePath, 'bg-overlay');
@@ -1662,15 +1610,18 @@ let renderCacheBytes = 0;
 // stale cache.
 //
 // So the key carries a fingerprint of everything that decides what a
-// render looks like: the drawing code and the template art. Deploy a
-// change to any of it and the whole cache moves to a new generation,
-// with the previous one falling out under the sweep. Computed rather
-// than declared, because a version constant is only correct while
-// somebody remembers to bump it.
+// render looks like: the drawing code and the overlay art the landscape
+// backgrounds are drawn over. Deploy a change to any of it and the whole
+// cache moves to a new generation, with the previous one falling out
+// under the sweep. Computed rather than declared, because a version
+// constant is only correct while somebody remembers to bump it.
+//
+// assets/posters went when the last template in it stopped being drawn;
+// assets/background holds the one file still read.
 const RENDER_FINGERPRINT = (() => {
   const hash = crypto.createHash('sha1');
   const inputs = [__filename, path.join(__dirname, 'posters.js')];
-  for (const dir of ['posters', 'background']) {
+  for (const dir of ['background']) {
     const full = path.join(__dirname, 'assets', dir);
     try {
       for (const name of fs.readdirSync(full).sort()) {
@@ -2013,11 +1964,6 @@ app.get('/poster/mma/:league.svg', mmaPosterHandler);
 app.get('/poster/mma/:league/:fighterAId/:fighterBId.svg', mmaPosterHandler);
 app.get('/poster/ufc/:fighterAId/:fighterBId.svg', mmaPosterHandler);
 
-function getPosterTemplateInline() {
-  const filePath = path.join(__dirname, 'assets', 'posters', 'poster_template.svg');
-  return getInlineSvgOverlay(filePath, 'poster-template');
-}
-
 // Every team sport with two sides. Football first, then the rest once
 // their own marks had been looked at the same way - which was the
 // condition this list used to state.
@@ -2064,23 +2010,12 @@ function stitchedMatchupUrl(sportKey, eventId) {
 
 app.get('/poster/:sport/:homeId/:awayId.svg', async (req, res) => {
   const { sport, homeId, awayId } = req.params;
-  const gameUtcDate = req.query.date || null;
-  const userTz = req.query.tz || 'America/New_York';
   const homeName = req.query.home || 'Home';
   const awayName = req.query.away || 'Away';
   const sportKey = sport.toUpperCase();
   const league = getTeamLogoBucket(sportKey);
   const theme = SPORT_THEMES[sportKey] || DEFAULT_THEME;
 
-  // Using each team's primary color - alternate color was tried and
-  // reverted. Falls back to alternate, then the sport's generic theme
-  // color, if a team is missing a primary color.
-  const homeColor = req.query.homeColor ? `#${req.query.homeColor}`
-    : req.query.homeAltColor ? `#${req.query.homeAltColor}`
-    : theme.secondary;
-  const awayColor = req.query.awayColor ? `#${req.query.awayColor}`
-    : req.query.awayAltColor ? `#${req.query.awayAltColor}`
-    : theme.primary;
   const homeAbbr = (req.query.homeAbbr || '').toLowerCase();
   const awayAbbr = (req.query.awayAbbr || '').toLowerCase();
 
@@ -2100,72 +2035,25 @@ app.get('/poster/:sport/:homeId/:awayId.svg', async (req, res) => {
     getBase64ImageWithFallback(teamLogoUrls(league, awayAbbr, awayId))
   ]);
 
-  if (DRAWN_POSTER_SPORTS.has(sportKey)) {
-    // The raw query values, not the resolved homeColor/awayColor above:
-    // that pair has already collapsed primary and alternate into one
-    // colour, and the art needs them apart - the alternate is what a
-    // clash between the two teams is resolved with.
-    res.setHeader('Content-Type', 'image/svg+xml');
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    return res.send(posters.buildMatchupPoster({
-      awayLogoData, homeLogoData, awayName, homeName,
-      awayColor: req.query.awayColor || req.query.awayAltColor || theme.primary,
-      homeColor: req.query.homeColor || req.query.homeAltColor || theme.secondary,
-      homeAltColor: req.query.homeAltColor || '',
-    }));
-  }
-
-  const template = getPosterTemplateInline();
-
-  // away_logo/home_logo are placement markers only, never meant to
-  // actually render - their rects just define exactly where and how
-  // large to place the real, dynamic content instead. Bounds extracted
-  // from the original markup before any modifications, since hiding a
-  // group doesn't touch its inner coordinates either way.
+  // Drawn for every sport. There was a second answer for any sport
+  // outside DRAWN_POSTER_SPORTS - an illustrated template, recoloured and
+  // with the logos placed over it - but every team sport the app lists
+  // has been in that set since soccer joined it, and MMA and wrestling
+  // have routes of their own, so nothing the app builds reached it any
+  // more. A stale URL for a sport since removed now gets the drawn
+  // poster, which needs nothing about a sport but two teams.
   //
-  // 'time' is a marker too, and is still hidden below, but nothing is
-  // drawn in its place any more - the time now lives under the poster
-  // rather than on it, so only the hiding matters.
-  const homeLogoBounds = getSvgGroupBounds(template.markup, 'home_logo');
-  const awayLogoBounds = getSvgGroupBounds(template.markup, 'away_logo');
-
-  let markup = template.markup;
-  markup = recolorSvgGroup(markup, 'away_color', awayColor);
-  markup = recolorSvgGroup(markup, 'home_color', homeColor);
-  markup = hideSvgGroup(markup, 'away_logo');
-  markup = hideSvgGroup(markup, 'home_logo');
-  markup = hideSvgGroup(markup, 'time');
-  // The plaque that used to sit behind the game time. The time moved out
-  // from under the poster to beneath the card, and an empty plaque is a
-  // black box across the foot of every card - the same removal the MMA
-  // template already needed.
-  markup = removeSvgElementById(markup, 'time_plaque');
-
-  const homeLogoMarkup = homeLogoBounds
-    ? (homeLogoData
-        ? `<image href="${homeLogoData}" x="${homeLogoBounds.x}" y="${homeLogoBounds.y}" width="${homeLogoBounds.width}" height="${homeLogoBounds.height}" preserveAspectRatio="xMidYMid meet" />`
-        : buildLogoFallback(homeLogoBounds.x, homeLogoBounds.y, homeLogoBounds.width, homeName, homeColor))
-    : '';
-  const awayLogoMarkup = awayLogoBounds
-    ? (awayLogoData
-        ? `<image href="${awayLogoData}" x="${awayLogoBounds.x}" y="${awayLogoBounds.y}" width="${awayLogoBounds.width}" height="${awayLogoBounds.height}" preserveAspectRatio="xMidYMid meet" />`
-        : buildLogoFallback(awayLogoBounds.x, awayLogoBounds.y, awayLogoBounds.width, awayName, awayColor))
-    : '';
-
-  // No time is printed here any more - it lives under the poster now,
-  // the same way it does for every other sport. The 'time' marker group
-  // stays hidden below, exactly as it was; nothing is drawn over it.
-
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 600 900" width="600" height="900">
-    <defs>${template.defs}</defs>
-    ${markup}
-    ${homeLogoMarkup}
-    ${awayLogoMarkup}
-  </svg>`;
-
+  // The raw query values, not a resolved pair: primary and alternate
+  // collapsed into one colour would lose the alternate, which is what a
+  // clash between the two teams is resolved with.
   res.setHeader('Content-Type', 'image/svg+xml');
   res.setHeader('Cache-Control', 'public, max-age=3600');
-  res.send(svg);
+  return res.send(posters.buildMatchupPoster({
+    awayLogoData, homeLogoData, awayName, homeName,
+    awayColor: req.query.awayColor || req.query.awayAltColor || theme.primary,
+    homeColor: req.query.homeColor || req.query.homeAltColor || theme.secondary,
+    homeAltColor: req.query.homeAltColor || '',
+  }));
 });
 
 const SPORT_THEMES = {
@@ -3259,15 +3147,16 @@ async function fetchTodayGames(sport, hostUrl, userTimeZone = 'America/New_York'
           { id: String(homeTeam.id || ''), name: homeTeam.displayName || '', abbr: homeAbbr, rank: homeRank || null },
           { id: String(awayTeam.id || ''), name: awayTeam.displayName || '', abbr: awayAbbr, rank: awayRank || null },
         ].filter(team => team.id),
-        // Which shape this game's poster comes back as, decided here
-        // because this is where the league is actually known.
+        // Which shape this game's poster comes back as, so the grid can
+        // reserve the right box before the image arrives.
         //
-        // The catalog it ends up in is not a reliable stand-in: the five
-        // soccer competitions are listed under one SOCCER catalog but
-        // their posters are drawn per competition, so asking the catalog
-        // gave every fixture "portrait" while the route rendered a
-        // square - and the grid cropped the logos off to fit.
-        posterShape: DRAWN_POSTER_SPORTS.has(sport.toUpperCase()) ? 'square' : 'portrait',
+        // Square for every sport now. It used to be 'portrait' for any
+        // league the poster route still drew from the illustrated
+        // template, and deciding it from the catalog instead of here once
+        // gave soccer "portrait" while the route drew a square - the grid
+        // cropped the logos off to fit. The template has gone, and every
+        // poster this route serves is the square one.
+        posterShape: 'square',
         // Both halves of each name - "Hurricanes" and "Miami" - for the
         // team search, which tries each. See networks.teamSearchTerms.
         homeNick,
