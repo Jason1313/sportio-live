@@ -213,9 +213,10 @@
           <span class="text-xs text-[#e6e6e6]/55 uppercase tracking-wider">UUID:</span>
           <div id="active-uuid-display" class="font-mono text-sm text-[#5aa8d1] font-bold"></div>
         </div>
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-3">
+          <span id="autosave-status" class="text-[11px] text-[#e6e6e6]/45"></span>
           <button id="copy-link-btn" onclick="handleCopyLinkButton()" class="bg-[#4a6fa5] hover:bg-[#5a82bc] text-xs font-bold py-2 px-4 rounded-lg transition flex items-center">
-            <i class="fa-solid fa-copy mr-2"></i>Copy Install Link
+            <i class="fa-solid fa-copy mr-2"></i>Copy Link
           </button>
         </div>
       </div>
@@ -1113,12 +1114,10 @@
 
     let editXtreamTestedCredentials = null;
     // Set when a credential edit has been confirmed but not yet saved, so
-    // Save and Copy Link knows to send the provider list. Without it that
-    // button would either never persist a credential change, or send a
-    // stale list over every save.
+    // the next save knows to send the provider list. Without it a save
+    // would either never persist a credential change, or send a stale list
+    // over every one.
     let providerCredentialsPending = false;
-
-    const UNSAVED_CHANGES_WARNING = 'You have unsaved category changes that will be lost if you continue. Continue anyway?';
 
     // Shows the controls that belong to this account's connection type.
     //
@@ -1436,15 +1435,10 @@
       resetEditM3uState();
     }
 
-    // Stages the imported URLs for this session only - nothing is sent to
-    // the server here. The actual save happens only when "Save and Copy
-    // Link" is clicked, same as every other setting on this page,
-    // matching confirmEditXtream exactly.
+    // Applies the imported URL and saves it, like every other change on
+    // this page. See markDashboardDirty.
     function confirmEditM3u() {
       if (!editM3uImportedValues) return;
-      if (dashboardHasUnsavedChanges && !confirm(UNSAVED_CHANGES_WARNING)) {
-        return;
-      }
 
       activeUser.m3u = editM3uImportedValues;
       // Staged into the provider list, the same way the Xtream panel
@@ -1458,17 +1452,13 @@
       document.getElementById('edit-m3u-panel').classList.add('hidden');
       resetEditM3uState();
       markDashboardDirty();
-      showStatus('M3U URLs updated for this session - click Save and Copy Link to save.');
+      showStatus('Playlist URL updated.');
     }
 
-    // Stages the tested credentials for this session only - nothing is
-    // sent to the server here. The actual save happens only when "Save and
-    // Copy Link" is clicked, same as every other setting on this page.
+    // Applies the tested credentials and saves them, like every other
+    // change on this page. See markDashboardDirty.
     function confirmEditXtream() {
       if (!editXtreamTestedCredentials) return;
-      if (dashboardHasUnsavedChanges && !confirm(UNSAVED_CHANGES_WARNING)) {
-        return;
-      }
 
       activeUser.xtream = editXtreamTestedCredentials;
       // Staged into the provider list, which is what actually gets saved.
@@ -1482,7 +1472,7 @@
       document.getElementById('edit-xtream-panel').classList.add('hidden');
       resetEditXtreamState();
       markDashboardDirty();
-      showStatus('Xtream credentials updated for this session - click Save and Copy Link to save.');
+      showStatus('Xtream credentials updated.');
     }
 
     // Which sports show on the dashboard: whatever the account has explicitly
@@ -1594,10 +1584,8 @@
     }
 
     // --- Dashboard: Delete Account ---
-    // Unlike every other panel on this page, this one is NOT staged for
-    // the "Save and Copy Link" flow - deletion happens immediately and
-    // irreversibly the moment the bomb button is clicked, since there's no
-    // sensible meaning to "staging" an account deletion.
+    // Deletion happens immediately and irreversibly the moment the bomb
+    // button is clicked, behind the typed confirmation below.
 
     function toggleDeleteAccountPanel() {
       const panel = document.getElementById('delete-account-panel');
@@ -1675,13 +1663,11 @@
       document.getElementById('dashboard-timezone-selected').textContent = `Selected: ${dashboardTimezoneSelection.replace(/_/g, ' ')} (${getTimezoneOffsetLabel(dashboardTimezoneSelection)})`;
     }
 
-    // Stages the selected timezone for this session only - see
-    // confirmEditXtream for why nothing is sent to the server here.
     function saveChangeTimezone() {
       activeUser.timeZone = dashboardTimezoneSelection;
       closeChangeTimezonePanelSilently();
       markDashboardDirty();
-      showStatus('Timezone updated for this session - click Save and Copy Link to save.');
+      showStatus('Timezone updated.');
     }
 
     function toggleManagedSport(sport) {
@@ -1689,44 +1675,93 @@
       renderLeagueGrid('manage-sports-grid', manageSportsSelection, 'toggleManagedSport');
     }
 
-    // Stages the selected leagues for this session only - see
-    // confirmEditXtream for why nothing is sent to the server here.
     function saveManagedSports() {
-      if (dashboardHasUnsavedChanges && !confirm(UNSAVED_CHANGES_WARNING)) {
-        return;
-      }
-
       const selectedSports = [...manageSportsSelection];
       activeUser.selectedSports = selectedSports;
       document.getElementById('manage-sports-panel').classList.add('hidden');
       markDashboardDirty();
-      showStatus('Leagues updated for this session - click Save and Copy Link to save.');
+      showStatus('Leagues updated.');
     }
 
+    // ---- Autosave ------------------------------------------------------
+    //
+    // Every change on this page is saved as it is made.
+    //
+    // They used to be staged in the page and sent only when "Save and Copy
+    // Link" was pressed, so leaving without pressing it - or pressing only
+    // the network link buttons, which read like they had done the job -
+    // lost everything since the last one. "Use best tested" said "click
+    // Save and Copy Link to keep them" for exactly that reason.
+    //
+    // A change schedules a save AUTOSAVE_DELAY_MS later, and any change in
+    // between folds into it, so dragging a link up four slots is one save
+    // rather than four. A change made while a save is in flight is saved
+    // straight after it. The save itself is still saveAllChanges, which
+    // sends the same fields the button did.
+    const AUTOSAVE_DELAY_MS = 700;
+    const AUTOSAVE_RETRY_MS = 5000;
     let dashboardHasUnsavedChanges = false;
+    let autosaveTimer = null;
+    let autosaveInFlight = null;
 
     function markDashboardDirty() {
       dashboardHasUnsavedChanges = true;
-      updateSaveCopyButton();
+      setAutosaveStatus('Saving...');
+      clearTimeout(autosaveTimer);
+      autosaveTimer = setTimeout(runAutosave, AUTOSAVE_DELAY_MS);
     }
 
-    function updateSaveCopyButton() {
-      const btn = document.getElementById('copy-link-btn');
-      if (!btn) return;
-      if (dashboardHasUnsavedChanges) {
-        btn.className = 'bg-[#4a9d52] hover:bg-[#5cb164] text-xs font-bold py-2 px-4 rounded-lg transition flex items-center';
-        btn.innerHTML = '<i class="fa-solid fa-floppy-disk mr-2"></i>Save and Copy Link';
-      } else {
-        btn.className = 'bg-[#4a6fa5] hover:bg-[#5a82bc] text-xs font-bold py-2 px-4 rounded-lg transition flex items-center';
-        btn.innerHTML = '<i class="fa-solid fa-copy mr-2"></i>Copy Install Link';
+    async function runAutosave() {
+      clearTimeout(autosaveTimer);
+      autosaveTimer = null;
+      if (autosaveInFlight) {
+        // Saved once the save in flight lands, with whatever changed since.
+        await autosaveInFlight;
+        if (dashboardHasUnsavedChanges && !autosaveTimer) return runAutosave();
+        return;
       }
+      if (!dashboardHasUnsavedChanges || !activeUser) return;
+      dashboardHasUnsavedChanges = false;
+      autosaveInFlight = saveAllChanges();
+      const saved = await autosaveInFlight;
+      autosaveInFlight = null;
+      if (!saved) {
+        // Kept dirty and tried again shortly - or sooner, if another change
+        // or leaving the page comes first.
+        dashboardHasUnsavedChanges = true;
+        setAutosaveStatus('Not saved - will retry', true);
+        if (!autosaveTimer) autosaveTimer = setTimeout(runAutosave, AUTOSAVE_RETRY_MS);
+        return;
+      }
+      if (dashboardHasUnsavedChanges) {
+        if (!autosaveTimer) runAutosave();
+        return;
+      }
+      setAutosaveStatus('All changes saved');
     }
 
-    // Briefly flashes the top button to confirm a save from any of the
-    // three editors (Xtream, Leagues, Timezone) - none of those affect
-    // dashboardHasUnsavedChanges since they persist immediately on their
-    // own, so without this the button would give no visual acknowledgment
-    // at all for those saves.
+    // Saves anything pending now, for the moments that cannot wait for the
+    // delay: copying the link, and leaving the page.
+    async function flushAutosave() {
+      if (autosaveTimer || dashboardHasUnsavedChanges) await runAutosave();
+      else if (autosaveInFlight) await autosaveInFlight;
+    }
+
+    function setAutosaveStatus(text, isError = false) {
+      const el = document.getElementById('autosave-status');
+      if (!el) return;
+      el.textContent = text;
+      el.className = `text-[11px] ${isError ? 'text-[#e56a6a]' : 'text-[#e6e6e6]/45'}`;
+    }
+
+    // Closing the tab inside the delay would otherwise drop the last
+    // change. A beacon survives the page going away where a fetch does
+    // not; it carries the same body saveAllChanges would have sent.
+    window.addEventListener('pagehide', () => {
+      if (!activeUser || !(autosaveTimer || dashboardHasUnsavedChanges)) return;
+      const body = new Blob([JSON.stringify(autosaveBody())], { type: 'application/json' });
+      navigator.sendBeacon('/api/user/update', body);
+    });
 
     // ---------------------------------------------------------------
     // Network Links
@@ -3693,7 +3728,7 @@
       }
       markDashboardDirty();
       renderNetworkLinks();
-      showStatus(`Added ${added} channel${added === 1 ? '' : 's'} from "${data.name}". Review, then Save.`);
+      showStatus(`Added ${added} channel${added === 1 ? '' : 's'} from "${data.name}".`);
     }
 
     async function postDefaults(body) {
@@ -4322,7 +4357,7 @@
       });
       markDashboardDirty();
       refreshNetworkLinksRegion(key);
-      showStatus(`${label} now has the ${picks.length} best tested channels (${counts.join(', ')}). Click Save and Copy Link to keep them.`);
+      showStatus(`${label} now has the ${picks.length} best tested channels (${counts.join(', ')}).`);
     }
 
     function refreshNetworkActions(key) {
@@ -4566,15 +4601,26 @@
       renderNetworkSearchResults(key);
     }
 
-    // Persists category folder selections. Returns true/false so callers
-    // (the unified Copy Link button) know whether it's safe to proceed.
-    // The single function that actually persists anything to the server -
-    // every other panel on this page (Edit Xtream, Add/Remove Leagues,
-    // Change Timezone) only stages its changes into activeUser locally.
-    // This sends the complete current state in one request when "Save and
-    // Copy Link" is clicked, so a closed browser without ever clicking that
-    // button leaves the account exactly as it was before any of this
-    // session's edits.
+    // What an autosave sends: the settings this page edits in place, in
+    // one request. Returns true/false so the autosave knows whether to
+    // retry.
+    function autosaveBody() {
+      return {
+        uuid: activeUser.uuid,
+        token: activeUser.token,
+        // Only when the Edit panel actually staged a credential change.
+        // Sending the provider list on every save would push whatever this
+        // page happens to be holding back over the account - including a
+        // list the Providers panel has since replaced - so it goes only
+        // when there is a change to make.
+        ...(providerCredentialsPending ? { providers: activeUser.providers } : {}),
+        selectedSports: activeUser.selectedSports,
+        timeZone: activeUser.timeZone,
+        sportOrder: activeUser.sportOrder,
+        networkLinks: activeUser.networkLinks || {}
+      };
+    }
+
     async function saveAllChanges() {
       if (!activeUser) return false;
 
@@ -4582,20 +4628,7 @@
         const res = await fetch('/api/user/update', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            uuid: activeUser.uuid,
-            token: activeUser.token,
-            // Only when the Edit panel actually staged a credential
-            // change. Sending the provider list on every save would push
-            // whatever this page happens to be holding back over the
-            // account - including a list the Providers panel has since
-            // replaced - so it goes only when there is a change to make.
-            ...(providerCredentialsPending ? { providers: activeUser.providers } : {}),
-            selectedSports: activeUser.selectedSports,
-            timeZone: activeUser.timeZone,
-            sportOrder: activeUser.sportOrder,
-            networkLinks: activeUser.networkLinks || {}
-          })
+          body: JSON.stringify(autosaveBody())
         });
         const data = await res.json();
         if (data.success) {
@@ -4614,10 +4647,9 @@
       }
     }
 
-    // Saves immediately rather than waiting for the dashboard's Save
-    // button. The whole point of this control is to try the other format
-    // and see whether a stream plays, and a change you have to remember
-    // to save first would just read as "the setting did nothing".
+    // Saved on its own request rather than through the autosave, because
+    // the answer decides what happens next: every link on screen is
+    // rebuilt with the new extension once it lands.
     //
     // Edits the FIRST provider. An account with several sets the format
     // per provider in the Providers panel instead, and this block is
@@ -4656,20 +4688,12 @@
       }
     }
 
-    // The single top-right button: just copies the manifest link when there's
-    // nothing pending, or saves first (then copies) when there is.
+    // Copies the install link. Nothing to save any more - every change is
+    // saved as it is made - but one made a moment ago may still be on its
+    // way, and the link should not be handed out ahead of it.
     async function handleCopyLinkButton() {
-      if (!dashboardHasUnsavedChanges) {
-        copyManifestUrl();
-        return;
-      }
-
-      const saved = await saveAllChanges();
-      if (saved) {
-        dashboardHasUnsavedChanges = false;
-        updateSaveCopyButton();
-        copyManifestUrl('Changes saved! Link copied to clipboard!');
-      }
+      await flushAutosave();
+      copyManifestUrl();
     }
 
     function copyManifestUrl(successMessage) {
