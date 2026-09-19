@@ -2,16 +2,18 @@
 //
 // This is the foundation everything else (wizard setup, Category Search,
 // catalog/stream routes) builds on. Design was validated against a real
-// provider's actual playlist + EPG file pair before any of this was
-// written - see sportio-live-todo.md for the full research history
-// (97.9% tvg-id-to-EPG match rate, confirmed multi-category channel
-// membership, confirmed EPG timestamp padding quirk, etc).
+// provider's actual playlist before any of this was written, including
+// the multi-category channel membership handled below.
 //
-// A note on scale: parsing a real ~150MB EPG file takes roughly 2-3
-// seconds end to end. That's far too slow to ever run on a live user
-// request - this is why the design settled on a periodically-refreshed,
-// shared background cache rather than fetching/parsing on demand. See
-// scheduleM3URefresh() below.
+// A playlist is fetched and parsed on a schedule into a shared background
+// cache, never on a visitor's request - a real one is tens of thousands
+// of entries and a few seconds to fetch. See startM3uScheduler below.
+//
+// There used to be an EPG beside it: a ~150MB XMLTV file, fetched on the
+// same schedule, parsed in two or three seconds and held in memory, for
+// the programme text the tier matcher read. The tier matcher was removed
+// and nothing read the parse again, so the file was being downloaded
+// twice a day per provider for a log line. It is no longer fetched.
 
 const axios = require('axios');
 
@@ -43,9 +45,10 @@ const axios = require('axios');
 // provider had supplied several working alternates.
 //
 // Keying by URL means one entry per real, distinct stream. tvg-id is
-// retained on each channel as a non-unique attribute, which is exactly
-// what EPG lookup wants - several feeds of the same network SHOULD all
-// resolve to that network's programme list.
+// retained on each channel as a non-unique attribute, which is what the
+// link healer wants from it - several feeds of the same network share
+// one, so a saved link whose URL rotated can find its network again.
+// See networks.resolveLinkEntry.
 function parseM3UPlaylist(content) {
   const blocks = content.split(/(?=#EXTINF:)/);
   const channelsByUrl = new Map();
@@ -101,127 +104,27 @@ function parseM3UPlaylist(content) {
 }
 
 // ---------------------------------------------------------------------
-// EPG (XMLTV) parsing
-// ---------------------------------------------------------------------
-
-// Parses raw XMLTV text into a Map of channel_id -> array of
-// { start, stop, title } programme entries.
-//
-// Deliberately regex-based rather than a full XML DOM parse - the
-// confirmed real-world structure here is simple and flat (no nesting to
-// worry about), and a full DOM parse of a 150MB+ file would be far
-// slower and more memory-hungry than needed. relevantChannelIds (from
-// the paired playlist) is used to skip storing programme data for
-// channels that aren't even in this provider's playlist - the shared EPG
-// source covers more channels than any one playlist actually uses.
-function parseXMLTVEpg(content, relevantChannelIds) {
-  const programmesByChannel = new Map();
-  const pattern = /<programme start="(\d{14}) [^"]*" stop="(\d{14}) [^"]*" channel="([^"]*)"><title>([^<]*)<\/title>/g;
-
-  let match;
-  while ((match = pattern.exec(content)) !== null) {
-    const [, start, stop, channel, title] = match;
-    if (relevantChannelIds && !relevantChannelIds.has(channel)) continue;
-    if (!programmesByChannel.has(channel)) {
-      programmesByChannel.set(channel, []);
-    }
-    programmesByChannel.get(channel).push({ start, stop, title: title.trim() });
-  }
-
-  return programmesByChannel;
-}
-
-// ---------------------------------------------------------------------
-// Real-date extraction from title text
-// ---------------------------------------------------------------------
-
-// Confirmed during design: many EPG entries pad the same event across
-// many consecutive, identically-titled fixed-length time blocks rather
-// than giving one precise start/stop range - the REAL scheduled
-// date/time is often embedded in the title text itself instead. This
-// extracts that real date where possible, falling back to the XMLTV
-// start field otherwise. Two known real formats, confirmed against
-// actual provider data during design:
-//   "(2026-08-19 01:00:05)" - ISO-style, in parens
-//   "8/15 1pm"              - M/D + hour+ampm, no explicit year
-const ISO_DATE_PATTERN = /\((\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\)/;
-const MD_DATE_PATTERN = /(\d{1,2})\/(\d{1,2})\s+(\d{1,2})(am|pm)/i;
-
-function parseXmltvTimestamp(ts) {
-  const y = ts.slice(0, 4), mo = ts.slice(4, 6), d = ts.slice(6, 8);
-  const h = ts.slice(8, 10), mi = ts.slice(10, 12), s = ts.slice(12, 14);
-  return new Date(Date.UTC(+y, +mo - 1, +d, +h, +mi, +s));
-}
-
-function extractRealDate(title, fallbackStartTs, assumedYear) {
-  const isoMatch = title.match(ISO_DATE_PATTERN);
-  if (isoMatch) {
-    const [, y, mo, d, h, mi, s] = isoMatch;
-    return { date: new Date(Date.UTC(+y, +mo - 1, +d, +h, +mi, +s)), source: 'title-iso' };
-  }
-
-  const mdMatch = title.match(MD_DATE_PATTERN);
-  if (mdMatch) {
-    const [, month, day, hour, ampm] = mdMatch;
-    let h24 = (+hour) % 12;
-    if (ampm.toLowerCase() === 'pm') h24 += 12;
-    return { date: new Date(Date.UTC(assumedYear, +month - 1, +day, h24, 0, 0)), source: 'title-md' };
-  }
-
-  return { date: parseXmltvTimestamp(fallbackStartTs), source: 'xmltv-fallback' };
-}
-
-// ---------------------------------------------------------------------
 // Fetch + parse a full source
 // ---------------------------------------------------------------------
 
-// Fetches and parses one playlist+EPG pair end to end. This is the
-// expensive, slow operation (seconds, not milliseconds, for a real-sized
-// EPG file) that must never run on a live user request - only from the
-// background refresh scheduler.
+// Fetches and parses one playlist. The slow part - seconds, not
+// milliseconds, for a real-sized playlist - which is why only the
+// background refresh and the setup wizard call it, never a visitor.
 //
-// Uses Promise.allSettled rather than Promise.all specifically so a
-// failure can be attributed to the correct URL - Promise.all would fail
-// fast and lose which one was actually the problem, but the wizard needs
-// to tell the user which of their two URLs is bad.
-// allowEpgFailure decides whether a failed EPG fetch is fatal.
-//
-// It is NOT fatal for the background refresh. The EPG is a large file
-// (150MB+ in practice) fetched over a link that can be slow or flaky, and
-// treating it as mandatory meant one slow fetch discarded the playlist
-// too - taking down category listing, the network-link picker and stream
-// matching all at once, for an account whose playlist had downloaded and
-// parsed perfectly. Almost everything here needs only the playlist; the
-// EPG adds programme text to tier matching and nothing else. Degrading to
-// "channels but no programme data" keeps the app working.
-//
-// It IS fatal for the setup wizard, which passes allowEpgFailure: false.
-// There the whole point is validating both URLs the user just typed, and
-// silently accepting a bad EPG URL would store it broken forever.
-async function fetchAndParseM3USource(playlistUrl, epgUrl, options = {}) {
-  const { allowEpgFailure = false } = options;
-
-  const [playlistResult, epgResult] = await Promise.allSettled([
-    axios.get(playlistUrl, { timeout: 30000, responseType: 'text', transformResponse: [d => d] }),
-    // 150MB over a slow link needs more than a minute. The old 60s
-    // timeout was tight enough to fail intermittently on a healthy EPG.
-    axios.get(epgUrl, { timeout: 180000, responseType: 'text', transformResponse: [d => d] })
-  ]);
-
-  const playlistFailed = playlistResult.status === 'rejected';
-  const epgFailed = epgResult.status === 'rejected';
-
-  // No playlist means no channels, which is unrecoverable either way.
-  if (playlistFailed || (epgFailed && !allowEpgFailure)) {
+// Failures carry playlistFailed/playlistError so the wizard can say what
+// went wrong rather than a generic failure.
+async function fetchAndParseM3USource(playlistUrl) {
+  let playlistText;
+  try {
+    const res = await axios.get(playlistUrl, { timeout: 30000, responseType: 'text', transformResponse: [d => d] });
+    playlistText = res.data;
+  } catch (reason) {
     const err = new Error('Failed to fetch M3U source');
-    err.playlistFailed = playlistFailed;
-    err.epgFailed = epgFailed;
-    err.playlistError = playlistFailed ? playlistResult.reason.message : null;
-    err.epgError = epgFailed ? epgResult.reason.message : null;
+    err.playlistFailed = true;
+    err.playlistError = reason.message;
     throw err;
   }
 
-  const playlistText = playlistResult.value.data;
   const { channels, categoryList } = parseM3UPlaylist(playlistText);
   if (channels.length === 0) {
     // File-sharing hosts (Google Drive in particular) answer 200 OK with
@@ -236,29 +139,22 @@ async function fetchAndParseM3USource(playlistUrl, epgUrl, options = {}) {
       ? 'Host returned an HTML page instead of the playlist (usually a download quota or consent interstitial, common with Google Drive links)'
       : 'Playlist parsed but contained no usable channels');
     err.playlistFailed = true;
-    err.epgFailed = false;
+    err.playlistError = err.message;
     throw err;
   }
 
-  if (epgFailed) {
-    console.error(`[M3U] EPG failed for ${playlistUrl} (${epgResult.reason.message}) - continuing with playlist only. Channel-name matching still works; programme-text matching does not.`);
+  return { channels, categoryList, fetchedAt: Date.now() };
+}
+
+// The host a playlist is served from, for logs. Never the whole URL: a
+// playlist URL carries the account's username and password in its path,
+// and these lines exist to be pasted into a chat when something breaks.
+function describeSource(playlistUrl) {
+  try {
+    return new URL(String(playlistUrl)).host || 'playlist';
+  } catch (err) {
+    return 'playlist';
   }
-
-  const relevantIds = new Set(channels.map(c => c.id));
-  const programmesByChannel = epgFailed
-    ? new Map()
-    : parseXMLTVEpg(epgResult.value.data, relevantIds);
-
-  return {
-    channels,
-    categoryList,
-    programmesByChannel,
-    // Lets callers tell "no programme data because the EPG failed" apart
-    // from "no programme data for this channel", which look identical
-    // downstream otherwise.
-    epgAvailable: !epgFailed,
-    fetchedAt: Date.now()
-  };
 }
 
 // ---------------------------------------------------------------------
@@ -275,8 +171,8 @@ async function fetchAndParseM3USource(playlistUrl, epgUrl, options = {}) {
 // parse produced, independent of how the refresh was triggered.
 const m3uSourceCache = new Map(); // playlistUrl -> parsed source result
 
-async function refreshM3USource(playlistUrl, epgUrl, options = {}) {
-  const parsed = await fetchAndParseM3USource(playlistUrl, epgUrl, options);
+async function refreshM3USource(playlistUrl) {
+  const parsed = await fetchAndParseM3USource(playlistUrl);
   m3uSourceCache.set(playlistUrl, parsed);
   return parsed;
 }
@@ -348,27 +244,28 @@ function computeNextScheduledRun(daysOfWeek, times, timeZone, now = new Date()) 
 }
 
 // Refreshes every distinct M3U source currently in use, given a getter
-// function returning [{playlistUrl, epgUrl}, ...] - deliberately a
+// function returning [{playlistUrl}, ...] - deliberately a
 // callback rather than this module reaching into server.js's userConfigs
 // directly, so m3u.js stays a self-contained module with no dependency
 // on the caller's internal state (matching how the rest of this module
 // is structured and independently testable). Sources are deduplicated by
 // playlistUrl first, since multiple users can genuinely share the exact
-// same provider - no reason to fetch and parse the same ~150MB file
-// twice in the same refresh cycle. Each source refreshes independently;
+// same provider - no reason to fetch and parse the same playlist twice
+// in the same refresh cycle. Each source refreshes independently;
 // one failing (bad URL, provider down, etc) doesn't block the others.
 async function refreshAllM3USources(getActiveSources) {
   const sources = getActiveSources();
   const uniqueByPlaylistUrl = new Map();
+  // A playlist is all a source needs. This used to require an EPG URL as
+  // well, so an account that had left the optional EPG field blank was
+  // never refreshed on schedule at all - it only ever filled from the
+  // on-demand warm in server.js, and went stale from there.
   for (const s of sources) {
-    if (s && s.playlistUrl && s.epgUrl) uniqueByPlaylistUrl.set(s.playlistUrl, s);
+    if (s && s.playlistUrl) uniqueByPlaylistUrl.set(s.playlistUrl, s);
   }
 
   const results = await Promise.allSettled(
-    // allowEpgFailure: a background refresh should never throw away a
-    // good playlist because the EPG was slow - see fetchAndParseM3USource.
-    [...uniqueByPlaylistUrl.values()].map(({ playlistUrl, epgUrl }) =>
-      refreshM3USource(playlistUrl, epgUrl, { allowEpgFailure: true }))
+    [...uniqueByPlaylistUrl.values()].map(({ playlistUrl }) => refreshM3USource(playlistUrl))
   );
 
   let succeeded = 0;
@@ -384,14 +281,10 @@ async function refreshAllM3USources(getActiveSources) {
       // whole account offline and "Failed to fetch" is not enough to act
       // on.
       const err = result.reason;
-      const detail = [
-        err.playlistFailed ? `playlist: ${err.playlistError || 'failed'}` : null,
-        err.epgFailed ? `epg: ${err.epgError || 'failed'}` : null,
-      ].filter(Boolean).join('; ');
-      console.error(`[M3U scheduler] Failed to refresh source ${playlistUrl}: ${err.message}${detail ? ` (${detail})` : ''}`);
+      console.error(`[M3U scheduler] Failed to refresh a source on ${describeSource(playlistUrl)}: ${err.playlistError || err.message}`);
     } else {
       succeeded++;
-      console.log(`[M3U scheduler] Refreshed ${playlistUrl}: ${result.value.channels.length} channels, ${result.value.categoryList.length} categories, EPG ${result.value.epgAvailable ? 'ok' : 'UNAVAILABLE'}`);
+      console.log(`[M3U scheduler] Refreshed a source on ${describeSource(playlistUrl)}: ${result.value.channels.length} channels, ${result.value.categoryList.length} categories`);
     }
   });
 
@@ -466,10 +359,8 @@ function stopM3uScheduler() {
 
 module.exports = {
   parseM3UPlaylist,
-  parseXMLTVEpg,
-  extractRealDate,
-  parseXmltvTimestamp,
   fetchAndParseM3USource,
+  describeSource,
   refreshM3USource,
   getCachedM3USource,
   computeNextScheduledRun,

@@ -149,7 +149,7 @@
           </button>
           <button onclick="wizardGoToM3u()" class="w-full text-left bg-[#2f3e47] hover:bg-[#3b4d58] border border-[#e6e6e6]/15 hover:border-[#3b8fc4]/50 rounded-lg px-4 py-3.5 transition">
             <div class="font-bold text-sm text-[#e6e6e6]">M3U</div>
-            <div class="text-xs text-[#e6e6e6]/55 mt-0.5">A playlist URL and an EPG URL</div>
+            <div class="text-xs text-[#e6e6e6]/55 mt-0.5">A playlist URL</div>
           </button>
         </div>
       </div>
@@ -170,12 +170,11 @@
         <div id="wizard-xtream-success" class="hidden text-xs text-[#a8e0ac] font-semibold mt-3"></div>
       </div>
 
-      <!-- Setup Wizard Step 3b: Enter M3U playlist + EPG URLs -->
+      <!-- Setup Wizard Step 3b: Enter the M3U playlist URL -->
       <div id="wizard-m3u" class="glass rounded-xl p-6 shadow-2xl mb-8 max-w-[590px] mx-auto w-full hidden">
-        <h3 class="text-lg font-bold text-[#e6e6e6] mb-4">Enter your M3U URLs</h3>
+        <h3 class="text-lg font-bold text-[#e6e6e6] mb-4">Enter your M3U playlist URL</h3>
         <div class="space-y-4 mb-4">
           <input type="text" id="wizard-m3u-playlist-url" autocomplete="off" oninput="updateWizardM3uButton()" placeholder="Playlist URL (http://...)" class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-4 py-2.5 text-sm focus:border-[#3b8fc4] focus:outline-none">
-          <input type="text" id="wizard-m3u-epg-url" autocomplete="off" oninput="updateWizardM3uButton()" placeholder="EPG URL (http://...)" class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-4 py-2.5 text-sm focus:border-[#3b8fc4] focus:outline-none">
         </div>
         <div id="wizard-m3u-error" class="hidden text-xs text-[#e56a6a] font-semibold mb-3"></div>
         <div id="wizard-m3u-importing" class="hidden text-xs text-[#5aa8d1] font-semibold mb-3 flex items-center gap-2">
@@ -476,7 +475,6 @@
       <!-- M3U URLs (collapsed until Edit M3U is clicked) -->
       <div id="edit-m3u-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-6 space-y-3">
         <input type="text" id="edit-m3u-playlist-url" oninput="updateEditM3uButton()" placeholder="Playlist URL (http://...)" class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
-        <input type="text" id="edit-m3u-epg-url" oninput="updateEditM3uButton()" placeholder="EPG URL (http://...)" class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
         <div id="edit-m3u-error" class="hidden text-xs text-[#e56a6a] font-semibold"></div>
         <div id="edit-m3u-importing" class="hidden text-xs text-[#5aa8d1] font-semibold flex items-center gap-2">
           <i class="fa-solid fa-spinner fa-spin"></i>
@@ -874,7 +872,9 @@
       showView('wizard-xtream');
     }
 
-    // --- Setup Wizard: Step 3b, M3U playlist + EPG URLs ---
+    // --- Setup Wizard: Step 3b, the M3U playlist URL ---
+    // The EPG URL it used to ask for as well went when the server stopped
+    // reading EPGs - see m3u.js.
     // Deliberately no separate "Test" step the way Xtream has - there's no
     // auth to confirm here, the fetch+parse IS the test. A brand-new
     // source has no cache to fall back on yet, so this really is a
@@ -890,9 +890,8 @@
     function updateWizardM3uButton() {
       const btn = document.getElementById('wizard-m3u-btn');
       const playlistUrl = document.getElementById('wizard-m3u-playlist-url').value.trim();
-      const epgUrl = document.getElementById('wizard-m3u-epg-url').value.trim();
 
-      if (playlistUrl && epgUrl) {
+      if (playlistUrl) {
         btn.disabled = false;
         btn.className = 'w-full flex items-center justify-center gap-2 bg-white text-[#c0392b] hover:bg-[#f0f0f0] active:scale-95 transition-all duration-150 font-bold py-2.5 rounded-lg text-sm';
       } else {
@@ -903,7 +902,6 @@
 
     async function importWizardM3u() {
       const playlistUrl = document.getElementById('wizard-m3u-playlist-url').value.trim();
-      const epgUrl = document.getElementById('wizard-m3u-epg-url').value.trim();
       const errorEl = document.getElementById('wizard-m3u-error');
       const importingEl = document.getElementById('wizard-m3u-importing');
       const btn = document.getElementById('wizard-m3u-btn');
@@ -916,18 +914,16 @@
         const res = await fetch('/api/m3u/import', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ playlistUrl, epgUrl })
+          body: JSON.stringify({ playlistUrl })
         });
         const data = await res.json();
         importingEl.classList.add('hidden');
 
         if (data.success) {
-          wizardM3u = { playlistUrl, epgUrl };
+          wizardM3u = { playlistUrl };
           wizardGoToPassword();
         } else {
-          // Indicate which URL was the problem where the backend could
-          // tell, rather than a generic failure message.
-          let message = data.error || "Couldn't import. Please check both URLs.";
+          let message = data.error || "Couldn't import. Please check the URL.";
           errorEl.textContent = message;
           errorEl.classList.remove('hidden');
           btn.disabled = false;
@@ -935,7 +931,7 @@
         }
       } catch (err) {
         importingEl.classList.add('hidden');
-        errorEl.textContent = "Couldn't import. Please check both URLs.";
+        errorEl.textContent = "Couldn't import. Please check the URL.";
         errorEl.classList.remove('hidden');
         btn.disabled = false;
         updateWizardM3uButton();
@@ -1335,9 +1331,8 @@
         closeChangeTimezonePanelSilently();
         closeDeleteAccountPanelSilently();
         const m = ((activeUser && activeUser.providers) || [])[0] || {};
-        editM3uOriginalValues = { playlistUrl: m.playlistUrl || '', epgUrl: m.epgUrl || '' };
+        editM3uOriginalValues = { playlistUrl: m.playlistUrl || '' };
         document.getElementById('edit-m3u-playlist-url').value = editM3uOriginalValues.playlistUrl;
-        document.getElementById('edit-m3u-epg-url').value = editM3uOriginalValues.epgUrl;
         document.getElementById('edit-m3u-error').classList.add('hidden');
         resetEditM3uState();
         panel.classList.remove('hidden');
@@ -1368,7 +1363,6 @@
     function revertEditM3uFields() {
       if (!editM3uOriginalValues) return;
       document.getElementById('edit-m3u-playlist-url').value = editM3uOriginalValues.playlistUrl;
-      document.getElementById('edit-m3u-epg-url').value = editM3uOriginalValues.epgUrl;
       updateEditM3uButton();
     }
 
@@ -1376,7 +1370,7 @@
       const btn = document.getElementById('edit-m3u-btn');
 
       // Editing a field after a successful import invalidates that import -
-      // same reasoning as Xtream: a stale, already-verified URL pair
+      // same reasoning as Xtream: a stale, already-verified URL
       // should never be confirmable without re-verifying whatever's
       // currently typed.
       if (editM3uImportedValues) {
@@ -1385,9 +1379,8 @@
       }
 
       const playlistUrl = document.getElementById('edit-m3u-playlist-url').value.trim();
-      const epgUrl = document.getElementById('edit-m3u-epg-url').value.trim();
 
-      if (playlistUrl && epgUrl) {
+      if (playlistUrl) {
         btn.disabled = false;
         btn.className = 'w-full flex items-center justify-center gap-2 bg-white text-[#c0392b] hover:bg-[#f0f0f0] active:scale-95 transition-all duration-150 font-bold py-2.5 rounded-lg text-xs';
       } else {
@@ -1398,7 +1391,6 @@
 
     async function importEditM3u() {
       const playlistUrl = document.getElementById('edit-m3u-playlist-url').value.trim();
-      const epgUrl = document.getElementById('edit-m3u-epg-url').value.trim();
       const errorEl = document.getElementById('edit-m3u-error');
       const importingEl = document.getElementById('edit-m3u-importing');
       const btn = document.getElementById('edit-m3u-btn');
@@ -1411,26 +1403,26 @@
         const res = await fetch('/api/m3u/import', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ playlistUrl, epgUrl })
+          body: JSON.stringify({ playlistUrl })
         });
         const data = await res.json();
         importingEl.classList.add('hidden');
 
         if (data.success) {
-          editM3uImportedValues = { playlistUrl, epgUrl };
+          editM3uImportedValues = { playlistUrl };
           btn.onclick = confirmEditM3u;
           btn.innerHTML = 'Confirm';
           btn.className = 'w-full bg-[#3b8fc4] hover:bg-[#4fa3d8] active:scale-95 transition-all duration-150 font-bold py-2.5 rounded-lg text-xs';
           showStatus('Import successful!');
         } else {
           revertEditM3uFields();
-          errorEl.textContent = data.error || "Couldn't import. Please check both URLs.";
+          errorEl.textContent = data.error || "Couldn't import. Please check the URL.";
           errorEl.classList.remove('hidden');
         }
       } catch (err) {
         importingEl.classList.add('hidden');
         revertEditM3uFields();
-        errorEl.textContent = "Couldn't import. Please check both URLs.";
+        errorEl.textContent = "Couldn't import. Please check the URL.";
         errorEl.classList.remove('hidden');
       }
     }
@@ -2747,7 +2739,7 @@
     function blankProvider() {
       const kind = (activeUser && activeUser.connectionType === 'm3u') ? 'm3u' : 'xtream';
       return { id: '', label: '', kind, streamcheckProvider: '', bundle: '',
-               url: '', username: '', password: '', playlistUrl: '', epgUrl: '' };
+               url: '', username: '', password: '', playlistUrl: '' };
     }
 
     function renderProviders() {
@@ -2789,7 +2781,6 @@
           </div>
           ${pr.kind === 'm3u'
             ? field(i, 'playlistUrl', 'text', 'Playlist URL (http://...)', pr.playlistUrl)
-              + field(i, 'epgUrl', 'text', 'EPG URL (optional)', pr.epgUrl)
             : field(i, 'url', 'text', 'Server URL (http://...)', pr.url)
               + `<div class="grid grid-cols-2 gap-2">
                    ${field(i, 'username', 'text', 'Username', pr.username)}

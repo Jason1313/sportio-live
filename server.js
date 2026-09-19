@@ -103,7 +103,7 @@ function decryptXtreamFromStorage(xtream) {
   };
 }
 
-// M3U playlist/EPG URLs frequently carry embedded credentials directly in
+// M3U playlist URLs frequently carry embedded credentials directly in
 // the URL itself (e.g. ".../live/username/password/streamid.ts", confirmed
 // against real provider output during design) - just as sensitive as
 // Xtream's own username/password, so they get the same encryption-at-rest
@@ -158,14 +158,14 @@ function decryptSavedChannelsFromStorage(savedChannels) {
 function encryptProvidersForStorage(providers) {
   if (!Array.isArray(providers)) return providers;
   return providers.map(entry => (entry.kind === 'm3u'
-    ? { ...entry, playlistUrl: encrypt(entry.playlistUrl), epgUrl: entry.epgUrl ? encrypt(entry.epgUrl) : entry.epgUrl }
+    ? { ...entry, playlistUrl: encrypt(entry.playlistUrl) }
     : { ...entry, url: encrypt(entry.url), username: encrypt(entry.username), password: encrypt(entry.password) }));
 }
 
 function decryptProvidersFromStorage(providers) {
   if (!Array.isArray(providers)) return providers;
   return providers.map(entry => (entry.kind === 'm3u'
-    ? { ...entry, playlistUrl: decrypt(entry.playlistUrl), epgUrl: entry.epgUrl ? decrypt(entry.epgUrl) : entry.epgUrl }
+    ? { ...entry, playlistUrl: decrypt(entry.playlistUrl) }
     : { ...entry, url: decrypt(entry.url), username: decrypt(entry.username), password: decrypt(entry.password) }));
 }
 
@@ -239,10 +239,13 @@ function normaliseProvider(raw, kind, index) {
   if (kind === 'm3u') {
     const playlistUrl = str(raw.playlistUrl) || str(raw.m3u && raw.m3u.playlistUrl);
     if (!playlistUrl) return null;
+    // No epgUrl. Nothing reads an EPG any more (see m3u.js), and an EPG
+    // URL often carries the same login in its path that the playlist
+    // does - an unused copy of a credential is not worth keeping. An
+    // account stored with one sheds it the next time it is saved.
     return {
       id, label, kind: 'm3u', streamcheckProvider, bundle,
       playlistUrl,
-      epgUrl: str(raw.epgUrl) || str(raw.m3u && raw.m3u.epgUrl),
     };
   }
 
@@ -379,7 +382,7 @@ function describeProvider(provider, { withConnection = false, withSecrets = fals
   };
   if (provider.kind === 'm3u') {
     return (withConnection || withSecrets)
-      ? { ...base, playlistUrl: provider.playlistUrl, epgUrl: provider.epgUrl || '' }
+      ? { ...base, playlistUrl: provider.playlistUrl }
       : base;
   }
   base.streamFormat = provider.streamFormat || 'm3u8';
@@ -438,7 +441,7 @@ setInterval(() => {
 }, LOGIN_WINDOW_MS).unref();
 
 // Shared by every endpoint that checks a password (login, update, delete,
-// the EPG tool's endpoints, admin login) - not just /api/user/login.
+// the channel endpoints, admin login) - not just /api/user/login.
 // Originally only login itself enforced this, which meant the lockout was
 // trivially bypassable by brute-forcing the same password through any of
 // the other endpoints instead. One shared IP-keyed budget across all of
@@ -4244,28 +4247,22 @@ app.post('/api/xtream/categories', async (req, res) => {
 // first user of a brand-new source doesn't hit an empty cache right after
 // finishing setup.
 app.post('/api/m3u/import', async (req, res) => {
-  const { playlistUrl, epgUrl } = req.body;
-  if (!playlistUrl || !epgUrl) {
-    return res.status(400).json({ error: 'Both a playlist URL and an EPG URL are required.' });
+  const { playlistUrl } = req.body;
+  if (!playlistUrl || typeof playlistUrl !== 'string') {
+    return res.status(400).json({ error: 'A playlist URL is required.' });
   }
 
   try {
-    const parsed = await m3u.refreshM3USource(playlistUrl, epgUrl);
+    const parsed = await m3u.refreshM3USource(playlistUrl);
     return res.json({ success: true, categories: parsed.categoryList });
   } catch (err) {
-    console.error(`[M3U] Failed to import from playlistUrl=${playlistUrl}, epgUrl=${epgUrl}:`, err.message);
-    // Distinguish which URL was the problem where possible, so the wizard
-    // can point the user at the right one rather than a generic failure.
-    if (err.playlistFailed && err.epgFailed) {
-      return res.status(400).json({ error: 'Both URLs failed to load. Please double-check them.', playlistFailed: true, epgFailed: true });
-    }
+    // The host only. This used to log both URLs whole, and a playlist URL
+    // carries the account's username and password in its path.
+    console.error(`[M3U] Failed to import a playlist from ${m3u.describeSource(playlistUrl)}: ${err.playlistError || err.message}`);
     if (err.playlistFailed) {
-      return res.status(400).json({ error: 'The playlist URL failed to load or contained no usable channels.', playlistFailed: true, epgFailed: false });
+      return res.status(400).json({ error: `The playlist failed to load: ${err.playlistError || 'no usable channels'}.` });
     }
-    if (err.epgFailed) {
-      return res.status(400).json({ error: 'The EPG URL failed to load.', playlistFailed: false, epgFailed: true });
-    }
-    return res.status(500).json({ error: 'Unable to import from the provided URLs.' });
+    return res.status(500).json({ error: 'Unable to import from that URL.' });
   }
 });
 
@@ -4279,7 +4276,7 @@ app.post('/api/m3u/import', async (req, res) => {
 // Fire-and-forget: the caller still gets an immediate "not ready"
 // response rather than being held for a multi-second parse. The cooldown
 // stops a dashboard that retries, or several tabs, from stacking up
-// concurrent fetches of the same 150MB file.
+// concurrent fetches of the same playlist.
 const m3uWarmAttempts = new Map(); // playlistUrl -> last attempt timestamp
 const M3U_WARM_COOLDOWN_MS = 2 * 60 * 1000;
 
@@ -4291,29 +4288,22 @@ function warmM3uSourceInBackground(user) {
 
 function warmM3uPlaylistInBackground(provider) {
   const playlistUrl = provider && provider.playlistUrl;
-  const epgUrl = provider && provider.epgUrl;
-  // The playlist is the only thing required. This used to refuse to warm
-  // without an EPG URL as well, which made an account that had none sit
-  // on "your playlist is still loading" permanently - the cache could
-  // never fill, so every channel search, suggestion and category lookup
-  // failed forever with a message promising it was nearly there. Nothing
-  // reads the EPG at all since the tier matcher was removed, so requiring
-  // one to fetch a playlist was guarding nothing.
   if (!playlistUrl) return;
 
   const lastAttempt = m3uWarmAttempts.get(playlistUrl) || 0;
   if (Date.now() - lastAttempt < M3U_WARM_COOLDOWN_MS) return;
   m3uWarmAttempts.set(playlistUrl, Date.now());
 
-  console.log(`[M3U] Cache empty for ${playlistUrl} - starting an on-demand refresh.`);
-  m3u.refreshM3USource(playlistUrl, epgUrl, { allowEpgFailure: true })
+  // Hosts only, never the URL - it carries the login. These used to name
+  // the whole playlist URL, password and all.
+  const where = m3u.describeSource(playlistUrl);
+  console.log(`[M3U] Cache empty for a playlist on ${where} - starting an on-demand refresh.`);
+  m3u.refreshM3USource(playlistUrl)
     .then(source => {
-      console.log(`[M3U] On-demand refresh done: ${source.channels.length} channels, EPG ${source.epgAvailable ? 'ok' : 'UNAVAILABLE'}`);
+      console.log(`[M3U] On-demand refresh done: ${source.channels.length} channels from ${where}`);
     })
     .catch(err => {
-      console.error(`[M3U] On-demand refresh FAILED for ${playlistUrl}: ${err.message}` +
-        (err.playlistFailed ? ` (playlist: ${err.playlistError})` : '') +
-        (err.epgFailed ? ` (epg: ${err.epgError})` : ''));
+      console.error(`[M3U] On-demand refresh FAILED for ${where}: ${err.playlistError || err.message}`);
     });
 }
 
@@ -5967,7 +5957,7 @@ function legacyConnectionFields(user, kind) {
   const provider = providersOf(user).find(entry => entry.kind === kind);
   if (!provider) return undefined;
   return kind === 'm3u'
-    ? { playlistUrl: provider.playlistUrl, epgUrl: provider.epgUrl || '' }
+    ? { playlistUrl: provider.playlistUrl }
     : { url: provider.url, username: provider.username, password: provider.password,
         streamFormat: provider.streamFormat || 'm3u8' };
 }
@@ -7230,14 +7220,14 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`Sportio Live running at http://0.0.0.0:${PORT}`);
 });
 
-// Collects every M3U user's {playlistUrl, epgUrl} pair - deduplication
+// Collects every M3U user's {playlistUrl} - deduplication
 // across users who happen to share the same provider is handled inside
 // refreshAllM3USources itself, not here.
 function getActiveM3uSources() {
   return Object.values(userConfigs)
     .flatMap(user => providersOf(user))
     .filter(provider => provider.kind === 'm3u' && provider.playlistUrl)
-    .map(provider => ({ playlistUrl: provider.playlistUrl, epgUrl: provider.epgUrl }));
+    .map(provider => ({ playlistUrl: provider.playlistUrl }));
 }
 
 m3u.startM3uScheduler(getActiveM3uSources, () => m3uSettings);
