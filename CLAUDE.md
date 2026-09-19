@@ -23,7 +23,7 @@ either side of the wire. The image also carries ffmpeg, for ffprobe.
 | `streamcheck.js` | Reads published stream sweeps from streamcheck.pro (a Metabase public dashboard) - alive/dead, codec, resolution, bitrate. |
 | `quality.js` | Turns one of those readings into a band, a score and a badge line. Measures nothing itself. |
 | `bundles.js` | Resellers that carry other services under one login and renumber every channel (Flix-Streams: Strong + Trex). A provider marked as one is tested with ffprobe instead of read from published data, and auto-pick leaves it alone. |
-| `probe.js` | Measures one stream with ffprobe - resolution, frame rate, scan, bitrate counted off the wire. Only for a reseller's channels, one at a time, when somebody asks. Judges nothing; `quality.js` does that. |
+| `probe.js` | Measures one stream with ffprobe - resolution, frame rate, scan, bitrate counted off the wire. Only for a reseller's channels, when somebody asks, as many at once per login as the reseller allows (`testsAtOnce` in `bundles.js`). Judges nothing; `quality.js` does that. |
 | `posters.js` | Matchup poster art drawn from team colours and marks. |
 | `wrestling.js` | Wrestling schedules, scraped from the promotions, because nothing publishes them. |
 | `bkfc.js` | Bare Knuckle FC's schedule, scraped for the same reason - ESPN carries no bare knuckle. Merged into the MMA section. |
