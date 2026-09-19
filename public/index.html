@@ -2812,6 +2812,10 @@
                     class="text-[11px] px-2 py-1.5 rounded border border-[#e6e6e6]/15 ${i === providerDraft.length - 1 ? 'opacity-30' : 'hover:bg-white/5'}">
               <i class="fa-solid fa-arrow-down"></i>
             </button>
+            ${pr.id ? `<button onclick="refreshProviderChannels(${quoteAttr(pr.id)}, this)" title="Fetch this provider's channel list again now - for a category just added on the provider's side"
+                    class="text-[11px] px-2 py-1.5 rounded border border-[#e6e6e6]/15 hover:bg-white/5 whitespace-nowrap">
+              <i class="fa-solid fa-rotate"></i> Refresh channels
+            </button>` : ''}
             <button onclick="removeProvider(${i})" ${providerDraft.length === 1 ? 'disabled' : ''}
                     class="text-[11px] px-2 py-1.5 rounded border border-[#c0392b]/40 text-[#e56a6a] ${providerDraft.length === 1 ? 'opacity-30' : 'hover:bg-[#c0392b]/15'}">
               <i class="fa-solid fa-trash"></i>
@@ -2882,6 +2886,46 @@
       if (!providerDraft || !providerDraft[index]) return;
       providerDraft[index].bundle = key;
       renderProviders();
+    }
+
+    // Fetches a provider's channel list again now, rather than on the
+    // server's schedule, then drops every copy of the old one this page
+    // is holding - the category picker, the lists in open network
+    // sections, the suggestions - so a category just added on the
+    // provider's side appears everywhere without a reload.
+    async function refreshProviderChannels(providerId, button) {
+      const original = button.innerHTML;
+      button.disabled = true;
+      button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Refreshing...';
+      try {
+        const res = await fetch('/api/providers/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token, providerId })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          showStatus((data && data.error) || `Could not refresh (the server answered ${res.status}).`, true);
+          return;
+        }
+        const label = ((activeUser.providers || []).find(pr => pr.id === providerId) || {}).label || 'Provider';
+        showStatus(`${label}: ${data.channels.toLocaleString()} channels in ${data.categories.toLocaleString()} categories, fetched just now.`);
+
+        allPlaylistCategories = null;
+        const openSections = Object.keys(networkCategoryChannels);
+        networkCategoryChannels = {};
+        for (const key of openSections) {
+          if (networkExpanded[key] && networkCategoriesOf(key).length) loadCategoryChannels(key);
+        }
+        const allowlist = document.getElementById('network-categories-panel');
+        if (allowlist && !allowlist.classList.contains('hidden')) loadCategoryPicker();
+        loadNetworkLinks();
+      } catch (err) {
+        showStatus(`Could not refresh: ${err.message}`, true);
+      } finally {
+        button.disabled = false;
+        button.innerHTML = original;
+      }
     }
 
     function updateProviderField(index, key, value) {

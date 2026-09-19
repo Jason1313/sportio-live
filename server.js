@@ -5714,6 +5714,78 @@ function applyAutoPick(user, channels, options = {}) {
 
 // The providers the dashboard can choose between, and what this instance
 // currently holds for each.
+// Re-fetches one provider's channel list now, for the Providers panel's
+// refresh button.
+//
+// The list is otherwise refreshed on a schedule - an Xtream catalog by the
+// warmer every 25 minutes, an M3U playlist by the admin's schedule - so a
+// category added on the provider's side a minute ago is not in it yet.
+// This is the one route that fetches a whole catalog on a visitor's
+// request, and deliberately so: somebody pressed a button asking for
+// exactly that, and is watching for the answer.
+//
+// Once a minute per login. A full Flix-Streams list is about 22MB, and a
+// button pressed twice should not be two of them - nor, since the limit is
+// per login rather than per account, two accounts sharing one service.
+const PROVIDER_REFRESH_COOLDOWN_MS = 60 * 1000;
+const providerRefreshedAt = new Map(); // connectionKeyFor(provider) -> ms
+
+app.post('/api/providers/refresh', async (req, res) => {
+  const auth = await authenticateAccount(req, res);
+  if (!auth) return;
+
+  const provider = providersOf(auth.user).find(entry => entry.id === req.body.providerId);
+  if (!provider) return res.status(400).json({ error: 'No such provider on this account.' });
+
+  const key = connectionKeyFor(provider);
+  const wait = PROVIDER_REFRESH_COOLDOWN_MS - (Date.now() - (providerRefreshedAt.get(key) || 0));
+  if (wait > 0) {
+    const seconds = Math.ceil(wait / 1000);
+    res.setHeader('Retry-After', seconds);
+    return res.status(429).json({ error: `${provider.label} was refreshed a moment ago - try again in ${seconds}s.` });
+  }
+  providerRefreshedAt.set(key, Date.now());
+
+  let source;
+  if (provider.kind === 'm3u') {
+    if (!provider.playlistUrl) return res.status(400).json({ error: 'This provider has no playlist URL.' });
+    try {
+      source = await m3u.refreshM3USource(provider.playlistUrl);
+    } catch (err) {
+      return res.status(502).json({ error: `Could not load the playlist from ${m3u.describeSource(provider.playlistUrl)}: ${err.playlistError || err.message}` });
+    }
+  } else {
+    // Asking for a list no older than nothing. A provider that is down or
+    // answers with an empty list leaves the held one in place - see
+    // getProviderChannelSource - which shows here as a list no newer than
+    // before, and is reported as a failure rather than as a refresh that
+    // quietly changed nothing.
+    //
+    // An empty list counts as a failure too. The Xtream calls answer an
+    // unreachable server with an empty list rather than an error, and with
+    // no earlier list to keep, that empty one is what comes back - newer
+    // than nothing, and reported as a successful refresh of 0 channels
+    // until this said otherwise.
+    const held = xtreamSourceCache.get(xtreamCacheKey(provider));
+    const before = held ? held.fetchedAt : 0;
+    source = await getProviderChannelSource(provider, { maxAgeMs: 0 });
+    if (!source || source.fetchedAt <= before || source.channels.length === 0) {
+      return res.status(502).json({
+        error: `${provider.label} could not be reached or sent an empty list` +
+          (held ? ` - still using the list from ${new Date(before).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}.` : '.'),
+      });
+    }
+  }
+
+  console.log(`[Refresh] ${accountTag(auth.user)}: ${source.channels.length} channels, ${source.categoryList.length} categories`);
+  return res.json({
+    success: true,
+    channels: source.channels.length,
+    categories: source.categoryList.length,
+    fetchedAt: new Date(source.fetchedAt).toISOString(),
+  });
+});
+
 app.post('/api/streamcheck/providers', async (req, res) => {
   const auth = await authenticateForChannels(req, res);
   if (!auth) return;
