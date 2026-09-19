@@ -471,6 +471,61 @@ function clearFailedAttempts(ip) {
   loginAttempts.delete(ip);
 }
 
+// ---------------------------------------------------------------------
+// Sessions
+// ---------------------------------------------------------------------
+//
+// A password is checked once, at sign-in, and answered with a token that
+// every other request carries instead.
+//
+// Every request used to carry the password itself, and every one paid a
+// bcrypt comparison for it - 53ms of CPU a time with bcryptjs, which is
+// pure JavaScript and so runs on the thread serving everybody else. That
+// was each search keystroke, each channel test, each of the handful of
+// calls a page makes as it opens. The watch portal also had to keep the
+// password to send, and kept it in localStorage in the clear.
+//
+// A token is uuid, expiry and an HMAC over both plus the account's
+// password hash, so it is checked with one HMAC rather than a bcrypt, and
+// stops working the moment the password changes. It is signed with a key
+// derived from ENCRYPTION_KEY, so it survives a restart without a second
+// secret to configure - and with the placeholder key an install runs
+// before one is set, restarts void it, which is right for an install
+// that cannot sign anybody in yet anyway.
+const SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+const SESSION_KEY = crypto.createHmac('sha256', XTREAM_ENCRYPTION_KEY)
+  .update('sportio-session-v1').digest();
+
+function sessionSignature(uuid, expires, passwordHash) {
+  return crypto.createHmac('sha256', SESSION_KEY)
+    .update(`${uuid}.${expires}.${passwordHash}`).digest('base64url');
+}
+
+function issueSession(user) {
+  const expires = Date.now() + SESSION_TTL_MS;
+  return {
+    token: `v1.${user.uuid}.${expires}.${sessionSignature(user.uuid, expires, user.passwordHash)}`,
+    expiresAt: new Date(expires).toISOString(),
+  };
+}
+
+// The account a token belongs to, or null for one that is malformed,
+// expired, for an account since deleted, or signed over a password that
+// has since changed.
+function userForSession(token) {
+  const parts = String(token || '').split('.');
+  if (parts.length !== 4 || parts[0] !== 'v1') return null;
+  const [, uuid, expiresText, signature] = parts;
+  const expires = Number(expiresText);
+  if (!Number.isFinite(expires) || expires < Date.now()) return null;
+  const user = userConfigs[uuid];
+  if (!user) return null;
+  const expected = Buffer.from(sessionSignature(uuid, expires, user.passwordHash));
+  const given = Buffer.from(signature);
+  if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) return null;
+  return user;
+}
+
 let userConfigs = {};
 if (fs.existsSync(DATA_FILE)) {
   try {
@@ -4364,9 +4419,24 @@ function warmM3uPlaylistInBackground(provider) {
 // account's whole channel list - right for anything reading the playlist,
 // and pure waste for a request asking which conferences are hidden.
 async function authenticateAccount(req, res) {
-  const { uuid, password } = req.body;
+  const { uuid, password, token } = req.body;
   const ip = req.ip;
 
+  // A token is checked ahead of the rate limit and never counts against
+  // it. It is not guessable, so failing one is not somebody trying
+  // passwords - it is an old token, and locking an address out for that
+  // would lock out whoever is signing back in from it.
+  if (token) {
+    const user = userForSession(token);
+    if (!user || (uuid && uuid !== user.uuid)) {
+      res.status(401).json({ error: 'Your session has expired. Sign in again.', sessionExpired: true });
+      return null;
+    }
+    return { user };
+  }
+
+  // A password is still taken, from a page loaded before tokens existed
+  // and not reloaded since. It pays the bcrypt it always did.
   if (isRateLimited(ip)) {
     const retryAfterSec = getRetryAfterSeconds(ip);
     res.setHeader('Retry-After', retryAfterSec);
@@ -5972,6 +6042,7 @@ app.post('/api/user/register', async (req, res) => {
   return res.json({
     success: true,
     uuid,
+    ...issueSession(userConfigs[uuid]),
     // The wizard sent one connection; this is it with an id, which the
     // dashboard needs before it can offer to add a second.
     providers: providersOf(userConfigs[uuid]).map(entry => describeProvider(entry, { withSecrets: true })),
@@ -6066,6 +6137,9 @@ app.post('/api/user/login', async (req, res) => {
   return res.json({ 
     success: true, 
     uuid: user.uuid, 
+    // What every later request carries instead of the password. See
+    // issueSession.
+    ...issueSession(user),
     connectionType: user.connectionType || 'xtream',
     // Both shapes. `providers` is the real one; `xtream`/`m3u` describe
     // the first of them and exist so the setup wizard, which knows about
@@ -6092,22 +6166,36 @@ app.post('/api/user/login', async (req, res) => {
   });
 });
 
+// A token for a password, for the watch portal - which needs nothing
+// login returns but the token, and should not be handed the provider
+// credentials login carries for the dashboard's forms.
+app.post('/api/session', async (req, res) => {
+  const { uuid, password } = req.body;
+  if (!password) return res.status(400).json({ error: 'A password is required.' });
+  // The password and nothing else, so a stale token riding along cannot
+  // stand in for it - this is where a password is proved.
+  req.body = { uuid, password };
+  const auth = await authenticateAccount(req, res);
+  if (!auth) return;
+  return res.json({ success: true, ...issueSession(auth.user) });
+});
+
+// A fresh token for a live one. The watch portal renews on every visit,
+// so a token only runs out on somebody who has not opened it in 90 days.
+app.post('/api/session/renew', async (req, res) => {
+  if (!req.body.token) return res.status(400).json({ error: 'A token is required.' });
+  const auth = await authenticateAccount(req, res);
+  if (!auth) return;
+  return res.json({ success: true, ...issueSession(auth.user) });
+});
+
 app.post('/api/user/update', async (req, res) => {
-  const { uuid, password, xtream, m3u, selectedSports, timeZone, sportOrder, networkLinks, savedChannels, searchCategories, streamcheckProvider, qualityFilter, searchTerms, providers, pinnedTeams, hiddenConferences } = req.body;
-  const ip = req.ip;
+  const { xtream, m3u, selectedSports, timeZone, sportOrder, networkLinks, savedChannels, searchCategories, streamcheckProvider, qualityFilter, searchTerms, providers, pinnedTeams, hiddenConferences } = req.body;
 
-  if (isRateLimited(ip)) {
-    const retryAfterSec = getRetryAfterSeconds(ip);
-    res.setHeader('Retry-After', retryAfterSec);
-    return res.status(429).json({ error: `Too many failed attempts. Try again in ${Math.ceil(retryAfterSec / 60)} minute(s).` });
-  }
-
-  const user = userConfigs[uuid];
-  if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
-    recordFailedAttempt(ip);
-    return res.status(401).json({ error: 'Invalid UUID or password.' });
-  }
-  clearFailedAttempts(ip);
+  const auth = await authenticateAccount(req, res);
+  if (!auth) return;
+  const { user } = auth;
+  const uuid = user.uuid;
   // The whole provider list, replaced at once.
   //
   // Not a set of add/remove/rename endpoints, because the order is itself
@@ -6249,22 +6337,9 @@ app.post('/api/user/update', async (req, res) => {
 // live under this one object, so deleting it is a complete, irreversible
 // wipe with nothing left behind elsewhere to separately clean up.
 app.post('/api/user/delete', async (req, res) => {
-  const { uuid, password } = req.body;
-  const ip = req.ip;
-
-  if (isRateLimited(ip)) {
-    const retryAfterSec = getRetryAfterSeconds(ip);
-    res.setHeader('Retry-After', retryAfterSec);
-    return res.status(429).json({ error: `Too many failed attempts. Try again in ${Math.ceil(retryAfterSec / 60)} minute(s).` });
-  }
-
-  const user = userConfigs[uuid];
-  if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
-    recordFailedAttempt(ip);
-    return res.status(401).json({ error: 'Invalid UUID or password.' });
-  }
-  clearFailedAttempts(ip);
-  delete userConfigs[uuid];
+  const auth = await authenticateAccount(req, res);
+  if (!auth) return;
+  delete userConfigs[auth.user.uuid];
   saveUserConfigs();
 
   return res.json({ success: true });

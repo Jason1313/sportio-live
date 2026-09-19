@@ -1042,7 +1042,7 @@
         if (data.success) {
           activeUser = {
             uuid: data.uuid,
-            password,
+            token: data.token,
             connectionType,
             // As the server normalised it, ids and all. Building it here
             // from the wizard fields would give the dashboard a provider
@@ -1080,7 +1080,10 @@
         });
         const data = await res.json();
         if (data.success) {
-          activeUser = { uuid, password, ...data };
+          // The token the server answered with, not the password: every
+          // request from here on carries it instead, and the password is
+          // not kept on the page at all. See issueSession in server.js.
+          activeUser = { uuid, ...data };
           document.getElementById('active-uuid-display').textContent = uuid;
           // Seeded before the panel is ever opened, so the ticks it shows
           // are the account's own settings rather than an empty draft
@@ -1643,7 +1646,7 @@
         const res = await fetch('/api/user/delete', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password })
+          body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token })
         });
         const data = await res.json();
         if (data.success) {
@@ -1754,7 +1757,7 @@
         }
       }
 
-      const credentials = { uuid: activeUser.uuid, password: activeUser.password };
+      const credentials = { uuid: activeUser.uuid, token: activeUser.token };
       const post = async (url) => {
         try {
           const res = await fetch(url, {
@@ -2254,7 +2257,7 @@
         const res = await fetch('/api/networks/search-terms', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, terms })
+          body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token, terms })
         });
         const data = await res.json().catch(() => null);
         if (!res.ok || !data || !data.success) {
@@ -2287,7 +2290,7 @@
         const res = await fetch('/api/networks/search-terms/save', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, key, terms })
+          body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token, key, terms })
         });
         const data = await res.json().catch(() => null);
         if (!res.ok || !data || !data.success) {
@@ -2589,7 +2592,7 @@
         const res = await fetch('/api/streamcheck/providers', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password })
+          body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token })
         });
         const data = await res.json().catch(() => null);
         if (!res.ok || !data || !data.success) {
@@ -2667,7 +2670,7 @@
         const res = await fetch('/api/streamcheck/select', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, providerId, table })
+          body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token, providerId, table })
         });
         const data = await res.json().catch(() => null);
         if (!res.ok || !data || !data.success) {
@@ -2908,7 +2911,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            uuid: activeUser.uuid, password: activeUser.password, providers: providerDraft
+            uuid: activeUser.uuid, token: activeUser.token, providers: providerDraft
           })
         });
         const data = await res.json().catch(() => null);
@@ -2961,7 +2964,7 @@
         const res = await fetch('/api/networks/quality-filter', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password })
+          body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token })
         });
         data = await res.json().catch(() => null);
         if (!res.ok || !data || !data.success) {
@@ -3113,7 +3116,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            uuid: activeUser.uuid, password: activeUser.password, qualityFilter: filter
+            uuid: activeUser.uuid, token: activeUser.token, qualityFilter: filter
           })
         });
         const data = await res.json().catch(() => null);
@@ -3180,7 +3183,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             uuid: activeUser.uuid,
-            password: activeUser.password,
+            token: activeUser.token,
             action: action || 'preview',
             previewAll: true,
             networks: autoPickDraft.networks,
@@ -3512,7 +3515,7 @@
         const res = await fetch('/api/networks/categories', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password })
+          body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token })
         });
         data = await res.json().catch(() => null);
         if (!res.ok || !data || !data.success) {
@@ -3591,7 +3594,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            uuid: activeUser.uuid, password: activeUser.password, searchCategories: chosen
+            uuid: activeUser.uuid, token: activeUser.token, searchCategories: chosen
           })
         });
         const data = await res.json().catch(() => null);
@@ -3697,7 +3700,7 @@
       const res = await fetch('/api/networks/defaults', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, ...body })
+        body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token, ...body })
       });
       const data = await res.json().catch(() => null);
       return { ok: res.ok, data };
@@ -3876,7 +3879,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             uuid: activeUser.uuid,
-            password: activeUser.password,
+            token: activeUser.token,
             query,
             excludeGroups: [...(networkExcludedGroups[key] || [])]
           })
@@ -4090,7 +4093,7 @@
         const res = await fetch('/api/networks/categories', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password })
+          body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token })
         });
         const data = await res.json().catch(() => null);
         if (!res.ok || !data || !data.success) {
@@ -4135,7 +4138,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            uuid: activeUser.uuid, password: activeUser.password,
+            uuid: activeUser.uuid, token: activeUser.token,
             key, categories: [...picker.draft]
           })
         });
@@ -4168,7 +4171,7 @@
         const res = await fetch('/api/networks/category-channels', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, key })
+          body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token, key })
         });
         const data = await res.json().catch(() => null);
         if (!res.ok || !data || !data.success) {
@@ -4465,7 +4468,7 @@
         const res = await fetch('/api/networks/test', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, url })
+          body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token, url })
         });
         const data = await res.json().catch(() => null);
         if (!res.ok || !data || !data.success) {
@@ -4547,7 +4550,7 @@
         const res = await fetch('/api/networks/test/unhide', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password,
+          body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token,
                                  url: channel.url, providerId: channel.providerId })
         });
         const data = await res.json().catch(() => null);
@@ -4581,7 +4584,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             uuid: activeUser.uuid,
-            password: activeUser.password,
+            token: activeUser.token,
             // Only when the Edit panel actually staged a credential
             // change. Sending the provider list on every save would push
             // whatever this page happens to be holding back over the
@@ -4638,7 +4641,7 @@
         const res = await fetch('/api/user/update', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, password: activeUser.password, providers: next })
+          body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token, providers: next })
         });
         const data = await res.json();
         if (!data.success) throw new Error(data.error || 'save failed');

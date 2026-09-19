@@ -237,7 +237,7 @@
 <section id="gate" class="hidden max-w-md mx-auto mt-24 px-5">
   <h1 class="text-xl font-bold mb-1">Connect to your account</h1>
   <p class="text-xs text-[#e6e6e6]/55 mb-4">
-    Paste the UUID and password from your Sportio Live dashboard. Both are stored in this browser only. The password is needed to search your playlist and save channels.
+    Paste the UUID and password from your Sportio Live dashboard. The password is checked once and not kept - this browser stores the UUID and a sign-in token that lasts 90 days from your last visit.
   </p>
   <input id="gate-uuid" type="text" placeholder="00000000-0000-0000-0000-000000000000"
          class="w-full bg-[#1f2b36] border border-white/15 rounded-lg px-3 py-2.5 text-sm font-mono focus:border-[#3b8fc4] focus:outline-none mb-2">
@@ -669,7 +669,11 @@
   const PROTOCOL = 'sportio';
 
   let uuid = localStorage.getItem('sportio.uuid') || new URLSearchParams(location.search).get('uuid') || '';
-  let password = localStorage.getItem('sportio.password') || '';
+  // A sign-in token, not the password. The password used to be kept here
+  // in localStorage, in the clear, and sent with every request; it is now
+  // exchanged once for a token (see /api/session) and forgotten. A browser
+  // still holding a password from before is switched over by boot().
+  let token = localStorage.getItem('sportio.token') || '';
 
   // Saved channels: the user's own list, unattached to any network.
   const SAVED_CATALOG_ID = 'saved';
@@ -723,7 +727,7 @@
   // the answer is already in hand and a redraw is instant.
   let teamSearchProvidersOff = new Set();
 
-  const credentials = () => ({ uuid, password });
+  const credentials = () => ({ uuid, token });
   let catalogs = [];
   let activeCatalog = null;
 
@@ -1740,26 +1744,45 @@ end)
   }
 
   // --- Account -------------------------------------------------------
-  function saveUuid() {
+  async function saveUuid() {
     const value = document.getElementById('gate-uuid').value.trim();
     const pass = document.getElementById('gate-password').value;
     const err = document.getElementById('gate-error');
-    if (!/^[0-9a-f-]{30,}$/i.test(value)) {
-      err.textContent = 'That does not look like a UUID.';
-      err.classList.remove('hidden');
-      return;
-    }
-    if (!pass) {
-      err.textContent = 'The password is needed to search and save channels.';
-      err.classList.remove('hidden');
-      return;
-    }
+    const fail = (text) => { err.textContent = text; err.classList.remove('hidden'); };
+    if (!/^[0-9a-f-]{30,}$/i.test(value)) return fail('That does not look like a UUID.');
+    if (!pass) return fail('The password is needed to search and save channels.');
+
+    const signedIn = await signIn(value, pass);
+    if (!signedIn.ok) return fail(signedIn.error);
     uuid = value;
-    password = pass;
     localStorage.setItem('sportio.uuid', uuid);
-    localStorage.setItem('sportio.password', password);
+    document.getElementById('gate-password').value = '';
     err.classList.add('hidden');
     boot();
+  }
+
+  // Trades a password for a token and keeps only the token.
+  async function signIn(forUuid, pass) {
+    try {
+      const res = await fetch('/api/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uuid: forUuid, password: pass })
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data || !data.token) {
+        return { ok: false, error: (data && data.error) || 'That UUID and password were not accepted.' };
+      }
+      storeToken(data.token);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: 'Could not reach the server.' };
+    }
+  }
+
+  function storeToken(value) {
+    token = value;
+    localStorage.setItem('sportio.token', token);
   }
 
   // `message` is optional now. A rejected password is an error and says
@@ -1767,9 +1790,10 @@ end)
   // fields would imply something had gone wrong with it.
   function forgetAccount(message) {
     localStorage.removeItem('sportio.uuid');
+    localStorage.removeItem('sportio.token');
     localStorage.removeItem('sportio.password');
     uuid = '';
-    password = '';
+    token = '';
     show('gate');
     const el = document.getElementById('gate-error');
     el.textContent = message || '';
@@ -1880,14 +1904,37 @@ end)
       return;
     }
 
-    // Verifying the password here rather than on first use means a wrong
-    // one is caught at the gate, not silently when a search returns
-    // nothing.
-    const savedRes = await postJson('/api/networks/saved');
-    if (savedRes.status === 401) {
-      forgetAccount('That password was not accepted.');
+    // A browser signed in before tokens holds the password itself. It is
+    // exchanged for a token once, here, and deleted - which is the whole
+    // of the migration, done by whoever opens the page next.
+    const legacyPassword = localStorage.getItem('sportio.password');
+    if (legacyPassword) {
+      localStorage.removeItem('sportio.password');
+      if (!token) {
+        const signedIn = await signIn(uuid, legacyPassword);
+        if (!signedIn.ok) {
+          forgetAccount('Sign in again to continue.');
+          return;
+        }
+      }
+    }
+    if (!token) {
+      forgetAccount();
       return;
     }
+
+    // Renewed on every visit, so the token only runs out on somebody who
+    // has not opened the page in 90 days - and checked here rather than
+    // on first use, so an expired one is caught at the gate, not silently
+    // when a search returns nothing.
+    const renewed = await postJson('/api/session/renew');
+    if (renewed.status === 401) {
+      forgetAccount('Your session has expired. Sign in again.');
+      return;
+    }
+    if (renewed.ok && renewed.data && renewed.data.token) storeToken(renewed.data.token);
+
+    const savedRes = await postJson('/api/networks/saved');
     savedChannels = (savedRes.data && savedRes.data.channels) || [];
     seedProbeResultsFromSaved();
 
