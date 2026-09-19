@@ -3712,37 +3712,9 @@ function buildCategoryNameLookup(categories) {
   };
 }
 
-async function fetchXtreamLiveStreams(provider, categoryIds = []) {
-  if (!categoryIds || categoryIds.length === 0) return [];
-  const { url, username, password } = provider;
-  const baseUrl = url.replace(/\/+$/, '');
-
-  let allStreams = [];
-  for (const catId of categoryIds) {
-    const apiUrl = `${baseUrl}/player_api.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}&action=get_live_streams&category_id=${catId}`;
-    try {
-      const res = await axios.get(apiUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-        timeout: 8000
-      });
-      if (Array.isArray(res.data)) {
-        allStreams = allStreams.concat(res.data);
-      }
-    } catch (e) {
-      console.error(`[Xtream] Failed to fetch category ${catId}:`, e.message);
-    }
-  }
-  return allStreams;
-}
-
-// Every live channel the Xtream account can see, in one request.
-//
-// fetchXtreamLiveStreams above deliberately refuses an empty category
-// list, so that a missing configuration can never turn into an accidental
-// full-service fetch. This is the case where a full-service fetch is the
-// point: an automatic search with no group filter is asking about the
-// whole service by definition. Omitting category_id is how Xtream serves
-// that - one response, not one request per category.
+// Every live channel the Xtream account can see, in one request -
+// omitting category_id is how Xtream serves the whole service. Only the
+// warmed channel source calls this; see getProviderChannelSource.
 async function fetchAllXtreamLiveStreams(provider) {
   const { url, username, password } = provider;
   const baseUrl = url.replace(/\/+$/, '');
@@ -3809,9 +3781,10 @@ function buildStreamUrlFor(user, providerId, streamId) {
 // though - they need a list of channels, and Xtream can produce one.
 //
 // So this builds the same { channels, categoryList } an M3U parse
-// produces, from the same two calls fetchAutoSearchChannels already
-// makes, and every one of those features then runs the identical code
-// for both connection types rather than growing a second implementation.
+// produces, from Xtream's category and live stream lists, and every one
+// of those features - the standing searches on the stream route too -
+// then runs the identical code for both connection types rather than
+// growing a second implementation.
 //
 // Channels carry a streamId here, which M3U channels do not. That is
 // what lets a saved link be stored as { type: 'xtream', streamId } and
@@ -4039,16 +4012,6 @@ async function getAccountChannelSource(user) {
   return mergeChannelSources(parts);
 }
 
-// Runs a sport's standing search (networks.AUTO_SEARCH) against whichever
-// source the account uses, returning { name, url, group } matches.
-//
-// The two connection types reach the same channel list very differently.
-// An M3U account already has the entire playlist parsed and cached, so
-// this is a filter over memory and costs nothing. An Xtream account has
-// no such list, so the search's own group filter is reused to decide
-// which categories to ask for - which for UFC means one small request
-// covering the Paramount+ PPV group, rather than pulling the whole
-// service down to find a handful of channels in it.
 // Standing searches an account has written for itself, keyed by the
 // bucket they belong to rather than by sport.
 //
@@ -4225,62 +4188,27 @@ function teamSearchFor(user, game, channels) {
   return { terms: counts, providers, results };
 }
 
-async function fetchAutoSearchChannelsFrom(provider, config, m3uSource) {
-  if (provider.kind === 'm3u') {
-    const channels = (m3uSource?.channels || []);
-    return networks.autoSearchChannels(channels, config);
-  }
-
-  if (!provider.url) return [];
-
-  const categories = await fetchXtreamCategories(provider);
-  const hasGroupFilter = Array.isArray(config.groups) && config.groups.length > 0;
-
-  let streams;
-  if (hasGroupFilter) {
-    const wantedIds = categories
-      .filter(c => networks.groupMatchesAny([c.category_name], config.groups))
-      .map(c => String(c.category_id));
-    // No category matched the filter at all. Deliberately returns nothing
-    // rather than falling back to a full-service search: the filter exists
-    // precisely to keep unrelated channels out, so ignoring it when it
-    // matches nothing would produce exactly the results it was written to
-    // prevent.
-    if (wantedIds.length === 0) return [];
-    streams = await fetchXtreamLiveStreams(provider, wantedIds);
-  } else {
-    streams = await fetchAllXtreamLiveStreams(provider);
-  }
-
-  // Normalised into the M3U parser's own channel shape, so the matching
-  // itself has one implementation shared by both connection types.
-  const getCategoryName = buildCategoryNameLookup(categories);
-  const channels = streams.map(s => ({
-    name: s.name,
-    streamUrl: buildXtreamStreamUrl(provider, s.stream_id),
-    providerId: provider.id,
-    categories: [getCategoryName(s)]
-  }));
-
-  return networks.autoSearchChannels(channels, config);
-}
-
-// The standing search, run once per provider and concatenated.
+// Runs a standing search (networks.AUTO_SEARCH, a promotion's own, or
+// the account's terms) over each provider's channel list, returning
+// { name, url, group, providerId } matches.
 //
-// Every provider is asked, and the results stay in provider order rather
-// than being interleaved or re-ranked. This search exists for events that
-// only ever appear as a throwaway per-card channel, where there is no
-// published reading to rank by and no basis for preferring one service's
-// listing to another's - so the account's own provider order is the
-// order, and it is at least predictable.
-async function fetchAutoSearchChannels(user, config, sourceFor) {
+// A filter over the cached list for both connection types. An Xtream
+// account used to be searched live instead: the category list and then
+// the matching streams fetched from the provider on the stream request
+// itself - and with no group filter, which is how DWCS, PFL, BKFC and
+// RAF search, that was the whole service. On Flix-Streams the full list
+// is about 22MB, pulled on every click on a fight card before a single
+// stream could be shown. The same list is already held in memory and
+// warmed every 25 minutes (warmChannelSources), so the search reads it
+// there, the way the dashboard's preview of the same terms always has.
+function autoSearchAccount(user, config, sourceFor) {
   if (!config) return [];
-
-  const perProvider = await Promise.all(providersOf(user)
-    .map(provider => fetchAutoSearchChannelsFrom(
-      provider, config, typeof sourceFor === 'function' ? sourceFor(provider.id) : sourceFor)));
-
-  return perProvider.flat().slice(0, networks.MAX_AUTO_SEARCH_RESULTS);
+  return providersOf(user)
+    .flatMap(provider => {
+      const source = sourceFor(provider.id);
+      return networks.autoSearchChannels((source && source.channels) || [], config);
+    })
+    .slice(0, networks.MAX_AUTO_SEARCH_RESULTS);
 }
 
 app.post('/api/xtream/categories', async (req, res) => {
@@ -7095,11 +7023,14 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   // the team-search fallback below. All three need every provider's
   // channels, and fetching them three times over would turn one catalog
   // click into three full passes of each service.
-  let accountSource = null;
-  if (isM3u) {
-    accountSource = await getAccountChannelSource(user);
-    if (!accountSource) return res.json({ streams: [] });
-  }
+  // Both connection types, from cache. An Xtream catalog is held for
+  // half an hour and re-warmed every 25 minutes, so this is a read from
+  // memory; only a cold start pays a fetch, once, shared with anything
+  // else asking. An Xtream account with nothing reachable still gets its
+  // configured links - they are rebuilt from credentials, not looked up -
+  // so only M3U, which has nothing without its playlist, stops here.
+  const accountSource = await getAccountChannelSource(user);
+  if (isM3u && !accountSource) return res.json({ streams: [] });
 
   const userTz = user.timeZone || 'America/New_York';
   const games = await fetchGamesForSport(sport.toUpperCase(), hostUrl, userTz);
@@ -7184,7 +7115,7 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   const autoSearch = autoSearchFor(user, searchKey, builtInSearch);
   let autoStreams = [];
   if (autoSearch) {
-    const autoChannels = await fetchAutoSearchChannels(
+    const autoChannels = autoSearchAccount(
       user, autoSearch, linkResolvers(user, accountSource).sourceFor);
     autoStreams = autoChannels.map(channel => ({
       name: channel.name,
