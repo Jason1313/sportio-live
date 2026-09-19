@@ -1076,61 +1076,43 @@
   // The profile --profile=sportio selects. Only this block is managed:
   // the rest of mpv.conf is display tuning that belongs to whoever set
   // the machine up, and nothing here has an opinion about it.
+  //
+  // Reconnects and nothing else. It used to carry a set of cache and
+  // latency settings too - a 100MiB, 60-second readahead, a 4KiB stream
+  // buffer, fflags=+nobuffer with a 0.2s analyzeduration, HLS joining two
+  // segments from the end, a 0.1s audio buffer - each chosen to shave a
+  // little delay or hold a little more in hand, and each reasoned about
+  // against a test server that burst on connect and then sent at 1x.
+  //
+  // On Flix-Streams they left the cache draining to nothing. It relays
+  // another service at about the stream's average rate - measured at
+  // roughly 3.5Mbps arriving against a channel that ran from 1.9 to
+  // 4.3Mbps scene to scene - with no surplus to rebuild what a busy
+  // stretch spends, so a cache that opened at 17 to 25 seconds ran down to
+  // zero and stalled. With every line but the reconnects removed, mpv's
+  // own defaults held it. Which of the removed lines did the damage was
+  // not isolated; the read-path ones - the 4KiB buffer and nobuffer - are
+  // the likely part, and none of them bought enough to be worth keeping to
+  // find out. mpv's defaults for a network stream already read further
+  // ahead than the 60 seconds they replaced.
+  //
+  // network-timeout stays unset, as it always was: a reconnect on a live
+  // .ts does not resume but starts again at the head of whatever the
+  // provider has buffered, and against a server that went quiet for 15s
+  // without closing the socket a 10s timeout reconnected and replayed
+  // 20s, where no timeout rode the gap out on the buffer. A picture that
+  // is genuinely frozen is caught by sportio-reload.lua's watchdog.
   const MPV_PROFILE = `[sportio]
 profile-desc=Live IPTV
 # Reconnect instead of dying when the provider drops a packet. This is
-# ffmpeg's own retry and it is the cheap one - the readahead below covers
-# the gap, so a recovery here is invisible. It only reaches a request
-# that broke mid-read though; a clean close reads as EOF and a refused
+# ffmpeg's own retry and it is the cheap one - mpv's cache covers the
+# gap, so a recovery here is invisible. It only reaches a request that
+# broke mid-read though; a clean close reads as EOF and a refused
 # connection as an error, and sportio-reload.lua is what handles those.
 stream-lavf-o-append=reconnect=1
 stream-lavf-o-append=reconnect_streamed=1
 stream-lavf-o-append=reconnect_delay_max=5
 stream-lavf-o-append=reconnect_on_network_error=1
-# No network-timeout here, deliberately. It was set to 10s once, on the
-# reasoning that ten seconds is well inside the readahead so a false
-# positive costs nothing - which has it exactly backwards. The readahead
-# is what makes the timeout unnecessary, not what makes it safe: a
-# reconnect on a live .ts does not resume, it starts again at the head of
-# whatever the provider has buffered, and replays the lot.
-#
-# Measured against a server that goes quiet for 15s without closing the
-# socket, holding a 20s buffer. At network-timeout=10 mpv reconnected at
-# exactly ten seconds in and was served from 20s back. At 0 the same gap
-# passed with one connection and nothing visible at all - the buffer rode
-# through it, which is what the buffer is for. Anything genuinely frozen
-# is caught by the watchdog in sportio-reload.lua, which measures whether
-# the picture is moving rather than whether the socket is quiet.
-# Buffering is not latency, which is worth writing down because the two
-# get traded against each other by reflex. Measured against a server
-# that bursts 8s on connect and then sends at 1x: a 60s readahead and a
-# 1s readahead sat at the same playback position to within 0.02s after
-# half a minute - the large one simply held 6.3s in hand where the small
-# one held 1.0s. What puts you behind live is where you joined and every
-# stall since, not the size of the cache. So there is nothing to win by
-# shrinking these, and a stall's worth of protection to lose.
-cache=yes
-demuxer-max-bytes=100MiB
-demuxer-readahead-secs=60
-# Probing is paid once and then carried for the rest of the stream.
-# Playback starts from the first byte whenever it starts, so a second
-# spent working out the codecs is a second further behind live until the
-# channel is rejoined.
-demuxer-lavf-o-append=fflags=+nobuffer
-demuxer-lavf-analyzeduration=0.2
-# HLS only - harmlessly ignored on a .ts URL, which reports it as an
-# AVOption it could not set and carries on. ffmpeg joins a live playlist
-# three segments from the end, so with 6s segments that is 18s of delay
-# accepted before anything else is decided. -2 gives a segment back and
-# still leaves one in hand; -1 is the floor and rebuffers whenever a
-# segment is published late.
-demuxer-lavf-o-append=live_start_index=-2
-stream-buffer-size=4KiB
-# Default is 0.2s. Small beside the seconds above, but unlike the cache
-# it is delay with nothing bought by it.
-audio-buffer=0.1
-keep-open=no
-force-seekable=no
 `;
 
   // The reconnect script, verbatim. It is offered for copying rather
