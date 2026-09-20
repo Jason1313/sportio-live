@@ -3431,7 +3431,13 @@
       let detail = '<span class="text-[#e6e6e6]/35 italic">not previewed</span>';
       if (result) {
         const r = result.rejected;
-        const bits = [`${result.considered} candidate${result.considered === 1 ? '' : 's'}`];
+        // Where the candidates came from, when it is not the rules. A row
+        // reading "0 candidates" means something different on each path -
+        // a rule that matched nothing, or a folder that is empty on this
+        // provider - and the fix is in a different place for each.
+        const chosen = autoPickCategories(key);
+        const from = chosen.length ? ` from ${chosen.length} categor${chosen.length === 1 ? 'y' : 'ies'}` : '';
+        const bits = [`${result.considered} candidate${result.considered === 1 ? '' : 's'}${from}`];
         if (r.notAlive) bits.push(`${r.notAlive} dead`);
         if (r.slow) bits.push(`${r.slow} under ${autoPickData.minFps}fps`);
         if (r.unmeasured) bits.push(`${r.unmeasured} unmeasured`);
@@ -3470,10 +3476,34 @@
         </div>`;
     }
 
+    function autoPickCategories(key) {
+      return ((autoPickData && autoPickData.categories) || {})[key] || [];
+    }
+
     function buildAutoPickDetail(key, result) {
       const rules = autoPickRules(key);
+      const label = (autoPickData.labels || {})[key] || key;
 
-      const fields = AUTO_PICK_FIELDS.map(([field, title, hint]) => `
+      // Categories chosen for a network answer "which channels are this"
+      // on their own, so Match and Groups are not consulted and are not
+      // drawn - a panel showing terms that do nothing is worse than one
+      // showing none. Never still applies: a folder is a family as often
+      // as it is a channel, and that is how it gets narrowed.
+      const chosen = autoPickCategories(key);
+      const folders = chosen.length === 0 ? '' : `
+        <div>
+          <div class="flex items-baseline gap-2 mb-1">
+            <span class="text-[11px] font-bold text-[#e6e6e6]/70">Categories</span>
+            <span class="text-[10px] text-[#e6e6e6]/35">Picking from these only &mdash; change them in the ${escapeHtml(label)} section below</span>
+          </div>
+          <div class="flex flex-wrap gap-1.5">
+            ${chosen.map(name => `<span class="text-[11px] px-2 py-0.5 rounded-lg bg-[#3b8fc4]/20 text-[#5aa8d1]">${escapeHtml(name)}</span>`).join('')}
+          </div>
+        </div>`;
+
+      const fields = AUTO_PICK_FIELDS
+        .filter(([field]) => chosen.length === 0 || field === 'exclude')
+        .map(([field, title, hint]) => `
         <div>
           <div class="flex items-baseline gap-2 mb-1">
             <span class="text-[11px] font-bold text-[#e6e6e6]/70">${title}</span>
@@ -3513,7 +3543,7 @@
               </div>`).join('')}
         </div>`;
 
-      return `<div class="px-2.5 pb-2.5 pt-1 border-t border-[#e6e6e6]/10 space-y-3">${fields}${picks}</div>`;
+      return `<div class="px-2.5 pb-2.5 pt-1 border-t border-[#e6e6e6]/10 space-y-3">${folders}${fields}${picks}</div>`;
     }
 
     function toggleAutoPickRules(key) {
@@ -4275,6 +4305,12 @@
       networkSearchResults[key] = [];
       networkSearchGroups[key] = [];
       refreshNetworkCategories(key);
+
+      // Auto-pick answers for this network out of these categories now,
+      // so a panel left open above is previewing the old question.
+      const panel = document.getElementById('autopick-panel');
+      if (panel && !panel.classList.contains('hidden')) loadAutoPick();
+
       if (networkCategoriesOf(key).length) {
         await loadCategoryChannels(key);
       } else {
@@ -4319,45 +4355,72 @@
       renderNetworkSearchResults(key);
     }
 
+    // What is known about one row's picture, whichever measured it.
+    //
+    // A reseller's channels are measured with ffprobe when somebody asks;
+    // every other provider's are read from the published sweep. The two
+    // used to sort differently - a tested list by band and bpp, a
+    // published one in playlist order - purely because only a test put a
+    // band on a row, so a FOX folder of four hundred published channels
+    // came back in whatever order the provider wrote it. Both readings
+    // now arrive carrying the same band and bpp (enrichWithStreamcheck in
+    // server.js), and one comparison orders either, or a section holding
+    // both on an account with a reseller beside an ordinary provider.
+    //
+    // The test wins where there is one. It is the newer statement about
+    // the channel, and `passes` and `hidden` are the reseller's own bar,
+    // which no published reading knows about.
+    function readingOf(c) {
+      const t = c.test || {};
+      if (t.tested) return { band: t.band, bpp: t.bpp, working: !!t.passes, hidden: !!t.hidden };
+      if (!c.probedQuality) return null;
+      // Dead and Blackscreen come back with a resolution and a trickle of
+      // bitrate, and the server leaves them bandless for that reason.
+      const dead = !!c.streamStatus && c.streamStatus !== 'Alive';
+      return { band: c.probedBand, bpp: c.probedBpp, working: !dead, hidden: false };
+    }
+
     // The order a channel list is shown in, best first.
     //
-    //   1. Passed its test, by the band the server put it in - 1080p at
-    //      0.060 bpp or more, then 720p at 0.080 or more, then the
-    //      remaining 1080p, then 1080i, then the remaining 720p - and by
-    //      bpp inside a band. Auto-pick's ladder with a rung for
-    //      interlaced 1080, which ranks below every true 1080p60. See
-    //      TEST_BANDS in server.js.
-    //   2. Not tested yet.
-    //   3. Failed, but unhidden to be looked at again.
+    //   1. Known to work, by the band it was put in - 1080p at 0.060 bpp
+    //      or more, then 720p at 0.080 or more, then the remaining 1080p,
+    //      then 1080i, then the remaining 720p - and by bpp inside a
+    //      band. Auto-pick's ladder with a rung for interlaced 1080,
+    //      which ranks below every true 1080p60. See TEST_BANDS in
+    //      server.js.
+    //   2. Nothing has measured it - not tested, or not in the sweep.
+    //   3. Known not to work: a failed test unhidden to be looked at
+    //      again, or a channel the sweep found Dead or Blackscreen.
     //   4. Failed and hidden.
     //
     // Everything else stays in the order the list first came in, by the
     // position stamped on each row when it arrived. Without that, re-
     // sorting after every test in a run shuffled rows that had not
     // changed, and failures stacked up in reverse.
-    function testRank(c) {
-      const t = c.test || {};
-      if (t.hidden) return 3;
-      if (t.tested && t.passes) return 0;
-      if (!t.tested) return 1;
-      return 2;
+    function qualityRank(c) {
+      const r = readingOf(c);
+      if (!r) return 1;
+      if (r.hidden) return 3;
+      return r.working ? 0 : 2;
     }
 
-    // Better of two channels that both passed: band, then bpp. Shared by
+    // Better of two channels that both work: band, then bpp. Shared by
     // the list order and the best-tested button, so the button's first
     // pick is always the top of the list.
-    function compareTested(a, b) {
-      const band = (a.test.band ?? 9) - (b.test.band ?? 9);
+    function compareQuality(a, b) {
+      const ra = readingOf(a) || {};
+      const rb = readingOf(b) || {};
+      const band = (ra.band ?? 9) - (rb.band ?? 9);
       if (band) return band;
-      return (b.test.bpp || 0) - (a.test.bpp || 0);
+      return (rb.bpp || 0) - (ra.bpp || 0);
     }
 
     function orderForPicking(list) {
       return [...list].sort((a, b) => {
-        const rank = testRank(a) - testRank(b);
+        const rank = qualityRank(a) - qualityRank(b);
         if (rank) return rank;
-        if (testRank(a) === 0) {
-          const better = compareTested(a, b);
+        if (qualityRank(a) === 0) {
+          const better = compareQuality(a, b);
           if (better) return better;
         }
         return (a._pos || 0) - (b._pos || 0);
@@ -4412,11 +4475,11 @@
       const picks = [];
       const counts = [];
       for (const { bundle, folder, rows } of byService.values()) {
-        const best = rows.sort(compareTested).slice(0, bundle.bestPerFolder || 5);
+        const best = rows.sort(compareQuality).slice(0, bundle.bestPerFolder || 5);
         picks.push(...best);
         counts.push(`${best.length} ${folder.label}`);
       }
-      return { picks: picks.sort(compareTested).slice(0, networkMaxLinks), counts };
+      return { picks: picks.sort(compareQuality).slice(0, networkMaxLinks), counts };
     }
 
     function applyBestTested(key) {

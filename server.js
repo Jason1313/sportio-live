@@ -1946,17 +1946,7 @@ app.post('/api/networks/autopick', async (req, res) => {
     await saveUserConfigs();
   }
 
-  // The category filter applies, the quality filter does not.
-  //
-  // channelsForSearch would hide anything the account's own published
-  // filter rejects, and auto-pick is the tool for choosing between
-  // published readings - running it over a list already narrowed by them
-  // would mean a filter set to "1080p60 only" made 1080p60 the only thing
-  // auto-pick could ever find, and then reported that as a finding.
-  const selected = Array.isArray(user.searchCategories) ? user.searchCategories : [];
-  const channels = selected.length
-    ? auth.source.channels.filter(c => (c.categories || []).some(cat => selected.includes(cat)))
-    : auth.source.channels;
+  const channels = autoPickChannels(user, auth.source.channels);
 
   // The dashboard asks about every network, not only the ones already
   // enabled: "which of these should I hand over" is the question the panel
@@ -2040,6 +2030,10 @@ app.post('/api/networks/autopick', async (req, res) => {
       .map(key => [key, autopick.rulesFor(key, settings.rules)])),
     labels: Object.fromEntries(autopick.autoPickableNetworks()
       .map(key => [key, networks.getNetworkLabel(key)])),
+    // Which networks answer question 1 with a folder instead of the
+    // rules. The panel draws the rules it would use, and drawing terms
+    // that are not consulted would be worse than drawing nothing.
+    categories: readNetworkCategories(user),
     bands: autopick.BANDS.map(b => b.name),
     minFps: autopick.MIN_FPS,
     ready: outcome.ready,
@@ -5038,6 +5032,7 @@ function enrichWithStreamcheck(user, entries) {
     if (!entry || !entry.url) return entry;
     const quality = qualityFromStreamcheck(lookup(entry));
     if (!quality) return entry;
+    const alive = !quality.status || quality.status === 'Alive';
     return {
       ...entry,
       probedQuality: quality.label,
@@ -5045,6 +5040,18 @@ function enrichWithStreamcheck(user, entries) {
       probedTier: quality.tier,
       probedDetail: describeQuality(quality),
       streamStatus: quality.status || null,
+      // The rung this reading sits on, on the same ladder a tested
+      // channel is ranked by - TEST_BANDS, which is auto-pick's ladder
+      // with one rung added for interlaced 1080. Stamped here so a list
+      // holding both a reseller's tested channels and an ordinary
+      // provider's published ones is ordered once, by one comparison,
+      // rather than by a rule per source that could disagree.
+      //
+      // Only for a channel that works. A Dead or Blackscreen feed still
+      // carries a resolution and a trickle of bitrate, and a band read
+      // off those would rank it among the watchable ones.
+      probedBand: alive ? testBandFor(quality, quality.bpp) : null,
+      probedBpp: alive && quality.bpp ? Math.round(quality.bpp * 1000) / 1000 : null,
     };
   });
 }
@@ -5848,6 +5855,32 @@ app.post('/api/networks/category-channels', async (req, res) => {
 
 const AUTO_PICK_LIMIT = 5;
 
+// The slice of a playlist auto-pick may choose from.
+//
+// The account's category allowlist applies and its published quality
+// filter does not. channelsForSearch would hide anything the filter
+// rejects, and auto-pick is the tool for choosing between published
+// readings - running it over a list already narrowed by them would mean a
+// filter set to "1080p60 only" made 1080p60 the only thing auto-pick
+// could ever find, and then reported that as a finding.
+//
+// A folder named for a network is let through whether or not the
+// allowlist holds it. That folder IS the account's answer to "which
+// channels are this network", and the section below already lists its
+// channels without consulting the allowlist; narrowing auto-pick by it
+// would have the section offering channels the picker could not see and
+// read as the choice being ignored.
+function autoPickChannels(user, channels) {
+  const selected = Array.isArray(user.searchCategories) ? user.searchCategories : [];
+  if (selected.length === 0) return channels;
+
+  const allowed = new Set(selected);
+  for (const chosen of Object.values(readNetworkCategories(user))) {
+    for (const name of chosen) allowed.add(name);
+  }
+  return channels.filter(c => (c.categories || []).some(cat => allowed.has(cat)));
+}
+
 // How many slots each provider gets to fill.
 //
 // Five each is the whole point of picking per provider: one service's
@@ -6055,8 +6088,18 @@ function computeAutoPick(user, channels, options = {}) {
   const limit = options.limit || autoPickLimitFor(groups.length);
   const labels = Object.fromEntries(providersOf(user).map(pr => [pr.id, pr.label]));
 
+  // The categories a network's section lists its channels from, which
+  // auto-pick treats as that network's whole membership question where
+  // they exist. Read from the account rather than sent with a preview:
+  // they are saved the moment they are ticked, so there is no unsaved
+  // state for a preview to answer for, and a scheduled run has to see
+  // exactly what the panel showed.
+  const chosen = readNetworkCategories(user);
+
   const results = keys.map((key) => {
-    const outcome = autopick.pickAcrossProviders(key, groups, read, { rules, limit });
+    const outcome = autopick.pickAcrossProviders(key, groups, read, {
+      rules, limit, categories: chosen[key] || [],
+    });
     const current = (user.networkLinks || {})[key] || [];
 
     // Links from a tested provider stay, ahead of the picks. Auto-pick
@@ -8128,15 +8171,7 @@ async function autoPickAfterSweep(provider, runDate) {
         continue;
       }
 
-      // The account's category filter applies here exactly as it does in
-      // the preview, so a scheduled run cannot reach into parts of the
-      // playlist the account has chosen not to browse.
-      const selected = Array.isArray(user.searchCategories) ? user.searchCategories : [];
-      const channels = selected.length
-        ? source.channels.filter(c => (c.categories || []).some(cat => selected.includes(cat)))
-        : source.channels;
-
-      const outcome = applyAutoPick(user, channels);
+      const outcome = applyAutoPick(user, autoPickChannels(user, source.channels));
       if (!outcome.ready || outcome.applied.length === 0) continue;
 
       // The account's own oldest sweep, not the run that triggered this.

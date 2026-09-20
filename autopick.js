@@ -25,6 +25,13 @@
 // it silently sends somebody to the wrong channel, which is worse than
 // the stale link it replaced.
 //
+// An account can answer question 1 itself instead of leaving it to the
+// rules, by naming the playlist categories a network lives in -
+// `options.categories` below. Where it has, the folder IS the answer and
+// none of the guesswork above runs. The rules stay for every network
+// nobody has named categories for, and question 2 is the same ladder
+// either way.
+//
 // Pure logic over plain data, like networks.js and for the same reason:
 // every rule here can be run against a real provider table offline.
 
@@ -287,6 +294,27 @@ function looksAmerican(channel) {
   if (tokens.some(token => US_MARKERS.has(token))) return true;
 
   return tokens.some(token => CALL_SIGN.test(token) && !NOT_CALL_SIGNS.has(token));
+}
+
+// The half of that question a channel answers about itself.
+//
+// looksAmerican has to PROVE a channel is American, because a rule that
+// matched the word "FOX" has nothing else to go on. Where an account has
+// named the folder instead, there is nothing left to guess and the proof
+// is not wanted: it is read out of the NAME, and plenty of genuine
+// affiliates carry neither a US tag nor a call sign - "NBC 5 Chicago" is
+// dropped by it outright.
+//
+// What is still worth honouring on that path is the other direction: a
+// channel that states it is somebody else's. A tvg-id ending .uk and the
+// leading country tag providers write are both explicit, and neither
+// appears on an American channel - so this rejects without having to
+// prove the opposite of anything.
+function looksForeign(channel) {
+  const country = tvgCountry(channel && (channel.id || channel.tvgId));
+  if (country) return country !== 'us';
+  const tokens = tokenize(channel && channel.name);
+  return tokens.length > 0 && FOREIGN_PREFIX.has(tokens[0]);
 }
 
 // ---------------------------------------------------------------------
@@ -559,6 +587,7 @@ function factsFor(channel) {
     facts = {
       tokens: tokenize(channel.name),
       american: looksAmerican(channel),
+      foreign: looksForeign(channel),
       groupTokens: (channel.categories || []).map(tokenize).filter(t => t.length > 0),
     };
     channelFacts.set(channel, facts);
@@ -580,6 +609,31 @@ function rivalTerms(networkKey, overrides) {
 // Every channel in a playlist that IS this network. Quality is not
 // considered here at all - this is question 1 on its own, so it can be
 // checked on its own.
+//
+// `options.categories` is the account's own answer: the exact playlist
+// category names it has chosen for this network. Where there are any,
+// they replace the rules entirely and a channel belongs to the network
+// if and only if it is filed in one of them. Exact names, compared the
+// way the dashboard's own category list compares them, because the two
+// have to agree - a section that lists a folder's channels and a pick
+// that draws from somewhere else is the worst of both.
+//
+// Three things the rules do are deliberately not done on that path:
+//
+//   include/groups  the folder already said which channels these are.
+//   looksAmerican   it proves nationality out of the NAME, and a US
+//                   folder is full of names with nothing to prove it
+//                   with - "NBC 5 Chicago" carries neither a US tag nor
+//                   a call sign and is dropped as foreign. Naming a US
+//                   category is the clearer statement. looksForeign
+//                   still runs, since a channel tagged "UK:" in the
+//                   folder has said what it is and needs no proving.
+//   numbered        only affects include terms, which are not consulted.
+//
+// Exclusions still run, all of them. A folder is a family as often as it
+// is a channel, and "Never" is how a family gets narrowed to the feed
+// wanted - "US | ESPN" holds ESPN2 and ESPNU beside ESPN, and ESPN's own
+// exclusions are what keep them out of its slot.
 function candidatesFor(networkKey, channels, options = {}) {
   const rules = rulesFor(networkKey, options.rules);
   if (!rules) return [];
@@ -589,17 +643,30 @@ function candidatesFor(networkKey, channels, options = {}) {
   const exclude = compileTerms(rules.exclude);
   const groups = compileTerms(rules.groups);
   const rivals = rivalTerms(networkKey, options.rules);
+  const categories = new Set((options.categories || []).filter(c => typeof c === 'string' && c));
 
   const out = [];
   for (const channel of channels || []) {
     if (!channel || !(channel.streamUrl || channel.url)) continue;
-    const { tokens, american, groupTokens } = factsFor(channel);
+    const { tokens, american, foreign, groupTokens } = factsFor(channel);
 
     // Exclusions first and unconditionally. A channel named Fox Sports 1
     // is Fox Sports 1 however it is filed.
     if (isStreamingTier(tokens)) continue;
     if (hasAnyTerm(tokens, SHARED_EXCLUDE_WORDS, false)) continue;
     if (hasAnyTerm(tokens, exclude, false)) continue;
+
+    if (categories.size > 0) {
+      if (!(channel.categories || []).some(category => categories.has(category))) continue;
+      if (foreign) continue;
+      // The same guard the group path below carries, for the same
+      // reason: a chosen folder can hold a rival network by name, and a
+      // channel let in by where it is filed has not been judged on what
+      // it is called.
+      if (rivals.some(r => hasAnyTerm(tokens, r.words, r.numbered))) continue;
+      out.push({ channel, matchedBy: 'category' });
+      continue;
+    }
 
     const byName = hasAnyTerm(tokens, include, rules.numbered);
     const byGroup = inConfiguredGroup(groupTokens, groups);
