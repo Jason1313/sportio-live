@@ -2848,7 +2848,11 @@
 
     function blankProvider() {
       const kind = (activeUser && activeUser.connectionType === 'm3u') ? 'm3u' : 'xtream';
-      return { id: '', label: '', kind, streamcheckProvider: '', bundle: '', testsAtOnce: DEFAULT_TESTS_AT_ONCE,
+      // No testsAtOnce. Left out rather than set to the default, so the
+      // dropdown follows the reseller switch below it - ticking
+      // Flix-Streams on a new row should move it to what that service
+      // starts on, and a pinned value would sit there contradicting it.
+      return { id: '', label: '', kind, streamcheckProvider: '', bundle: '',
                url: '', username: '', password: '', playlistUrl: '' };
     }
 
@@ -2909,16 +2913,18 @@
                    </select>
                  </label>`}
           ${bundleSwitches(pr, i)}
-          ${bundleOf(pr) ? '' : `
-            <label class="flex items-center gap-2 text-[10px] text-[#e6e6e6]/45">
-              Test
-              <select onchange="updateProviderField(${i}, 'testsAtOnce', Number(this.value))"
-                      class="bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-2 py-1 text-[11px] focus:border-[#3b8fc4] focus:outline-none">
-                ${[1, 2, 3, 4].map(n => `<option value="${n}" ${testsAtOnceOf(pr) === n ? 'selected' : ''}>${n}</option>`).join('')}
-              </select>
-              channel${testsAtOnceOf(pr) === 1 ? '' : 's'} at a time &mdash; each holds a connection to this
-              provider while it reads, so leave one free for watching
-            </label>`}
+          <label class="flex items-center gap-2 text-[10px] text-[#e6e6e6]/45">
+            Test
+            <select onchange="updateProviderField(${i}, 'testsAtOnce', Number(this.value))"
+                    class="bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-2 py-1 text-[11px] focus:border-[#3b8fc4] focus:outline-none">
+              ${Array.from({ length: testCeilingOf(pr) }, (_, n) => n + 1)
+                .map(n => `<option value="${n}" ${testsAtOnceOf(pr) === n ? 'selected' : ''}>${n}</option>`).join('')}
+            </select>
+            channel${testsAtOnceOf(pr) === 1 ? '' : 's'} at a time &mdash; each holds a connection to this
+            provider while it reads, so leave one free for watching${bundleOf(pr)
+              ? ` (${escapeHtml(bundleOf(pr).label)} sells ${testCeilingOf(pr)})`
+              : ''}
+          </label>
           ${pr.id && !bundleOf(pr) ? `<p class="text-[10px] text-[#e6e6e6]/35">
               Quality data: ${escapeHtml(pr.streamcheckProvider || 'none chosen')} &mdash; chosen under Quality data.
             </p>` : ''}
@@ -2955,13 +2961,19 @@
       }).join('');
     }
 
-    // What a provider is tested at when nothing says otherwise: two
-    // channels at a time, reading twenty seconds each. Both mirror the
-    // server - DEFAULT_TESTS_AT_ONCE and probe.js's DEFAULT_SAMPLE_SECONDS
-    // - and are only ever used to draw the panel and estimate a wait; the
-    // server decides what a run actually does.
-    const DEFAULT_TESTS_AT_ONCE = 2;
+    // What a provider is tested at, and at most, when nothing on the
+    // provider says otherwise. All three mirror server.js -
+    // DEFAULT_TESTS_AT_ONCE, MAX_TESTS_AT_ONCE and probe.js's
+    // DEFAULT_SAMPLE_SECONDS - and are only ever used to draw the panel
+    // and estimate a wait; the server decides what a run actually does.
+    //
+    // The first of these said 2 while the server said 1, from the commit
+    // that lowered the default and changed only one side of the wire.
+    // The dropdown offered 2 on a provider that had never been saved and
+    // the estimate promised that pace, and a run took them one at a time.
+    const DEFAULT_TESTS_AT_ONCE = 1;
     const DEFAULT_TEST_SECONDS = 20;
+    const MAX_TESTS_AT_ONCE = 4;
 
     // The provider a row's channel comes from. A row carrying no id was
     // saved before the account had more than one service, and the primary
@@ -2980,13 +2992,26 @@
       return !!providerOfRow(providerId);
     }
 
-    // How many of this provider's channels may be tested together, and
-    // how much of each is read. A reseller's numbers are the service's
-    // own and come with it; everyone else's are set on the provider.
+    // How many of this provider's channels may be tested together. Set on
+    // the provider whatever it is; a reseller only decides where the
+    // dropdown stops and where a new one starts. Mirrors testLimitsFor
+    // in server.js, which is what a run actually obeys.
     function testsAtOnceOf(provider) {
+      const asked = provider && provider.testsAtOnce;
+      return Math.min(asked || defaultTestsAtOnceOf(provider), testCeilingOf(provider));
+    }
+
+    // The most this service will carry. A reseller sells a known number
+    // of connections and bundles.js records it; nothing else does, so
+    // everyone else gets the app's own ceiling.
+    function testCeilingOf(provider) {
       const bundle = provider && bundleOf(provider);
-      if (bundle) return bundle.testsAtOnce || 1;
-      return (provider && provider.testsAtOnce) || DEFAULT_TESTS_AT_ONCE;
+      return Math.min(MAX_TESTS_AT_ONCE, (bundle && bundle.maxTestsAtOnce) || MAX_TESTS_AT_ONCE);
+    }
+
+    function defaultTestsAtOnceOf(provider) {
+      const bundle = provider && bundleOf(provider);
+      return (bundle && bundle.testsAtOnce) || DEFAULT_TESTS_AT_ONCE;
     }
 
     function testSecondsOf(provider) {
@@ -2996,7 +3021,13 @@
 
     function setProviderBundle(index, key) {
       if (!providerDraft || !providerDraft[index]) return;
-      providerDraft[index].bundle = key;
+      const provider = providerDraft[index];
+      provider.bundle = key;
+      // Brought under the new ceiling now rather than on the way to the
+      // server. A provider set to 4 and then ticked as Flix-Streams,
+      // which sells three, would otherwise show 3 in a dropdown holding
+      // 4 - and save the 4, for the server to quietly clamp.
+      if (provider.testsAtOnce) provider.testsAtOnce = testsAtOnceOf(provider);
       renderProviders();
     }
 

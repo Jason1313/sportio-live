@@ -231,7 +231,17 @@ const MAX_TESTS_AT_ONCE = 4;
 // fast - it makes every second probe fail, or takes the slot away from
 // whoever is watching. An account that knows its plan has room turns it
 // up.
+//
+// A reseller is the exception, and the only provider the app knows
+// anything about: bundles.js records what its service sells, so a new
+// Flix-Streams provider starts on that entry's own default rather than
+// on this guess.
 const DEFAULT_TESTS_AT_ONCE = 1;
+
+function defaultTestsAtOnceFor(provider) {
+  const bundle = provider && bundles.bundleFor(provider.bundle);
+  return (bundle && bundle.testsAtOnce) || DEFAULT_TESTS_AT_ONCE;
+}
 
 function makeProviderId() {
   return `p${uuidv4().replace(/-/g, '').slice(0, 10)}`;
@@ -255,11 +265,14 @@ function normaliseProvider(raw, kind, index) {
   // How many channels of this provider may be tested together. Only the
   // person paying for the subscription knows how many connections it
   // allows, and guessing high does not make a run slow - it makes the
-  // provider drop the stream they are watching. See testLimitsFor.
+  // provider drop the stream they are watching. A reseller is the one
+  // case where the number sold is known, and it caps this. See
+  // testLimitsFor and testCeilingFor.
   const asked = Math.floor(Number(raw.testsAtOnce));
+  const ceiling = testCeilingFor({ bundle });
   const testsAtOnce = Number.isFinite(asked) && asked > 0
-    ? Math.min(MAX_TESTS_AT_ONCE, asked)
-    : DEFAULT_TESTS_AT_ONCE;
+    ? Math.min(ceiling, asked)
+    : Math.min(ceiling, defaultTestsAtOnceFor({ bundle }));
 
   if (kind === 'm3u') {
     const playlistUrl = str(raw.playlistUrl) || str(raw.m3u && raw.m3u.playlistUrl);
@@ -378,8 +391,31 @@ function isResellerProvider(provider) {
 // is not a fact about anybody else's.
 function testLimitsFor(provider) {
   const bundle = provider && bundles.bundleFor(provider.bundle);
-  if (bundle) return { atOnce: bundle.testsAtOnce || 1, seconds: bundle.testSeconds };
-  return { atOnce: (provider && provider.testsAtOnce) || DEFAULT_TESTS_AT_ONCE, seconds: 0 };
+  const asked = provider && provider.testsAtOnce;
+  if (bundle) {
+    return {
+      atOnce: Math.min(asked || bundle.testsAtOnce || 1, testCeilingFor(provider)),
+      seconds: bundle.testSeconds,
+    };
+  }
+  return { atOnce: Math.min(asked || DEFAULT_TESTS_AT_ONCE, MAX_TESTS_AT_ONCE), seconds: 0 };
+}
+
+// The most connections this provider may be asked for at once.
+//
+// A reseller's is the number its service sells, from bundles.js - asking
+// Flix-Streams for a fourth is asking for a connection that does not
+// exist, and the refusal comes back looking like a dead channel. Anyone
+// else gets the app's own ceiling, since there is nothing to read the
+// real one off.
+//
+// Applied on the way in AND on the way out, because a provider can be
+// marked as a reseller after its number was stored: an ordinary provider
+// set to 4 and then ticked as Flix-Streams has a 4 on disk and a ceiling
+// of 3, and the run is the place that must not overrun it.
+function testCeilingFor(provider) {
+  const bundle = provider && bundles.bundleFor(provider.bundle);
+  return Math.min(MAX_TESTS_AT_ONCE, (bundle && bundle.maxTestsAtOnce) || MAX_TESTS_AT_ONCE);
 }
 
 // Every streamcheck table this account names, deduplicated. Used by the
@@ -425,7 +461,7 @@ function describeProvider(provider, { withConnection = false, withSecrets = fals
     kind: provider.kind,
     streamcheckProvider: provider.streamcheckProvider || '',
     bundle: provider.bundle || '',
-    testsAtOnce: provider.testsAtOnce || DEFAULT_TESTS_AT_ONCE,
+    testsAtOnce: provider.testsAtOnce || defaultTestsAtOnceFor(provider),
   };
   if (provider.kind === 'm3u') {
     return (withConnection || withSecrets)
@@ -6736,6 +6772,9 @@ function describeBundles() {
     key: bundle.key,
     label: bundle.label,
     testsAtOnce: bundle.testsAtOnce || 1,
+    // The ceiling the provider's own dropdown stops at - how many
+    // connections this service sells.
+    maxTestsAtOnce: bundle.maxTestsAtOnce || bundle.testsAtOnce || 1,
     // What a test will actually read, for the page's time estimates - the
     // environment override included, so the estimate matches the wait.
     testSeconds: probe.sampleSecondsFor(bundle.testSeconds),

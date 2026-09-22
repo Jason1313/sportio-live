@@ -27,17 +27,21 @@
 // One entry per reseller. Adding another is an entry here and nothing
 // else.
 //
-// `testsAtOnce` is how many channels may be tested together on one
-// login. Flix-Streams allows three connections per login; testing takes
-// two and leaves one, so somebody can go on watching while a run is
-// under way. Taking all three would make every run a reason the stream
-// they are watching drops.
+// `maxTestsAtOnce` is how many connections the service sells on one
+// login, and `testsAtOnce` how many of them a test run takes when
+// nobody has said otherwise. Flix-Streams sells three; two is the
+// default because it leaves one, so somebody can go on watching while a
+// run is under way, and taking all three would make every run a reason
+// the stream they are watching drops.
 //
-// It lives here rather than on the account because it is a fact about
-// the service, the same for everybody who buys it. An ordinary provider
-// carries the same number on the provider itself, where the account sets
-// it - nobody but the subscriber knows what their plan allows. See
-// testLimitsFor in server.js, which is where the two meet.
+// The default is a default and not a rule. Somebody with nobody else
+// watching wants the third connection and a run that finishes half as
+// fast again; somebody sharing the login wants one. Both set it on the
+// provider, the same field and the same dropdown an ordinary provider
+// uses - what the reseller entry decides is the ceiling that dropdown
+// stops at, because the number of connections sold IS a fact about the
+// service and the same for everybody who buys it. See testLimitsFor in
+// server.js, which is where the two meet.
 //
 // `testSeconds` is how much of a stream a test reads. Ten rather than the
 // default twenty: resolution and frame rate - which decide whether a
@@ -57,6 +61,7 @@ const BUNDLES = [
     key: 'flix-streams',
     label: 'Flix-Streams',
     testsAtOnce: 2,
+    maxTestsAtOnce: 3,
     testSeconds: 10,
     folders: [
       { prefix: 'Strong8K', label: 'Strong' },
