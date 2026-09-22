@@ -2,13 +2,20 @@
 //
 // This came out once, on 2026-08-29, when streamcheck.pro's published
 // sweeps replaced it: they cover a whole provider in one request and say
-// which channels are dead. It is back for the one kind of provider those
-// sweeps cannot describe - a reseller like Flix-Streams, which renumbers
-// every channel so no published id matches, and whose names only look
-// like they line up. Matching them by name put a 1080p60 badge on FOX 28
-// Cedar Rapids, which plays at 720p60: the name found a different Strong
-// feed of the same station. Opening the stream is the only reading that
-// cannot be about some other feed.
+// which channels are dead. It came back for the one kind of provider
+// those sweeps cannot describe - a reseller like Flix-Streams, which
+// renumbers every channel so no published id matches, and whose names
+// only look like they line up. Matching them by name put a 1080p60 badge
+// on FOX 28 Cedar Rapids, which plays at 720p60: the name found a
+// different Strong feed of the same station. Opening the stream is the
+// only reading that cannot be about some other feed.
+//
+// It is open to every provider now, not only the ones with nothing else.
+// A sweep says what a channel was on the day it ran, over somebody
+// else's connection; a test says what this account gets from that stream
+// now. Those are different questions, and the second one is the one
+// somebody is asking when they open a channel and watch it stutter.
+// Where both readings exist, server.js keeps whichever was taken later.
 //
 // Only the measuring came back. Judging a reading - the bands, the badge
 // line, the score - stayed in quality.js, so a tested channel and a
@@ -40,7 +47,8 @@ const FFPROBE_BIN = process.env.FFPROBE_PATH || 'ffprobe';
 //
 // A caller can ask for less - a reseller's testSeconds in bundles.js -
 // and the environment variable, when set, wins over both, because it is
-// the operator saying what their provider needs.
+// the operator saying what their provider needs. An ordinary provider
+// asks for nothing and gets the twenty.
 const DEFAULT_SAMPLE_SECONDS = 20;
 const ENV_SAMPLE_SECONDS = Number(process.env.PROBE_SAMPLE_SECONDS) || 0;
 

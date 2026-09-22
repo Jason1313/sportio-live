@@ -217,6 +217,19 @@ const XTREAM_STREAM_FORMATS = ['m3u8', 'ts'];
 
 const MAX_PROVIDERS = 4;
 
+// The most connections a provider may be asked to carry at once while
+// its channels are being tested. Four rather than a bigger number
+// because the ceiling is not the app's to raise: every slot taken is one
+// the subscription cannot give to somebody watching, and a plan
+// generous enough to want more than four is not the one this setting is
+// protecting.
+const MAX_TESTS_AT_ONCE = 4;
+
+// Two, which is what the nightly link check has always opened on every
+// provider - see LINK_CHECK_AT_ONCE. An account on a single-connection
+// plan turns it down to one and nothing else changes.
+const DEFAULT_TESTS_AT_ONCE = 2;
+
 function makeProviderId() {
   return `p${uuidv4().replace(/-/g, '').slice(0, 10)}`;
 }
@@ -232,9 +245,18 @@ function normaliseProvider(raw, kind, index) {
   const streamcheckProvider = str(raw.streamcheckProvider);
   // A reseller carrying other services under this one login, named by its
   // key in bundles.BUNDLES, or '' for an ordinary provider. Set, it
-  // overrides streamcheckProvider: a reseller's channels are tested
-  // rather than looked up. See isTestedProvider.
+  // overrides streamcheckProvider: there is no published table keyed by
+  // a reseller's ids, so testing is the only reading its channels have.
+  // See isResellerProvider.
   const bundle = bundles.bundleFor(raw.bundle) ? str(raw.bundle) : '';
+  // How many channels of this provider may be tested together. Only the
+  // person paying for the subscription knows how many connections it
+  // allows, and guessing high does not make a run slow - it makes the
+  // provider drop the stream they are watching. See testLimitsFor.
+  const asked = Math.floor(Number(raw.testsAtOnce));
+  const testsAtOnce = Number.isFinite(asked) && asked > 0
+    ? Math.min(MAX_TESTS_AT_ONCE, asked)
+    : DEFAULT_TESTS_AT_ONCE;
 
   if (kind === 'm3u') {
     const playlistUrl = str(raw.playlistUrl) || str(raw.m3u && raw.m3u.playlistUrl);
@@ -244,7 +266,7 @@ function normaliseProvider(raw, kind, index) {
     // does - an unused copy of a credential is not worth keeping. An
     // account stored with one sheds it the next time it is saved.
     return {
-      id, label, kind: 'm3u', streamcheckProvider, bundle,
+      id, label, kind: 'm3u', streamcheckProvider, bundle, testsAtOnce,
       playlistUrl,
     };
   }
@@ -253,7 +275,7 @@ function normaliseProvider(raw, kind, index) {
   const url = str(src.url).replace(/\/+$/, '');
   if (!url) return null;
   return {
-    id, label, kind: 'xtream', streamcheckProvider, bundle,
+    id, label, kind: 'xtream', streamcheckProvider, bundle, testsAtOnce,
     url,
     username: str(src.username),
     password: typeof src.password === 'string' ? src.password : '',
@@ -329,11 +351,32 @@ function providerLabelFor(user, providerId) {
 }
 
 // A reseller renumbers every channel, so nothing published describes its
-// channels and they are measured by testing instead - see bundles.js and
-// probe.js. Everything that treats a provider differently for that
-// reason asks this.
-function isTestedProvider(provider) {
+// channels - see bundles.js. Everything that treats a provider
+// differently for that reason asks this.
+//
+// It used to be called isTestedProvider, back when a reseller was the
+// only provider whose channels could be tested. Testing is open to every
+// provider now, so the old name described the wrong thing: what is still
+// true of a reseller alone is that there is no published table to read,
+// which is why auto-pick leaves its links alone and why a table chosen
+// for it would be stored and never looked at.
+function isResellerProvider(provider) {
   return !!(provider && bundles.bundleFor(provider.bundle));
+}
+
+// How a provider may be tested: how many probes its login will carry at
+// once, and how much stream each one reads.
+//
+// A reseller's numbers come from bundles.js, which is where that
+// service's own connection limit is written down. Everyone else's come
+// from the account - see normaliseProvider - and the read length falls
+// through to probe.js's default of twenty seconds, since the ten a
+// Flix-Streams test reads was chosen against that service's pacing and
+// is not a fact about anybody else's.
+function testLimitsFor(provider) {
+  const bundle = provider && bundles.bundleFor(provider.bundle);
+  if (bundle) return { atOnce: bundle.testsAtOnce || 1, seconds: bundle.testSeconds };
+  return { atOnce: (provider && provider.testsAtOnce) || DEFAULT_TESTS_AT_ONCE, seconds: 0 };
 }
 
 // Every streamcheck table this account names, deduplicated. Used by the
@@ -345,7 +388,7 @@ function isTestedProvider(provider) {
 // streamcheckLookup exists to avoid.
 function streamcheckTablesFor(user) {
   return [...new Set(providersOf(user)
-    .filter(provider => !isTestedProvider(provider))
+    .filter(provider => !isResellerProvider(provider))
     .map(provider => provider.streamcheckProvider)
     .filter(Boolean))];
 }
@@ -379,6 +422,7 @@ function describeProvider(provider, { withConnection = false, withSecrets = fals
     kind: provider.kind,
     streamcheckProvider: provider.streamcheckProvider || '',
     bundle: provider.bundle || '',
+    testsAtOnce: provider.testsAtOnce || DEFAULT_TESTS_AT_ONCE,
   };
   if (provider.kind === 'm3u') {
     return (withConnection || withSecrets)
@@ -2005,7 +2049,7 @@ app.post('/api/networks/autopick', async (req, res) => {
     // holding one says why it is not being picked from rather than
     // looking like a provider with no data.
     providers: providersOf(user).map(entry => {
-      const tested = isTestedProvider(entry);
+      const tested = isResellerProvider(entry);
       const table = tested ? '' : (entry.streamcheckProvider || '');
       return {
         id: entry.id,
@@ -2016,7 +2060,7 @@ app.post('/api/networks/autopick', async (req, res) => {
         runDate: streamcheckRunDate(table),
       };
     }),
-    perProviderLimit: autoPickLimitFor(providersOf(user).filter(p => !isTestedProvider(p)).length),
+    perProviderLimit: autoPickLimitFor(providersOf(user).filter(p => !isResellerProvider(p)).length),
     reason: outcome.reason || '',
     loaded: tables.some(table => streamcheck.isLoaded(table)),
     runDate: accountRunDate(user),
@@ -4688,16 +4732,42 @@ function streamcheckLookup(user) {
 
 // How one provider's channels are read, or null when it has nothing to
 // read from.
+//
+// Two sources, and every provider can have both now that testing is not
+// a reseller's privilege. A reseller has only the tests, because no
+// published table is keyed by its ids; anyone else has a sweep covering
+// their whole playlist and tests on whichever channels somebody has
+// opened by hand.
 function publishedReaderFor(user, provider) {
-  if (isTestedProvider(provider)) {
-    const results = readTestResults(user);
-    if (Object.keys(results).length === 0) return null;
-    return (entry, url) => testRecordFor(results[testKey(provider.id, url)]);
-  }
+  const results = readTestResults(user);
+  const hasTests = Object.keys(results).length > 0;
+  const tested = (url) => testRecordFor(results[testKey(provider.id, url)]);
+  const testsOnly = hasTests ? ((entry, url) => tested(url)) : null;
+
+  if (isResellerProvider(provider)) return testsOnly;
 
   const table = provider.streamcheckProvider;
-  if (!table || !streamcheck.isLoaded(table)) return null;
-  return (entry, url) => streamcheck.lookupCached(table, networks.streamIdFromUrl(url));
+  if (!table || !streamcheck.isLoaded(table)) return testsOnly;
+
+  return (entry, url) => {
+    const published = streamcheck.lookupCached(table, networks.streamIdFromUrl(url));
+    // An account that has never tested anything pays nothing for this.
+    // The reader runs over every candidate of every network on a preview,
+    // and a second stream id parsed per channel to look up a table that
+    // is empty is work for no answer.
+    if (!hasTests) return published;
+    const test = tested(url);
+    if (!test) return published;
+    if (!published) return test;
+    // Whichever was taken later. A test is the more specific reading -
+    // this account's own connection to this exact stream, and the only
+    // one that can tell an interlaced picture from a progressive one -
+    // but a sweep published since is the newer word on whether the
+    // channel is alive at all, and that is the fact auto-pick turns on.
+    // A test held above a fresher sweep would keep a channel that has
+    // gone dark since looking like the best one there is.
+    return (test.runDate || '') >= (published.runDate || '') ? test : published;
+  };
 }
 
 // The published-quality filter as a predicate, or null when there is
@@ -5173,7 +5243,9 @@ function testRecordFor(result) {
 
 // What the picker needs to know about one channel's test.
 //
-//   testable  its provider is one whose channels are tested
+//   testable  its provider can be tested at all, which every provider
+//             with a login now can - it is still sent, because a row
+//             whose provider has since been deleted has nothing to open
 //   tested    it has been
 //   passes    the test met TEST_MIN_HEIGHT and TEST_MIN_RATE
 //   hidden    it failed and nobody has asked to see it again
@@ -5211,8 +5283,8 @@ function testBandFor(result, bpp) {
 }
 
 function testStateFor(user, providerId, url) {
-  const testable = isTestedProvider(providerFor(user, providerId));
-  const result = testable && url
+  const testable = !!providerFor(user, providerId);
+  const result = url
     ? readTestResults(user)[testKey(providerIdFor(user, providerId), url)]
     : null;
   if (!result) return { testable, tested: false, passes: false, hidden: false };
@@ -5287,17 +5359,19 @@ app.post('/api/networks/test', async (req, res) => {
   if (!channel) return res.status(400).json({ error: 'That stream is not in your playlist.' });
 
   const provider = providerFor(auth.user, channel.providerId);
-  if (!isTestedProvider(provider)) {
-    return res.status(400).json({
-      error: `${provider ? provider.label : 'That provider'} uses published quality data, so its channels are not tested.`,
-    });
-  }
+  if (!provider) return res.status(400).json({ error: 'That stream has no provider to open it with.' });
 
-  const bundle = bundles.bundleFor(provider.bundle);
+  // Open to every provider, not only a reseller. A published sweep
+  // describes a channel as the sweep found it, days ago and over
+  // somebody else's connection; a test says what this account gets when
+  // it opens that stream now. The two used to be one or the other by
+  // provider - see publishedReaderFor, which now takes whichever is the
+  // later word.
+  const limits = testLimitsFor(provider);
   const result = await probe.probeStream(url, {
     lane: connectionKeyFor(provider),
-    limit: bundle.testsAtOnce,
-    seconds: bundle.testSeconds,
+    limit: limits.atOnce,
+    seconds: limits.seconds,
   });
   const stored = storeTestResult(auth.user, provider.id, url, result);
   saveUserConfigs();
@@ -5549,10 +5623,9 @@ async function runLinkCheck(user, progress) {
   progress.total = targets.size;
   const readings = new Map();
   const probeOne = async (key, target, atOnce) => {
-    const bundle = bundles.bundleFor(target.provider.bundle);
     const result = await probe.probeStream(target.url, {
       lane: connectionKeyFor(target.provider),
-      limit: Math.min(atOnce, bundle ? (bundle.testsAtOnce || 1) : atOnce),
+      limit: Math.min(atOnce, testLimitsFor(target.provider).atOnce),
       seconds: LINK_CHECK_SECONDS,
     });
     readings.set(key, result);
@@ -5577,12 +5650,14 @@ async function runLinkCheck(user, progress) {
     progress.done++;
   }
 
-  // Stored as tests where the provider is one whose channels are tested,
-  // so the dashboard's badges and picker read this morning's result. An
-  // ordinary provider's badges come from its published sweep, and a
-  // stored test there would be read by nothing.
+  // Stored as tests, whatever the provider, so the dashboard's badges and
+  // picker read this morning's result rather than the sweep it predates.
+  // This used to be a reseller's alone, on the grounds that a stored test
+  // on anybody else would be read by nothing; publishedReaderFor reads
+  // them for every provider now, and this is the freshest reading the
+  // app ever takes of a link that matters.
   for (const [key, target] of targets) {
-    if (isTestedProvider(target.provider)) storeTestResult(user, target.provider.id, target.url, readings.get(key));
+    storeTestResult(user, target.provider.id, target.url, readings.get(key));
   }
 
   // Ordered against the list as it is NOW, not as it was when the run
@@ -5912,7 +5987,7 @@ function autoPickLimitFor(providerCount) {
 // be tested rather than the best one there is.
 function channelsByProvider(user, channels) {
   const groups = providersOf(user)
-    .filter(provider => !isTestedProvider(provider))
+    .filter(provider => !isResellerProvider(provider))
     .map(provider => ({ providerId: provider.id, channels: [] }));
   if (groups.length === 0) return [];
   const byId = new Map(groups.map(group => [group.providerId, group]));
@@ -6102,13 +6177,19 @@ function computeAutoPick(user, channels, options = {}) {
     });
     const current = (user.networkLinks || {})[key] || [];
 
-    // Links from a tested provider stay, ahead of the picks. Auto-pick
-    // rewrites a network's whole list, and on an account holding a
-    // reseller beside an ordinary provider that would throw away channels
-    // somebody tested and chose by hand, to replace them with ones picked
-    // from the other service alone.
+    // A reseller's links stay, ahead of the picks. Auto-pick rewrites a
+    // network's whole list, and on an account holding a reseller beside
+    // an ordinary provider that would throw away channels somebody tested
+    // and chose by hand, to replace them with ones picked from the other
+    // service alone.
+    //
+    // Only a reseller's. An ordinary provider's links can be tested by
+    // hand too now, but that service is one auto-pick CAN judge - it has
+    // a sweep covering the whole playlist, and a hand test on a few of
+    // its channels is folded into that ranking rather than standing
+    // outside it. See publishedReaderFor.
     const kept = current
-      .filter(link => isTestedProvider(providerFor(user, link.providerId)))
+      .filter(link => isResellerProvider(providerFor(user, link.providerId)))
       .map(link => ({ ...link, band: 'kept - tested by hand', matchedBy: 'kept' }));
     const entries = [...kept, ...outcome.picks.map(autoPickEntry)]
       .slice(0, networks.MAX_LINKS_PER_NETWORK);
@@ -6301,11 +6382,11 @@ app.post('/api/streamcheck/select', async (req, res) => {
   const { providerId, table } = req.body;
   const provider = providersOf(auth.user).find(entry => entry.id === providerId);
   if (!provider) return res.status(400).json({ error: 'No such provider on this account.' });
-  // A reseller's channels are tested rather than looked up, so a table
-  // chosen here would be stored and never read - a choice that looks like
-  // it took and does nothing.
-  if (isTestedProvider(provider)) {
-    return res.status(400).json({ error: `${provider.label} is set up as ${bundles.bundleFor(provider.bundle).label}, whose channels are tested rather than read from published data.` });
+  // No published table is keyed by a reseller's ids, so one chosen here
+  // would be stored and never read - a choice that looks like it took and
+  // does nothing.
+  if (isResellerProvider(provider)) {
+    return res.status(400).json({ error: `${provider.label} is set up as ${bundles.bundleFor(provider.bundle).label}, which renumbers every channel - no published table describes it, so its channels are measured by testing them.` });
   }
   if (typeof table !== 'string') {
     return res.status(400).json({ error: 'A published table name is required.' });

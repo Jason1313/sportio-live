@@ -2134,7 +2134,7 @@
       // how many it would take from each service before it is pressed.
       const best = bestTestedFor(key);
       const bestBtn = best.picks.length > 0
-        ? `<button onclick="applyBestTested('${key}')" title="Replace this network's links with the best tested channels, up to five from each service, best first"
+        ? `<button onclick="applyBestTested('${key}')" title="Replace this network's links with the best channels that passed a test, up to five from each service, best first"
                    class="text-[11px] font-bold text-[#7fc98a] hover:text-[#a6e0ae] transition">
              <i class="fa-solid fa-wand-magic-sparkles mr-1"></i>Use best tested (${best.counts.join(' + ')})
            </button>`
@@ -2699,7 +2699,7 @@
         const bundle = bundleOf(pr);
         const control = bundle
           ? `<span class="flex-1 text-[11px] text-[#e6e6e6]/60 px-1 py-2">
-               ${escapeHtml(bundle.label)}: channels are tested with ffprobe, not read from published data
+               ${escapeHtml(bundle.label)}: renumbers its channels, so no published table covers them &mdash; test them instead
              </span>`
           : `<select onchange="saveStreamcheckTable(${quoteAttr(pr.id)}, this.value)"
                   class="flex-1 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
@@ -2726,7 +2726,7 @@
           : `${label}: ${table} selected, loading now.`;
       };
       const lines = providers.map(pr => {
-        if (bundleOf(pr)) return `${pr.label}: tested with ffprobe.`;
+        if (bundleOf(pr)) return `${pr.label}: no published table covers it, so its channels are tested.`;
         if (!pr.streamcheckProvider) return `${pr.label}: not using published data.`;
         return describeTable(pr.label, pr.streamcheckProvider);
       });
@@ -2815,7 +2815,7 @@
 
     function blankProvider() {
       const kind = (activeUser && activeUser.connectionType === 'm3u') ? 'm3u' : 'xtream';
-      return { id: '', label: '', kind, streamcheckProvider: '', bundle: '',
+      return { id: '', label: '', kind, streamcheckProvider: '', bundle: '', testsAtOnce: DEFAULT_TESTS_AT_ONCE,
                url: '', username: '', password: '', playlistUrl: '' };
     }
 
@@ -2876,6 +2876,16 @@
                    </select>
                  </label>`}
           ${bundleSwitches(pr, i)}
+          ${bundleOf(pr) ? '' : `
+            <label class="flex items-center gap-2 text-[10px] text-[#e6e6e6]/45">
+              Test
+              <select onchange="updateProviderField(${i}, 'testsAtOnce', Number(this.value))"
+                      class="bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-2 py-1 text-[11px] focus:border-[#3b8fc4] focus:outline-none">
+                ${[1, 2, 3, 4].map(n => `<option value="${n}" ${testsAtOnceOf(pr) === n ? 'selected' : ''}>${n}</option>`).join('')}
+              </select>
+              channel${testsAtOnceOf(pr) === 1 ? '' : 's'} at a time &mdash; each holds a connection to this
+              provider while it reads, so leave one free for watching
+            </label>`}
           ${pr.id && !bundleOf(pr) ? `<p class="text-[10px] text-[#e6e6e6]/35">
               Quality data: ${escapeHtml(pr.streamcheckProvider || 'none chosen')} &mdash; chosen under Quality data.
             </p>` : ''}
@@ -2904,21 +2914,51 @@
             <span>
               This is ${escapeHtml(b.label)}
               <span class="block text-[10px] text-[#e6e6e6]/35">
-                Channels are tested with ffprobe from each network section instead of read from
-                published data, and auto-pick leaves them alone.
+                It renumbers every channel, so no published table describes them and testing is the
+                only reading they have. Auto-pick leaves its links alone.
               </span>
             </span>
           </label>`;
       }).join('');
     }
 
-    // Whether a channel's provider is one whose channels are tested. Only
-    // those rows get a test checkbox: the server refuses to test the rest,
-    // which have published data instead.
-    function isTestedProviderId(providerId) {
+    // What a provider is tested at when nothing says otherwise: two
+    // channels at a time, reading twenty seconds each. Both mirror the
+    // server - DEFAULT_TESTS_AT_ONCE and probe.js's DEFAULT_SAMPLE_SECONDS
+    // - and are only ever used to draw the panel and estimate a wait; the
+    // server decides what a run actually does.
+    const DEFAULT_TESTS_AT_ONCE = 2;
+    const DEFAULT_TEST_SECONDS = 20;
+
+    // The provider a row's channel comes from. A row carrying no id was
+    // saved before the account had more than one service, and the primary
+    // is the only one it could have come from.
+    function providerOfRow(providerId) {
       const providers = (activeUser && activeUser.providers) || [];
-      const provider = providers.find(pr => pr.id === providerId) || providers[0];
-      return !!(provider && bundleOf(provider));
+      return providers.find(pr => pr.id === providerId) || providers[0] || null;
+    }
+
+    // Whether a row can be tested, which every row with a provider behind
+    // it now can. It was a reseller's alone, because a reseller was the
+    // only provider with no published data to read; a test is the newer
+    // and more specific reading on any service, so the server takes one
+    // from all of them.
+    function canTestProviderId(providerId) {
+      return !!providerOfRow(providerId);
+    }
+
+    // How many of this provider's channels may be tested together, and
+    // how much of each is read. A reseller's numbers are the service's
+    // own and come with it; everyone else's are set on the provider.
+    function testsAtOnceOf(provider) {
+      const bundle = provider && bundleOf(provider);
+      if (bundle) return bundle.testsAtOnce || 1;
+      return (provider && provider.testsAtOnce) || DEFAULT_TESTS_AT_ONCE;
+    }
+
+    function testSecondsOf(provider) {
+      const bundle = provider && bundleOf(provider);
+      return (bundle && bundle.testSeconds) || DEFAULT_TEST_SECONDS;
     }
 
     function setProviderBundle(index, key) {
@@ -4072,7 +4112,7 @@
       const running = !!networkTestRun;
       const rows = results.map((c, i) => {
         const test = c.test || {};
-        const testable = test.testable || isTestedProviderId(c.providerId);
+        const testable = test.testable || canTestProviderId(c.providerId);
         const lead = test.hidden
           ? `<button onclick="unhideNetworkChannel('${key}', ${i})" title="Show this channel again so it can be tested"
                      class="text-[10px] px-1.5 py-0.5 rounded border border-[#e6e6e6]/20 text-[#e6e6e6]/60 hover:text-[#e6e6e6] shrink-0">Unhide</button>`
@@ -4430,16 +4470,20 @@
     // ---- Best tested ---------------------------------------------------
     //
     // Fills a network with the best channels that passed their test: up
-    // to bestPerFolder from each of the reseller's services - five Strong
-    // and five Trex for Flix-Streams - then all of them ordered by quality
-    // alone, whichever service each is on. So the list can run Strong,
-    // Strong, Strong, Trex, Strong: slot order is the order a player
-    // tries, and it should try the best stream first.
+    // to five from each service - a reseller's folders counted apart,
+    // five Strong and five Trex for Flix-Streams, and one share per
+    // provider otherwise - then all of them ordered by quality alone,
+    // whichever service each is on. So the list can run Strong, Strong,
+    // Strong, Trex, Strong: slot order is the order a player tries, and
+    // it should try the best stream first.
     //
     // A service with fewer than five passes contributes what it has
-    // rather than letting the other fill its share. The split is the
+    // rather than letting the others fill its share. The split is the
     // point - five from each is what keeps half the list working when one
-    // service has a bad night.
+    // service has a bad night. It is the same reasoning auto-pick uses to
+    // give each provider its own block, and this is its hand-run twin:
+    // auto-pick ranks a whole network off the published sweep, this ranks
+    // what somebody chose to open.
 
     // Which of a reseller's services a channel plays from, by the folder
     // prefix on any of its categories.
@@ -4452,32 +4496,52 @@
       return null;
     }
 
+    // How many a service contributes when it is not a reseller naming its
+    // own number. Five, the same share auto-pick gives each provider.
+    const BEST_PER_SERVICE = 5;
+
     // Every channel this section knows has passed a test - the category
     // list when there is one, otherwise the current search results.
+    //
+    // A "service" is one of a reseller's folders where there is one, and
+    // the provider itself otherwise. Both are the same thing for the
+    // purpose here: a set of channels that go dark together, which is
+    // what the split protects against. Grouping by folder alone meant
+    // this button did nothing at all on an ordinary provider, since none
+    // of its rows sits in one.
     function bestTestedFor(key) {
       const source = networkCategoryChannels[key] || networkSearchResults[key] || [];
-      const providers = (activeUser && activeUser.providers) || [];
       const byService = new Map();
       const seen = new Set();
       for (const row of source) {
         if (!row.test || !row.test.tested || !row.test.passes || row.test.hidden) continue;
         if (seen.has(row.url)) continue;
         seen.add(row.url);
-        const provider = providers.find(pr => pr.id === row.providerId) || providers[0];
-        const bundle = provider && bundleOf(provider);
-        const folder = bundle && folderOfRow(bundle, row);
-        if (!folder) continue;
-        const service = `${provider.id}|${folder.prefix}`;
-        if (!byService.has(service)) byService.set(service, { bundle, folder, rows: [] });
+        const provider = providerOfRow(row.providerId);
+        if (!provider) continue;
+        const bundle = bundleOf(provider);
+        const folder = bundle ? folderOfRow(bundle, row) : null;
+        // A reseller channel in none of its folders cannot be said to
+        // play from either service, so it is left out rather than
+        // credited to a guess.
+        if (bundle && !folder) continue;
+        const service = `${provider.id}|${folder ? folder.prefix : ''}`;
+        if (!byService.has(service)) {
+          byService.set(service, {
+            take: (bundle && bundle.bestPerFolder) || BEST_PER_SERVICE,
+            label: folder ? folder.label : provider.label,
+            rows: [],
+          });
+        }
         byService.get(service).rows.push(row);
       }
 
       const picks = [];
       const counts = [];
-      for (const { bundle, folder, rows } of byService.values()) {
-        const best = rows.sort(compareQuality).slice(0, bundle.bestPerFolder || 5);
+      for (const { take, label, rows } of byService.values()) {
+        const best = rows.sort(compareQuality).slice(0, take);
         picks.push(...best);
-        counts.push(`${best.length} ${folder.label}`);
+        counts.push(`${best.length} ${label}`);
       }
       return { picks: picks.sort(compareQuality).slice(0, networkMaxLinks), counts };
     }
@@ -4696,35 +4760,38 @@
 
     // ---- Testing -------------------------------------------------------
     //
-    // Tick channels, then test them - as many at once as the provider
-    // allows, two for Flix-Streams. Each test holds a connection to the
+    // Tick channels, then test them - as many at once as the provider is
+    // set to allow, under Providers. Each test holds a connection to the
     // provider for about twenty seconds - it counts the bitrate off the
     // wire - and the server spaces their starts on top, so a run of twenty
     // is still a few minutes. That is why it is a selection and not a
     // button on the whole list.
+    //
+    // Every provider, not only a reseller. A published sweep describes a
+    // channel as it was found days ago over somebody else's connection;
+    // opening the stream says what this account gets from it now, and the
+    // server keeps whichever of the two is the later word.
     //
     // A channel that is not 1080p60 or 720p60 comes back hidden: greyed,
     // moved to the bottom and left out of Select all, with Unhide to put
     // it back. Only here - the watch portal's search shows it like any
     // other channel, since it may still be the only one showing the game.
 
-    // A test's cost is the stream it reads - the reseller's testSeconds -
-    // plus connecting and the gap the server keeps between starts. The
-    // overhead is a guess from a bursting provider, where a twenty-second
-    // read came back in about ten; one that paces in real time takes the
-    // full read, and this errs toward that.
+    // A test's cost is the stream it reads plus connecting and the gap the
+    // server keeps between starts. The overhead is a guess from a bursting
+    // provider, where a twenty-second read came back in about ten; one
+    // that paces in real time takes the full read, and this errs toward
+    // that.
     const TEST_OVERHEAD_SECONDS = 5;
 
+    // The slowest provider in the list, since a run holds until its last
+    // test comes back.
     function testSecondsFor(key) {
-      const providers = (activeUser && activeUser.providers) || [];
-      const rows = networkSearchResults[key] || [];
       let seconds = 0;
-      for (const row of rows) {
-        const provider = providers.find(pr => pr.id === row.providerId) || providers[0];
-        const bundle = provider && bundleOf(provider);
-        if (bundle) seconds = Math.max(seconds, bundle.testSeconds || 20);
+      for (const row of networkSearchResults[key] || []) {
+        seconds = Math.max(seconds, testSecondsOf(providerOfRow(row.providerId)));
       }
-      return (seconds || 20) + TEST_OVERHEAD_SECONDS;
+      return (seconds || DEFAULT_TEST_SECONDS) + TEST_OVERHEAD_SECONDS;
     }
 
     // Tests running side by side finish together, so the wait is the
@@ -4736,7 +4803,7 @@
 
     function testableRows(key) {
       return (networkSearchResults[key] || [])
-        .filter(c => !(c.test && c.test.hidden) && ((c.test && c.test.testable) || isTestedProviderId(c.providerId)));
+        .filter(c => !(c.test && c.test.hidden) && ((c.test && c.test.testable) || canTestProviderId(c.providerId)));
     }
 
     function buildTestBarHtml(key) {
@@ -4800,19 +4867,19 @@
       }
     }
 
-    // How many of these channels may be tested together - the provider's
-    // testsAtOnce, which the server holds to whatever this sends. The
-    // smallest across the providers involved, since a run that mixes two
-    // must not overrun the stricter one.
+    // How many of these channels may be tested together. The server sets
+    // its own lane from the provider and pays no attention to this - what
+    // this decides is how many the page has in flight, and a page running
+    // ahead of the lane would only pile up requests waiting on it.
+    //
+    // The smallest across the providers involved, since a run that mixes
+    // two must not overrun the stricter one.
     function testsAtOnceFor(urls, key) {
       const rows = networkSearchResults[key] || [];
-      const providers = (activeUser && activeUser.providers) || [];
       let limit = Infinity;
       for (const url of urls) {
         const row = rows.find(c => c.url === url);
-        const provider = providers.find(pr => pr.id === (row && row.providerId)) || providers[0];
-        const bundle = provider && bundleOf(provider);
-        limit = Math.min(limit, (bundle && bundle.testsAtOnce) || 1);
+        limit = Math.min(limit, testsAtOnceOf(providerOfRow(row && row.providerId)));
       }
       return Number.isFinite(limit) ? Math.max(1, limit) : 1;
     }

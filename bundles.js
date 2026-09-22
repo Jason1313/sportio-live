@@ -15,10 +15,14 @@
 // plays at 720p60. A reseller's channels are measured by ffprobe
 // instead, when somebody asks. See probe.js.
 //
-// Marking a provider as a reseller therefore means three things, all
-// decided in server.js: its channels can be tested, their readings come
-// from those tests rather than a published table, and auto-pick leaves
-// its links alone, because it has nothing trustworthy to pick with.
+// Marking a provider as a reseller means two things now, both decided in
+// server.js: testing is the ONLY reading its channels have, and auto-pick
+// leaves its links alone, because it has nothing trustworthy to pick
+// with. It used to mean a third - that its channels were the only ones
+// that could be tested at all - and that is no longer a reseller's
+// privilege. Every provider can be tested from a network section; what
+// makes this one different is that there is nothing else to compare the
+// answer against.
 
 // One entry per reseller. Adding another is an entry here and nothing
 // else.
@@ -28,6 +32,12 @@
 // two and leaves one, so somebody can go on watching while a run is
 // under way. Taking all three would make every run a reason the stream
 // they are watching drops.
+//
+// It lives here rather than on the account because it is a fact about
+// the service, the same for everybody who buys it. An ordinary provider
+// carries the same number on the provider itself, where the account sets
+// it - nobody but the subscriber knows what their plan allows. See
+// testLimitsFor in server.js, which is where the two meet.
 //
 // `testSeconds` is how much of a stream a test reads. Ten rather than the
 // default twenty: resolution and frame rate - which decide whether a
