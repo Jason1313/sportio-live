@@ -632,6 +632,17 @@ function rivalTerms(networkKey, overrides) {
 // candidates. In a folder nothing but NBC answers to, a channel that
 // answers to nobody is NBC.
 //
+// The order of the two name tests is the whole of getting this right,
+// and it is the order the group path already uses: a channel answering
+// to THIS network is settled by that, and the rival check never runs on
+// it. "US: FOX SPORTS 1" carries the word Fox, so asking the rivals
+// first threw FS1's own channel out of FS1 - and, because a rival match
+// is also what marks a folder shared, made the folder look like
+// somebody else's on the way. Same for "US: CBS SPORTS NETWORK" and
+// CBSSN. Both came back with nothing at all from a sports folder they
+// were sitting in. What keeps FOX from taking the FS1 channel is FOX's
+// own exclusions, which is where that job has always been.
+//
 // Exclusions run first and over everything, and a channel this network
 // has disowned is not evidence about whose folder it is - "US NBC (KVEA)
 // Telemundo" sits in NBC's own exclusions, and letting it count would
@@ -657,19 +668,29 @@ function categoryCandidates(channels, categories, rules) {
     if (hasAnyTerm(tokens, rules.exclude, false)) continue;
     if (foreign) continue;
 
-    // Another network by name. Out either way - this is the same guard
-    // the group path carries - and on the way out it settles what kind
-    // of folder this is.
+    // This network by name, which settles it whatever else the name
+    // carries.
+    if (hasAnyTerm(tokens, rules.include, rules.numbered)) {
+      kept.push({ channel, mine: true });
+      continue;
+    }
+
+    // Somebody else's by name. Out, and on the way out it says this
+    // folder holds more than one network.
     if (rules.rivals.some(r => hasAnyTerm(tokens, r.words, r.numbered))) {
       shared = true;
       continue;
     }
-    kept.push({ channel, tokens });
+
+    // Answers to nobody. Whether that makes it this network's depends on
+    // whose folder this turns out to be, which is not known until the
+    // whole folder has been walked.
+    kept.push({ channel, mine: false });
   }
 
   if (!shared) return kept.map(({ channel }) => ({ channel, matchedBy: 'category' }));
   return kept
-    .filter(({ tokens }) => hasAnyTerm(tokens, rules.include, rules.numbered))
+    .filter(({ mine }) => mine)
     .map(({ channel }) => ({ channel, matchedBy: 'category+name' }));
 }
 

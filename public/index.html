@@ -303,22 +303,22 @@
         </div>
       </div>
 
-      <!-- The folders every broadcast section draws its channels from,
+      <!-- The folders every network section draws its channels from,
            unless that section names its own. Not the panel above: that
            one decides what a SEARCH may look in, and narrowing it hides
            channels everywhere. This narrows nothing - it fills in the
-           picker each broadcast section has, because a provider files
-           every network's affiliates in the same two or three folders
-           and ticking them six times over is the same answer six times.
-           -->
+           picker each section already has, because an account's channels
+           live in the same two or three folders whichever section is
+           asking, and ticking them once per section is the same answer
+           twenty-odd times. -->
       <div id="default-categories-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-4">
-        <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Default categories for broadcast networks</h4>
+        <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Default categories for every network</h4>
         <p class="text-[11px] text-[#e6e6e6]/45 mb-3 leading-relaxed">
-          Tick the categories your local affiliates live in and every broadcast section &mdash;
-          <span id="default-categories-networks" class="text-[#e6e6e6]/60"></span> &mdash; lists its
+          Tick the categories your channels live in and every network section below lists its
           channels from them, and auto-pick chooses from them. A section that names its own
-          categories keeps those. Searching is not affected: this adds nothing to
-          <strong>Search categories</strong> and takes nothing away.
+          categories keeps those &mdash; open it and use <strong>Just for this one</strong>.
+          Searching is not affected: this adds nothing to <strong>Search categories</strong>
+          and takes nothing away.
         </p>
         <div class="flex gap-2 mb-2">
           <input type="text" id="default-categories-filter" oninput="onDefaultCategoryFilter(this.value)"
@@ -4246,19 +4246,11 @@
     function networkCategoriesOf(key) {
       const own = ((activeUser && activeUser.networkCategories) || {})[key];
       if (own && own.length) return own;
-      return defaultCategoriesReach(key) ? defaultNetworkCategories() : [];
+      return defaultNetworkCategories();
     }
 
     function defaultNetworkCategories() {
       return (activeUser && activeUser.defaultNetworkCategories) || [];
-    }
-
-    // Broadcast sections only - see DEFAULT_CATEGORY_KINDS in server.js
-    // for why. The kind comes from the server's own registry rather than
-    // a list written out here, so a network added there reaches the
-    // default without this having to be told.
-    function defaultCategoriesReach(key) {
-      return networkKindOf(key) === 'broadcast';
     }
 
     // Whether this section is living on the default rather than on
@@ -4266,8 +4258,7 @@
     // differently in that case: "Change" on a default would suggest the
     // change stays here, and it would not.
     function usingDefaultCategories(key) {
-      const own = ((activeUser && activeUser.networkCategories) || {})[key];
-      return !(own && own.length) && defaultCategoriesReach(key) && defaultNetworkCategories().length > 0;
+      return !usingOwnCategories(key) && defaultNetworkCategories().length > 0;
     }
 
     function buildNetworkCategoriesHtml(key) {
@@ -4375,10 +4366,10 @@
     // ---- Default categories ---------------------------------------
     //
     // The same picker as a section's own, over one list that stands in
-    // for all six broadcast sections. Held as a draft while the panel is
-    // open and written on Save, like every other panel up here - these
-    // decide what six sections list and what auto-pick picks from, and a
-    // half-ticked list must not be live.
+    // for every section that has not named its own. Held as a draft
+    // while the panel is open and written on Save, like every other
+    // panel up here - these decide what every section lists and what
+    // auto-pick picks from, and a half-ticked list must not be live.
 
     let defaultCategoryDraft = null;   // a Set while the panel is open
     let defaultCategoryFilter = '';
@@ -4394,16 +4385,15 @@
       defaultCategoryDraft = new Set(defaultNetworkCategories());
       defaultCategoryFilter = '';
       document.getElementById('default-categories-filter').value = '';
-      // Named from the server's own registry, so this cannot claim to
-      // cover a network the server does not reach.
-      document.getElementById('default-categories-networks').textContent =
-        broadcastNetworks().map(n => n.label).join(', ');
       renderDefaultCategories();
       if (await ensurePlaylistCategories()) renderDefaultCategories();
     }
 
-    function broadcastNetworks() {
-      return (networkRegistry || []).filter(n => n.kind === 'broadcast');
+    // Every section the default reaches, which is every section there
+    // is - a section that named its own folders keeps them, and that is
+    // the only exception.
+    function defaultedNetworks() {
+      return networkRegistry || [];
     }
 
     function renderDefaultCategories() {
@@ -4439,14 +4429,14 @@
             : '');
 
       // Counted over the sections that would actually take them. A
-      // section holding its own list keeps it, so "every broadcast
-      // network" would be a promise this cannot keep on that account.
-      const own = broadcastNetworks().filter(nw => usingOwnCategories(nw.key)).length;
-      const reached = broadcastNetworks().length - own;
+      // section holding its own list keeps it, so "every section" would
+      // be a promise this cannot keep on that account.
+      const own = defaultedNetworks().filter(nw => usingOwnCategories(nw.key)).length;
+      const reached = defaultedNetworks().length - own;
       const n = defaultCategoryDraft.size;
       summary.textContent = n === 0
-        ? 'Nothing ticked - each broadcast section falls back to its own categories, or to searching the whole playlist.'
-        : `${n} categor${n === 1 ? 'y' : 'ies'} for ${reached} broadcast section${reached === 1 ? '' : 's'}`
+        ? 'Nothing ticked - each section falls back to its own categories, or to searching the whole playlist.'
+        : `${n} categor${n === 1 ? 'y' : 'ies'} for ${reached} section${reached === 1 ? '' : 's'}`
           + (own ? `, with ${own} keeping ${own === 1 ? 'its own' : 'their own'}.` : '.');
     }
 
@@ -4503,13 +4493,13 @@
       // on the OLD default and are now on nothing. Each is put back in
       // step rather than the whole page redrawn, so a section left open
       // keeps its search box and its scroll.
-      const touched = broadcastNetworks().filter(nw => !usingOwnCategories(nw.key)).map(nw => nw.key);
+      const touched = defaultedNetworks().filter(nw => !usingOwnCategories(nw.key)).map(nw => nw.key);
       for (const key of touched) await reloadNetworkCategorySection(key);
 
       const n = defaultNetworkCategories().length;
       showStatus(n === 0
         ? (had ? 'Default categories cleared.' : 'No default categories set.')
-        : `${n} default categor${n === 1 ? 'y' : 'ies'} for ${touched.length} broadcast section${touched.length === 1 ? '' : 's'}.`);
+        : `${n} default categor${n === 1 ? 'y' : 'ies'} for ${touched.length} section${touched.length === 1 ? '' : 's'}.`);
       renderDefaultCategories();
     }
 
@@ -4560,10 +4550,10 @@
       delete networkCategoryPicker[key];
       await reloadNetworkCategorySection(key);
 
-      // Saving nothing does not leave a broadcast section with nothing -
-      // an empty override is not stored, so the account-wide default
-      // comes straight back. Said out loud, because a Save that appears
-      // to do nothing is otherwise read as a Save that failed.
+      // Saving nothing does not leave a section with nothing - an empty
+      // override is not stored, so the account-wide default comes
+      // straight back. Said out loud, because a Save that appears to do
+      // nothing is otherwise read as a Save that failed.
       if (cleared && usingDefaultCategories(key)) {
         showStatus(`${networkLabelOf(key)} is back on your default categories.`);
       }

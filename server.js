@@ -5810,19 +5810,19 @@ function readNetworkCategories(user) {
   return out;
 }
 
-// One list standing in for every broadcast network that has not named
-// its own.
+// One list standing in for every network that has not named its own.
 //
-// Broadcast only, and that is the whole point of it rather than a
-// limitation. A provider files ABC, CBS, FOX and NBC affiliates together
-// - in its locals categories, or one folder per market - so the same two
-// or three folders are the answer for all six broadcast sections, and
-// they were being ticked one section at a time. A cable network sits in
-// a folder of its own name; there is no list that would be right for
-// ESPN and TNT at once, and offering one would only be a way to point
-// them at each other's channels.
-const DEFAULT_CATEGORY_KINDS = new Set(['broadcast']);
-
+// Every network, not the broadcast ones alone. This started as a
+// broadcast setting on the reasoning that a cable network sits in a
+// folder of its own name and no single list could be right for ESPN and
+// TNT at once - which had the second half backwards. A list of the two
+// or three folders an account's channels actually live in is right for
+// every section; what tells ESPN from TNT inside one of them is the
+// rule table, and categoryCandidates in autopick.js consults it exactly
+// when the folder holds more than one network's channels.
+//
+// So the folders are the account's answer to "where do I keep things",
+// asked once, and the section that named its own is the exception.
 function readDefaultNetworkCategories(user) {
   return cleanCategoryList(user && user.defaultNetworkCategories);
 }
@@ -5844,7 +5844,6 @@ function resolvedNetworkCategories(user) {
 
   const out = { ...own };
   for (const network of networks.NETWORKS) {
-    if (!DEFAULT_CATEGORY_KINDS.has(network.kind)) continue;
     if (!out[network.key]) out[network.key] = fallback;
   }
   return out;
