@@ -225,10 +225,13 @@ const MAX_PROVIDERS = 4;
 // protecting.
 const MAX_TESTS_AT_ONCE = 4;
 
-// Two, which is what the nightly link check has always opened on every
-// provider - see LINK_CHECK_AT_ONCE. An account on a single-connection
-// plan turns it down to one and nothing else changes.
-const DEFAULT_TESTS_AT_ONCE = 2;
+// One, because a plan that allows only one connection is the one this
+// setting exists to protect and the app cannot tell which it is looking
+// at. Testing two at a time on such a plan does not make a run twice as
+// fast - it makes every second probe fail, or takes the slot away from
+// whoever is watching. An account that knows its plan has room turns it
+// up.
+const DEFAULT_TESTS_AT_ONCE = 1;
 
 function makeProviderId() {
   return `p${uuidv4().replace(/-/g, '').slice(0, 10)}`;
@@ -5412,60 +5415,50 @@ app.post('/api/networks/test/unhide', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------
-// Nightly link check
+// Link check
 // ---------------------------------------------------------------------
 //
-// Every link in every network section, opened once a night with ffprobe,
-// and each list put back in order from what came back.
+// Every link in every network section, opened with ffprobe, and each
+// list put back in order from what came back.
 //
 // A network's links were only ever as good as the day somebody tested
 // them. A channel that died on the provider's side kept its slot - often
 // the first - and the first anybody heard of it was a player spinning on
 // it at kickoff before working down the list. The published sweeps catch
-// that for an ordinary provider, weekly; a reseller's channels had
-// nothing watching them at all once they were picked.
+// that for an ordinary provider, weekly; a reseller's channels have
+// nothing watching them at all once they are picked.
 //
-// So each account's links are tested at a time it chooses - six in the
-// morning in its own timezone unless it says otherwise, after the night's
-// games and before the day's - and then:
+// It ran nightly, at a time each account chose. It does not any more: it
+// is a button. The run holds a connection to every provider it touches
+// for as long as it takes to work through their links, and the app was
+// taking those unasked, in the small hours, on plans it cannot see the
+// size of. A check somebody presses is the same check with somebody
+// there to know it is happening.
 //
-//   - the ones that play are re-ranked by what they measured, on the
+// What a run does is unchanged:
+//
+//   - the links that play are re-ranked by what they measured, on the
 //     ladder the picker and "Use best tested" use, so slot one is the
-//     best stream as of this morning rather than as of the day it was
+//     best stream as of the check rather than as of the day it was
 //     chosen;
 //   - the ones that do not are moved to the bottom, not removed. A dead
 //     link still names the channel somebody wanted, and a provider that
-//     was down at six is often back by noon - it goes last in line for
-//     the player rather than out of the list;
+//     is down now is often back by noon - it goes last in line for the
+//     player rather than out of the list;
 //   - those are recorded on the account, for the watch portal's banner.
 
-// Twenty seconds - twice what a hand-run Flix-Streams test reads. Nobody
-// is waiting on this one, and the longer window is what steadies the bpp
-// that orders links inside a band, which is the reading a nightly re-sort
-// leans on hardest. PROBE_SAMPLE_SECONDS still wins, as the operator's
-// word on what their provider needs.
+// Twenty seconds - twice what a hand-run Flix-Streams test reads. The
+// longer window is what steadies the bpp that orders links inside a
+// band, which is the reading a re-sort leans on hardest, and a check is
+// started once and then left to itself. PROBE_SAMPLE_SECONDS still wins,
+// as the operator's word on what their provider needs.
 const LINK_CHECK_SECONDS = 20;
 
-// Two at a time per login, as a hand-run Flix-Streams test does, which
-// leaves a connection free for anybody watching at six. Never more than
-// a reseller's testsAtOnce, if that is ever set lower.
-const LINK_CHECK_AT_ONCE = 2;
-
-const LINK_CHECK_DEFAULT_TIME = '06:00';
-const LINK_CHECK_TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
-
 // Broadcast and cable networks only. An event section's channels are the
-// provider's per-card listings, dark between events: checked at six in
-// the morning every one of them would come back dead, be reported dead,
-// and be right about it every day but fight night.
+// provider's per-card listings, dark between events: checked on an
+// ordinary afternoon every one of them would come back dead, be reported
+// dead, and be right about it every day but fight night.
 const LINK_CHECK_KINDS = new Set(['broadcast', 'cable']);
-
-// How late a missed run may still start. A restart that finds the 06:00
-// run an hour overdue runs it; one that comes up at five in the
-// afternoon does not, because the time was chosen as one when nobody is
-// watching, and two connections held for twenty minutes at five is how a
-// stream drops in the middle of a game.
-const LINK_CHECK_LATE_LIMIT_MS = 3 * 60 * 60 * 1000;
 
 // Twenty networks of ten links is two hundred; a list of dead ones is
 // read by a person, and past this it has stopped being read.
@@ -5482,6 +5475,11 @@ function linkCheckKey(user, link) {
   return `${providerIdFor(user, link.providerId)}|${link.streamId || networks.streamIdFromUrl(link.url)}`;
 }
 
+// What a run leaves behind, and all that is stored now. An account saved
+// before this holds `enabled`, `time`, `nextRun` and `nextRunFor` from
+// when the check was scheduled; nothing reads them, and the next run
+// drops them - see the writes in runLinkCheck, which build this object
+// rather than adding to whatever was there.
 function readLinkCheck(user) {
   const raw = (user && user.linkCheck) || {};
   const dead = Array.isArray(raw.dead)
@@ -5489,46 +5487,9 @@ function readLinkCheck(user) {
       .slice(0, MAX_LINK_CHECK_DEAD)
     : [];
   return {
-    // On unless switched off. The check exists because an account left
-    // alone silently collects dead links, and that is not a state to opt
-    // in to - the same reasoning as auto-pick's default.
-    enabled: raw.enabled !== false,
-    time: LINK_CHECK_TIME_PATTERN.test(raw.time || '') ? raw.time : LINK_CHECK_DEFAULT_TIME,
-    nextRun: typeof raw.nextRun === 'string' ? raw.nextRun : '',
-    nextRunFor: typeof raw.nextRunFor === 'string' ? raw.nextRunFor : '',
     lastRun: raw.lastRun && typeof raw.lastRun === 'object' ? raw.lastRun : null,
     dead,
   };
-}
-
-// What the next run was planned against. The account's timezone is part
-// of it, so changing either the time or the zone replans the next run
-// without either save having to know about the other.
-function linkCheckPlanFor(user) {
-  return `${readLinkCheck(user).time}|${user.timeZone || 'America/New_York'}`;
-}
-
-function nextLinkCheckAfter(user, now) {
-  const settings = readLinkCheck(user);
-  if (!settings.enabled) return null;
-  try {
-    return m3u.computeNextScheduledRun(EVERY_DAY, [settings.time], user.timeZone || 'America/New_York', now);
-  } catch (err) {
-    // An unknown zone name. The account's timezone is free text from the
-    // dashboard, and one Intl cannot read leaves no next run rather than
-    // stopping the ticker for every account after it.
-    return null;
-  }
-}
-
-function planNextLinkCheck(user, now = new Date()) {
-  const next = nextLinkCheckAfter(user, now);
-  user.linkCheck = {
-    ...(user.linkCheck || {}),
-    nextRun: next ? next.toISOString() : '',
-    nextRunFor: linkCheckPlanFor(user),
-  };
-  saveUserConfigs();
 }
 
 function linkCheckNetworks() {
@@ -5589,7 +5550,7 @@ async function runLinkCheck(user, progress) {
     // What was found dead last time stands. Nothing was checked, so
     // nothing has been learned that could clear it.
     user.linkCheck = {
-      ...(user.linkCheck || {}),
+      dead: readLinkCheck(user).dead,
       lastRun: { at: startedAt, error: 'Your provider could not be reached, so nothing was checked.' },
     };
     saveUserConfigs();
@@ -5622,10 +5583,12 @@ async function runLinkCheck(user, progress) {
 
   progress.total = targets.size;
   const readings = new Map();
+  // The provider's own limit, the same one a hand-run test obeys, unless
+  // the caller asks for fewer - which the retry below does.
   const probeOne = async (key, target, atOnce) => {
     const result = await probe.probeStream(target.url, {
       lane: connectionKeyFor(target.provider),
-      limit: Math.min(atOnce, testLimitsFor(target.provider).atOnce),
+      limit: Math.min(atOnce || Infinity, testLimitsFor(target.provider).atOnce),
       seconds: LINK_CHECK_SECONDS,
     });
     readings.set(key, result);
@@ -5634,7 +5597,7 @@ async function runLinkCheck(user, progress) {
   // All queued at once; probe.js's lane holds each login to its limit,
   // and two accounts on one login share it rather than doubling it.
   await Promise.all([...targets].map(async ([key, target]) => {
-    await probeOne(key, target, LINK_CHECK_AT_ONCE);
+    await probeOne(key, target);
     progress.done++;
   }));
 
@@ -5758,21 +5721,20 @@ function describeLinkCheck(user) {
     return !(test && test.ok && String(test.testedAt || '') > String(entry.checkedAt || ''));
   });
   const running = linkChecksRunning.get(user.uuid);
-  // The ticker replans within a minute of a change to the time or the
-  // zone; until it has, the answer is worked out here rather than shown
-  // as the old plan, or as none for an account never planned at all.
-  const planned = settings.nextRunFor === linkCheckPlanFor(user);
-  const worked = planned ? null : nextLinkCheckAfter(user, new Date());
-  const next = planned ? settings.nextRun : (worked ? worked.toISOString() : '');
   return {
-    enabled: settings.enabled,
-    time: settings.time,
+    // Only to read a time in, which is the account's own zone and not
+    // the browser's - somebody travelling should see the check stamped
+    // where their games are.
     timeZone: user.timeZone || 'America/New_York',
-    nextRun: settings.enabled ? next : '',
     lastRun: settings.lastRun,
     running: running ? { done: running.done, total: running.total, startedAt: running.startedAt } : null,
     seconds: probe.sampleSecondsFor(LINK_CHECK_SECONDS),
-    atOnce: LINK_CHECK_AT_ONCE,
+    // The strictest of the account's providers, since a run works through
+    // all of them and the page's estimate should not promise the pace of
+    // the most generous one.
+    atOnce: providersOf(user).length
+      ? Math.min(...providersOf(user).map(pr => testLimitsFor(pr).atOnce))
+      : DEFAULT_TESTS_AT_ONCE,
     dead: dead.map(entry => ({
       networkKey: entry.networkKey,
       network: networks.getNetworkLabel(entry.networkKey),
@@ -5787,8 +5749,11 @@ function describeLinkCheck(user) {
   };
 }
 
-// Status, settings and "run it now", on one route - the watch portal
-// only ever reads, and the dashboard's panel does all three.
+// Status and "run it now", on one route - the watch portal only ever
+// reads, and the dashboard's panel does both.
+//
+// There is nothing to save any more. The check had a switch and a time
+// while it ran on a schedule; a button has neither.
 //
 // Token or password only, no channel list: a status read is what the
 // watch portal makes on every visit, and it must not wait on a provider.
@@ -5799,21 +5764,7 @@ app.post('/api/networks/link-check', async (req, res) => {
   const user = auth.user;
   const action = req.body.action || 'status';
 
-  if (action === 'save') {
-    const current = readLinkCheck(user);
-    const time = req.body.time === undefined ? current.time : String(req.body.time);
-    if (!LINK_CHECK_TIME_PATTERN.test(time)) {
-      return res.status(400).json({ error: 'The time must be HH:MM, 24-hour.' });
-    }
-    user.linkCheck = {
-      ...(user.linkCheck || {}),
-      enabled: req.body.enabled === undefined ? current.enabled : !!req.body.enabled,
-      time,
-    };
-    // Planned from now, so moving 06:00 to 05:00 at half past five runs
-    // tomorrow at five rather than immediately for a time already gone.
-    planNextLinkCheck(user);
-  } else if (action === 'run') {
+  if (action === 'run') {
     if (!hasCheckableLinks(user)) {
       return res.status(400).json({ error: 'No network has any links to check yet.' });
     }
@@ -8325,48 +8276,18 @@ function scheduleStreamcheckRefresh() {
   }, delay);
 }
 
-// Each account's nightly link check, fired from a one-minute tick rather
-// than a timer per account, because every account picks its own time in
-// its own zone and can change either whenever it likes. The next run is
-// stored on the account, so a restart at 06:20 still runs the 06:00 one
-// rather than forgetting it until tomorrow - within LINK_CHECK_LATE_LIMIT_MS.
-const LINK_CHECK_TICK_MS = 60 * 1000;
-
-function tickLinkChecks() {
-  const now = Date.now();
-  for (const user of Object.values(userConfigs)) {
-    const settings = readLinkCheck(user);
-    if (!settings.enabled) continue;
-    // Never planned, or planned for a time or zone since changed.
-    if (settings.nextRunFor !== linkCheckPlanFor(user)) {
-      planNextLinkCheck(user);
-      continue;
-    }
-    const due = Date.parse(settings.nextRun);
-    if (!Number.isFinite(due) || now < due) continue;
-
-    // Replanned before starting, from now, so a run that outlasts the
-    // tick is not started again by the next one.
-    planNextLinkCheck(user, new Date(now));
-    if (now - due > LINK_CHECK_LATE_LIMIT_MS) {
-      console.log(`[Link check] ${accountTag(user)}: missed ${settings.time} by` +
-        ` ${((now - due) / 3600000).toFixed(1)} hours, waiting for the next one.`);
-      continue;
-    }
-    if (!hasCheckableLinks(user)) continue;
-    startLinkCheck(user);
-  }
-}
-
-function scheduleLinkChecks() {
-  setInterval(tickLinkChecks, LINK_CHECK_TICK_MS).unref();
-  // After the channel-source warm at twenty seconds, so a run caught up
-  // on boot finds the catalog in hand rather than fetching it itself.
-  setTimeout(tickLinkChecks, 45 * 1000).unref();
-}
-
+// There is no link-check ticker here any more.
+//
+// It fired on a one-minute tick, started every account's check at the
+// hour that account had chosen, and caught up a run a restart had
+// missed. What it also did was open connections to people's providers
+// unasked, on plans the app cannot see the size of, while they were
+// asleep. The check is a button now - see "Link check" above - and
+// nothing on this timer starts one.
+//
+// The other warmers stay. They read lists and schedules; this was the
+// only one that opened streams.
 scheduleStreamcheckRefresh();
 scheduleGameCacheWarm();
 scheduleChannelSourceWarm();
-scheduleLinkChecks();
 scheduleStreamcheckWarm();

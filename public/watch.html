@@ -569,7 +569,7 @@
 
 <!-- Main browsing area -->
 <main id="browse" class="hidden max-w-[1600px] mx-auto px-5 py-6">
-  <!-- Links the nightly check could not play. Named one by one, because
+  <!-- Links the last link check could not play. Named one by one, because
        "some links are dead" sends somebody hunting through every network
        for them, and they have already been moved to the bottom of their
        lists - this is so the person who can replace them knows to. -->
@@ -1896,12 +1896,12 @@ end)
     selectCatalog(HOME_CATALOG_ID);
   }
 
-  // --- Nightly link check banner ------------------------------------
+  // --- Link check banner --------------------------------------------
   //
-  // Stays until the next night's check, the link is removed from its
-  // network, or it is tested by hand and plays - the server stops
-  // reporting it on any of those. Dismissing it hides this morning's
-  // list on this browser only; a link still dead tomorrow brings it back.
+  // Stays until the next check, the link is removed from its network, or
+  // it is tested by hand and plays - the server stops reporting it on any
+  // of those. Dismissing it hides that run's list on this browser only;
+  // a link still dead at the next check brings it back.
   const LINK_CHECK_DISMISSED_KEY = 'sportio.linkCheckDismissed';
 
   async function loadLinkCheckBanner() {
@@ -1933,7 +1933,7 @@ end)
         <i class="fa-solid fa-triangle-exclamation text-[#e56a6a] mt-0.5"></i>
         <div class="flex-1 min-w-0">
           <p class="text-sm font-bold text-[#f0b0b0]">
-            ${dead.length === 1 ? 'A link' : `${dead.length} links`} did not play in the nightly check${when ? ` (${escapeHtml(when)})` : ''}
+            ${dead.length === 1 ? 'A link' : `${dead.length} links`} did not play in the last link check${when ? ` (${escapeHtml(when)})` : ''}
           </p>
           <p class="text-xs text-[#e6e6e6]/60 mb-1.5">
             ${dead.length === 1 ? 'It has' : 'They have'} been moved to the bottom of ${dead.length === 1 ? 'its network' : 'their networks'}, so the player tries every other link first.

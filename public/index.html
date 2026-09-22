@@ -414,29 +414,20 @@
         </button>
         <button id="link-check-btn" onclick="toggleLinkCheckPanel()" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 text-xs font-bold py-2.5 rounded-lg transition flex items-center justify-center gap-2">
           <i class="fa-solid fa-heart-pulse"></i>
-          Nightly Check
+          Link Check
         </button>
       </div>
 
-      <!-- The nightly link check. The server opens every broadcast and
-           cable network's links each night, re-sorts each list by what
-           they measured and moves the dead ones to the bottom; this sets
-           when, in the account's own timezone, and says what the last run
-           found. -->
+      <!-- The link check. The server opens every broadcast and cable
+           network's links, re-sorts each list by what they measured and
+           moves the dead ones to the bottom. It ran on a nightly
+           schedule and does not any more - a run holds a connection to
+           every provider it touches, and taking those while nobody is
+           watching for it was the wrong default. This starts one and
+           says what the last one found. -->
       <div id="link-check-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-6">
-        <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Nightly link check</h4>
+        <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Link check</h4>
         <p id="link-check-intro" class="text-[11px] text-[#e6e6e6]/45 mb-3 leading-relaxed"></p>
-        <div class="flex flex-wrap items-center gap-x-5 gap-y-2 mb-3">
-          <label class="flex items-center gap-2 text-xs cursor-pointer">
-            <input type="checkbox" id="link-check-enabled" onchange="saveLinkCheckSettings()" class="accent-[#3b8fc4]">
-            Check every night at
-          </label>
-          <span class="flex items-center gap-2 text-xs">
-            <input type="time" id="link-check-time" onchange="saveLinkCheckSettings()" style="color-scheme: dark"
-                   class="bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-2 py-1 text-xs focus:border-[#3b8fc4] focus:outline-none">
-            <span id="link-check-zone" class="text-[11px] text-[#e6e6e6]/45"></span>
-          </span>
-        </div>
         <div id="link-check-status" class="text-[11px] text-[#e6e6e6]/60 mb-2 leading-relaxed"></div>
         <div id="link-check-dead" class="space-y-1 mb-3"></div>
         <button id="link-check-run-btn" onclick="runLinkCheckNow()" class="w-full bg-[#56707d] hover:bg-[#66818f] font-bold py-2.5 rounded-lg text-xs transition">
@@ -2035,7 +2026,7 @@
         : '';
       const dead = deadLinkFor(key, link);
       const deadNote = dead
-        ? `<div class="text-[10px] text-[#e56a6a] mt-0.5"><i class="fa-solid fa-triangle-exclamation mr-1"></i>Did not play in the nightly check - moved to the bottom (${escapeHtml(dead.reason)})</div>`
+        ? `<div class="text-[10px] text-[#e56a6a] mt-0.5"><i class="fa-solid fa-triangle-exclamation mr-1"></i>Did not play in the last link check - moved to the bottom (${escapeHtml(dead.reason)})</div>`
         : '';
 
       return `
@@ -4570,10 +4561,11 @@
       showStatus(`${label} now has the ${picks.length} best tested channels (${counts.join(', ')}).`);
     }
 
-    // ---- Nightly link check -------------------------------------------
+    // ---- Link check ----------------------------------------------------
     //
-    // The server does the work - see "Nightly link check" in server.js.
-    // This sets when, shows what the last run found, and starts one now.
+    // The server does the work - see "Link check" in server.js. This
+    // starts one and shows what the last one found. There is nothing to
+    // schedule: the check runs when somebody presses the button.
     //
     // A run rewrites the order of this account's lists on the server, so
     // a page open while one finishes is holding the old order, and its
@@ -4666,15 +4658,8 @@
       document.getElementById('link-check-intro').textContent =
         `Every link in your broadcast and cable networks is played for ${check.seconds} seconds, ` +
         `${check.atOnce} at a time per provider login, and each list is re-sorted best first - resolution and ` +
-        `frame rate, then bits per pixel. Links that do not play move to the bottom and are named on the watch page.`;
-      document.getElementById('link-check-enabled').checked = !!check.enabled;
-      const timeInput = document.getElementById('link-check-time');
-      // Not while it has focus: a poll landing mid-edit would put the old
-      // time back under somebody's cursor.
-      if (document.activeElement !== timeInput) timeInput.value = check.time;
-      timeInput.disabled = !check.enabled;
-      document.getElementById('link-check-zone').textContent =
-        `${zone.replace(/_/g, ' ')} - change it with Change Timezone`;
+        `frame rate, then bits per pixel. Links that do not play move to the bottom and are named on the watch page. ` +
+        `This runs only when you press it, and holds a connection to each provider while it works.`;
 
       const lines = [];
       if (check.running) {
@@ -4693,7 +4678,6 @@
       } else {
         lines.push('Not run yet.');
       }
-      if (check.enabled && check.nextRun) lines.push(`Next run ${escapeHtml(linkCheckWhen(check.nextRun, zone))}.`);
       document.getElementById('link-check-status').innerHTML = lines.map(l => `<div>${l}</div>`).join('');
 
       document.getElementById('link-check-dead').innerHTML = (check.dead || []).map(d => `
@@ -4708,19 +4692,6 @@
       runBtn.className = check.running
         ? 'w-full bg-[#56707d] text-[#e6e6e6]/40 font-bold py-2.5 rounded-lg text-xs cursor-not-allowed'
         : 'w-full bg-[#56707d] hover:bg-[#66818f] font-bold py-2.5 rounded-lg text-xs transition';
-    }
-
-    async function saveLinkCheckSettings() {
-      const enabled = document.getElementById('link-check-enabled').checked;
-      const time = document.getElementById('link-check-time').value || '06:00';
-      try {
-        const data = await linkCheckRequest({ action: 'save', enabled, time });
-        await applyLinkCheck(data);
-        showStatus(enabled ? `Links will be checked every night at ${time}.` : 'Nightly link check switched off.');
-      } catch (err) {
-        showStatus(err.message, true);
-        renderLinkCheckPanel();
-      }
     }
 
     async function runLinkCheckNow() {
