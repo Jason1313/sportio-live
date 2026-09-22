@@ -303,22 +303,24 @@
         </div>
       </div>
 
-      <!-- The folders every network section draws its channels from,
-           unless that section names its own. Not the panel above: that
-           one decides what a SEARCH may look in, and narrowing it hides
-           channels everywhere. This narrows nothing - it fills in the
-           picker each section already has, because an account's channels
-           live in the same two or three folders whichever section is
-           asking, and ticking them once per section is the same answer
-           twenty-odd times. -->
+      <!-- The folders every broadcast and cable section draws its
+           channels from, unless that section names its own. Not the
+           panel above: that one decides what a SEARCH may look in, and
+           narrowing it hides channels everywhere. This narrows nothing -
+           it fills in the picker each section already has, because an
+           account's channels live in the same two or three folders
+           whichever section is asking, and ticking them once per section
+           is the same answer twenty-odd times. -->
       <div id="default-categories-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-4">
-        <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Default categories for every network</h4>
+        <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Default categories for your networks</h4>
         <p class="text-[11px] text-[#e6e6e6]/45 mb-3 leading-relaxed">
-          Tick the categories your channels live in and every network section below lists its
-          channels from them, and auto-pick chooses from them. A section that names its own
-          categories keeps those &mdash; open it and use <strong>Just for this one</strong>.
-          Searching is not affected: this adds nothing to <strong>Search categories</strong>
-          and takes nothing away.
+          Tick the categories your channels live in and every broadcast and cable section below
+          lists its channels from them, and auto-pick chooses from them. A section that names its
+          own categories keeps those &mdash; open it and use <strong>Just for this one</strong>.
+          The event sections are left alone: a provider files those listings per card, wherever it
+          puts a one-off, so they go on searching the whole playlist. Searching is not affected
+          either way &mdash; this adds nothing to <strong>Search categories</strong> and takes
+          nothing away.
         </p>
         <div class="flex gap-2 mb-2">
           <input type="text" id="default-categories-filter" oninput="onDefaultCategoryFilter(this.value)"
@@ -4246,11 +4248,21 @@
     function networkCategoriesOf(key) {
       const own = ((activeUser && activeUser.networkCategories) || {})[key];
       if (own && own.length) return own;
-      return defaultNetworkCategories();
+      return defaultCategoriesReach(key) ? defaultNetworkCategories() : [];
     }
 
     function defaultNetworkCategories() {
       return (activeUser && activeUser.defaultNetworkCategories) || [];
+    }
+
+    // Which sections the default reaches - see DEFAULT_CATEGORY_KINDS in
+    // server.js for why the event ones are left out. The kind comes from
+    // the server's own registry rather than a list written out here, so
+    // a network added there lands on the right side of this without
+    // anyone having to remember to tell the page.
+    function defaultCategoriesReach(key) {
+      const kind = networkKindOf(key);
+      return kind === 'broadcast' || kind === 'cable';
     }
 
     // Whether this section is living on the default rather than on
@@ -4258,7 +4270,8 @@
     // differently in that case: "Change" on a default would suggest the
     // change stays here, and it would not.
     function usingDefaultCategories(key) {
-      return !usingOwnCategories(key) && defaultNetworkCategories().length > 0;
+      return !usingOwnCategories(key) && defaultCategoriesReach(key)
+        && defaultNetworkCategories().length > 0;
     }
 
     function buildNetworkCategoriesHtml(key) {
@@ -4389,11 +4402,11 @@
       if (await ensurePlaylistCategories()) renderDefaultCategories();
     }
 
-    // Every section the default reaches, which is every section there
-    // is - a section that named its own folders keeps them, and that is
-    // the only exception.
+    // Every section the default reaches. A section that named its own
+    // folders still keeps them; this is the set the panel counts over
+    // and puts back in step after a save.
     function defaultedNetworks() {
-      return networkRegistry || [];
+      return (networkRegistry || []).filter(n => defaultCategoriesReach(n.key));
     }
 
     function renderDefaultCategories() {
@@ -4436,7 +4449,7 @@
       const n = defaultCategoryDraft.size;
       summary.textContent = n === 0
         ? 'Nothing ticked - each section falls back to its own categories, or to searching the whole playlist.'
-        : `${n} categor${n === 1 ? 'y' : 'ies'} for ${reached} section${reached === 1 ? '' : 's'}`
+        : `${n} categor${n === 1 ? 'y' : 'ies'} for ${reached} broadcast and cable section${reached === 1 ? '' : 's'}`
           + (own ? `, with ${own} keeping ${own === 1 ? 'its own' : 'their own'}.` : '.');
     }
 

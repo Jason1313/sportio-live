@@ -5810,19 +5810,28 @@ function readNetworkCategories(user) {
   return out;
 }
 
-// One list standing in for every network that has not named its own.
+// One list standing in for every standing-channel section that has not
+// named its own.
 //
-// Every network, not the broadcast ones alone. This started as a
-// broadcast setting on the reasoning that a cable network sits in a
-// folder of its own name and no single list could be right for ESPN and
-// TNT at once - which had the second half backwards. A list of the two
-// or three folders an account's channels actually live in is right for
-// every section; what tells ESPN from TNT inside one of them is the
-// rule table, and categoryCandidates in autopick.js consults it exactly
-// when the folder holds more than one network's channels.
+// Broadcast AND cable. This started as a broadcast setting, on the
+// reasoning that a cable network sits in a folder of its own name and
+// no single list could be right for ESPN and TNT at once - which had
+// the second half backwards. A list of the two or three folders an
+// account's channels actually live in is right for every one of those
+// sections; what tells ESPN from TNT inside one of them is the rule
+// table, and categoryCandidates in autopick.js consults it exactly when
+// the folder holds more than one network's channels.
 //
-// So the folders are the account's answer to "where do I keep things",
-// asked once, and the section that named its own is the exception.
+// Not the event sections - UFC, DWCS, BKFC, RAF. A provider spins those
+// listings up per card, names them for the event and takes them down
+// again, and files them wherever it files a one-off. Those sections
+// search the whole playlist for that reason, and pointing them at the
+// folders the standing channels live in would narrow them to somewhere
+// the listing is not. It is the same line LINK_CHECK_KINDS draws a few
+// hundred lines up, for the same underlying reason: an event bucket is
+// empty between events.
+const DEFAULT_CATEGORY_KINDS = new Set(['broadcast', 'cable']);
+
 function readDefaultNetworkCategories(user) {
   return cleanCategoryList(user && user.defaultNetworkCategories);
 }
@@ -5844,6 +5853,7 @@ function resolvedNetworkCategories(user) {
 
   const out = { ...own };
   for (const network of networks.NETWORKS) {
+    if (!DEFAULT_CATEGORY_KINDS.has(network.kind)) continue;
     if (!out[network.key]) out[network.key] = fallback;
   }
   return out;
