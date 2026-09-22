@@ -4197,6 +4197,34 @@ function stampProviderId(source, providerId) {
   return stamped;
 }
 
+// Fetches a playlist that has just been added or repointed, in the
+// background.
+//
+// The shared cache is keyed by playlist URL and filled by the scheduler
+// twice a day by default, so a provider added through the Providers
+// panel ran on whatever happened to be sitting in it: nothing at all for
+// a URL nobody else on the instance had, and somebody else's copy from
+// up to twelve hours ago for one they did. The second case is the
+// dangerous one - the account looks like it is working, and hands out
+// stream ids the provider has since retired.
+//
+// The setup wizard has always fetched on import (/api/m3u/import). This
+// is that same fetch for the path that skips the wizard.
+//
+// Not awaited. A real playlist takes seconds to fetch and parse, and
+// this runs off the dashboard's save, which also autosaves. The caller
+// gets its answer straight away and the catalog lands a moment later,
+// which is the same deal every other warmer here makes.
+function warmAddedPlaylist(playlistUrl) {
+  m3u.refreshM3USource(playlistUrl)
+    .then(parsed => console.log(
+      `[M3U] Fetched a newly added playlist on ${m3u.describeSource(playlistUrl)}: `
+      + `${parsed.channels.length} channels, ${parsed.categoryList.length} categories`))
+    .catch(err => console.error(
+      `[M3U] Could not fetch a newly added playlist on ${m3u.describeSource(playlistUrl)}: `
+      + `${err.playlistError || err.message}`));
+}
+
 // The account's whole channel list, however many providers are behind it.
 // Returns null only when nothing at all could be reached - a partial
 // answer is still a usable one.
@@ -6956,6 +6984,21 @@ app.post('/api/user/update', async (req, res) => {
     if (new Set(next.map(entry => entry.id)).size !== next.length) {
       return res.status(400).json({ error: 'Two providers cannot share an id.' });
     }
+
+    // Only the URLs this account did not already have. Refreshing every
+    // provider on every save would re-fetch the whole account each time
+    // the dashboard autosaved; a URL that is new here is somebody
+    // deliberately pointing at a playlist, and they mean the one that is
+    // there now rather than whatever the cache last saw.
+    const before = new Set(providersOf(user)
+      .filter(entry => entry.kind === 'm3u' && entry.playlistUrl)
+      .map(entry => entry.playlistUrl));
+    for (const provider of next) {
+      if (provider.kind !== 'm3u' || !provider.playlistUrl) continue;
+      if (before.has(provider.playlistUrl)) continue;
+      warmAddedPlaylist(provider.playlistUrl);
+    }
+
     user.providers = next;
   }
 
