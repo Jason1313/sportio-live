@@ -2080,7 +2080,9 @@ app.post('/api/networks/autopick', async (req, res) => {
     // Which networks answer question 1 with a folder instead of the
     // rules. The panel draws the rules it would use, and drawing terms
     // that are not consulted would be worse than drawing nothing.
-    categories: readNetworkCategories(user),
+    // Resolved, so a network on the account-wide default says so rather
+    // than looking like one nobody has configured.
+    categories: resolvedNetworkCategories(user),
     bands: autopick.BANDS.map(b => b.name),
     minFps: autopick.MIN_FPS,
     ready: outcome.ready,
@@ -5789,16 +5791,61 @@ app.post('/api/networks/link-check', async (req, res) => {
 // provider has since renamed contributes nothing rather than failing.
 const MAX_NETWORK_CATEGORIES = 20;
 
+function cleanCategoryList(list) {
+  if (!Array.isArray(list)) return [];
+  return [...new Set(list
+    .filter(c => typeof c === 'string' && c.trim())
+    .map(c => c.slice(0, 160)))].slice(0, MAX_NETWORK_CATEGORIES);
+}
+
 function readNetworkCategories(user) {
   const raw = (user && user.networkCategories) || {};
   const known = new Set(networks.NETWORKS.map(n => n.key));
   const out = {};
   for (const [key, list] of Object.entries(raw)) {
-    if (!known.has(key) || !Array.isArray(list)) continue;
-    const cleaned = [...new Set(list
-      .filter(c => typeof c === 'string' && c.trim())
-      .map(c => c.slice(0, 160)))].slice(0, MAX_NETWORK_CATEGORIES);
+    if (!known.has(key)) continue;
+    const cleaned = cleanCategoryList(list);
     if (cleaned.length) out[key] = cleaned;
+  }
+  return out;
+}
+
+// One list standing in for every broadcast network that has not named
+// its own.
+//
+// Broadcast only, and that is the whole point of it rather than a
+// limitation. A provider files ABC, CBS, FOX and NBC affiliates together
+// - in its locals categories, or one folder per market - so the same two
+// or three folders are the answer for all six broadcast sections, and
+// they were being ticked one section at a time. A cable network sits in
+// a folder of its own name; there is no list that would be right for
+// ESPN and TNT at once, and offering one would only be a way to point
+// them at each other's channels.
+const DEFAULT_CATEGORY_KINDS = new Set(['broadcast']);
+
+function readDefaultNetworkCategories(user) {
+  return cleanCategoryList(user && user.defaultNetworkCategories);
+}
+
+// What each network's categories actually ARE, defaults folded in. This
+// is what every behaviour reads; readNetworkCategories is the stored
+// override on its own, which only the picker and the account payload
+// want.
+//
+// A network's own list wins outright, including over a default it
+// contradicts - somebody who opened FOX's picker and chose has said
+// something more specific than the account-wide setting. Clearing that
+// list puts the network back on the default rather than on nothing,
+// which is why an empty list is not stored as an empty list.
+function resolvedNetworkCategories(user) {
+  const own = readNetworkCategories(user);
+  const fallback = readDefaultNetworkCategories(user);
+  if (fallback.length === 0) return own;
+
+  const out = { ...own };
+  for (const network of networks.NETWORKS) {
+    if (!DEFAULT_CATEGORY_KINDS.has(network.kind)) continue;
+    if (!out[network.key]) out[network.key] = fallback;
   }
   return out;
 }
@@ -5816,8 +5863,32 @@ app.post('/api/networks/categories/save', async (req, res) => {
     networkCategories: { ...readNetworkCategories(auth.user), [key]: categories },
   });
   saveUserConfigs();
-  return res.json({ success: true, networkCategories: readNetworkCategories(auth.user) });
+  return res.json({ success: true, ...networkCategoryState(auth.user) });
 });
+
+// The account-wide default. Saved on its own route rather than as a
+// `key` of '' on the one above, because the two are different settings
+// and a route that told them apart by an empty string would be one
+// typo away from writing the wrong one.
+app.post('/api/networks/categories/default', async (req, res) => {
+  const auth = await authenticateAccount(req, res);
+  if (!auth) return;
+
+  const categories = Array.isArray(req.body.categories) ? req.body.categories : [];
+  auth.user.defaultNetworkCategories = cleanCategoryList(categories);
+  saveUserConfigs();
+  return res.json({ success: true, ...networkCategoryState(auth.user) });
+});
+
+// Both halves together, because a page that changed one has to redraw
+// the other: clearing the default empties every section that was living
+// on it, and naming one fills every section that had nothing.
+function networkCategoryState(user) {
+  return {
+    networkCategories: readNetworkCategories(user),
+    defaultNetworkCategories: readDefaultNetworkCategories(user),
+  };
+}
 
 // Every channel in a network's chosen categories, for its section to list
 // without anything being typed.
@@ -5838,7 +5909,7 @@ app.post('/api/networks/category-channels', async (req, res) => {
   if (!auth) return;
 
   const key = String(req.body.key || '');
-  const wanted = new Set(readNetworkCategories(auth.user)[key] || []);
+  const wanted = new Set(resolvedNetworkCategories(auth.user)[key] || []);
   if (wanted.size === 0) return res.json({ success: true, channels: [], truncated: false });
 
   const found = auth.source.channels.filter(c => (c.categories || []).some(cat => wanted.has(cat)));
@@ -5901,7 +5972,7 @@ function autoPickChannels(user, channels) {
   if (selected.length === 0) return channels;
 
   const allowed = new Set(selected);
-  for (const chosen of Object.values(readNetworkCategories(user))) {
+  for (const chosen of Object.values(resolvedNetworkCategories(user))) {
     for (const name of chosen) allowed.add(name);
   }
   return channels.filter(c => (c.categories || []).some(cat => allowed.has(cat)));
@@ -6116,11 +6187,12 @@ function computeAutoPick(user, channels, options = {}) {
 
   // The categories a network's section lists its channels from, which
   // auto-pick treats as that network's whole membership question where
-  // they exist. Read from the account rather than sent with a preview:
-  // they are saved the moment they are ticked, so there is no unsaved
-  // state for a preview to answer for, and a scheduled run has to see
-  // exactly what the panel showed.
-  const chosen = readNetworkCategories(user);
+  // they exist. Defaults folded in, so a broadcast network living on the
+  // account-wide list is picked from exactly as one that named its own.
+  // Read from the account rather than sent with a preview: they are
+  // saved the moment they are ticked, so there is no unsaved state for a
+  // preview to answer for, and a run has to see what the panel showed.
+  const chosen = resolvedNetworkCategories(user);
 
   const results = keys.map((key) => {
     const outcome = autopick.pickAcrossProviders(key, groups, read, {
@@ -6755,7 +6827,12 @@ app.post('/api/user/login', async (req, res) => {
     hiddenConferences: readHiddenConferences(user),
     autoPick: readAutoPick(user),
     linkCheck: describeLinkCheck(user),
-    networkCategories: readNetworkCategories(user),
+    // The stored overrides and the account-wide default separately, not
+    // the resolved map: the page has to be able to tell a section that
+    // named its own folders from one living on the default, because that
+    // is the difference between what its picker shows and what clearing
+    // it would do.
+    ...networkCategoryState(user),
     networkLinks: tierNetworkLinks(user.networkLinks),
     savedChannels: (user.savedChannels || []).map(withQualityTier),
     manifestUrl: `/user/${uuid}/manifest.json` 

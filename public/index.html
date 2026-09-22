@@ -243,7 +243,11 @@
             </button>
             <button id="network-categories-btn" onclick="toggleCategoriesPanel()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
               <i class="fa-solid fa-filter"></i>
-              Categories
+              Search categories
+            </button>
+            <button id="default-categories-btn" onclick="toggleDefaultCategoriesPanel()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
+              <i class="fa-solid fa-folder-tree"></i>
+              Network categories
             </button>
             <button id="network-defaults-btn" onclick="toggleDefaultsPanel()" class="text-xs font-bold text-[#5aa8d1] hover:text-[#6bb5dd] flex items-center gap-1.5 transition">
               <i class="fa-solid fa-thumbtack"></i>
@@ -296,6 +300,42 @@
           <button onclick="saveSearchCategories()" class="bg-[#3b8fc4] hover:bg-[#4fa3d8] font-bold py-2 px-4 rounded-lg text-xs transition shrink-0">
             Save categories
           </button>
+        </div>
+      </div>
+
+      <!-- The folders every broadcast section draws its channels from,
+           unless that section names its own. Not the panel above: that
+           one decides what a SEARCH may look in, and narrowing it hides
+           channels everywhere. This narrows nothing - it fills in the
+           picker each broadcast section has, because a provider files
+           every network's affiliates in the same two or three folders
+           and ticking them six times over is the same answer six times.
+           -->
+      <div id="default-categories-panel" class="hidden bg-[#3b4d58]/60 border border-[#e6e6e6]/15 rounded-lg p-4 mb-4">
+        <h4 class="text-xs font-bold text-[#e6e6e6]/75 mb-1">Default categories for broadcast networks</h4>
+        <p class="text-[11px] text-[#e6e6e6]/45 mb-3 leading-relaxed">
+          Tick the categories your local affiliates live in and every broadcast section &mdash;
+          <span id="default-categories-networks" class="text-[#e6e6e6]/60"></span> &mdash; lists its
+          channels from them, and auto-pick chooses from them. A section that names its own
+          categories keeps those. Searching is not affected: this adds nothing to
+          <strong>Search categories</strong> and takes nothing away.
+        </p>
+        <div class="flex gap-2 mb-2">
+          <input type="text" id="default-categories-filter" oninput="onDefaultCategoryFilter(this.value)"
+                 placeholder="Filter this list..."
+                 class="flex-1 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
+        </div>
+        <div id="default-categories-list" class="max-h-72 overflow-y-auto bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg p-2 space-y-0.5 mb-3"></div>
+        <div class="flex items-center justify-between gap-3">
+          <span id="default-categories-summary" class="text-[11px] text-[#e6e6e6]/45"></span>
+          <span class="flex items-center gap-2 shrink-0">
+            <button onclick="clearDefaultCategories()" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 font-bold py-2 px-3 rounded-lg text-[11px] transition">
+              Clear all
+            </button>
+            <button onclick="saveDefaultCategories()" class="bg-[#3b8fc4] hover:bg-[#4fa3d8] font-bold py-2 px-4 rounded-lg text-xs transition">
+              Save defaults
+            </button>
+          </span>
         </div>
       </div>
 
@@ -3525,7 +3565,9 @@
         <div>
           <div class="flex items-baseline gap-2 mb-1">
             <span class="text-[11px] font-bold text-[#e6e6e6]/70">Categories</span>
-            <span class="text-[10px] text-[#e6e6e6]/35">Picking from these only &mdash; change them in the ${escapeHtml(label)} section below</span>
+            <span class="text-[10px] text-[#e6e6e6]/35">Picking from these only &mdash; ${usingDefaultCategories(key)
+              ? 'your default categories, under Network categories above'
+              : `chosen in the ${escapeHtml(label)} section below`}</span>
           </div>
           <div class="flex flex-wrap gap-1.5">
             ${chosen.map(name => `<span class="text-[11px] px-2 py-0.5 rounded-lg bg-[#3b8fc4]/20 text-[#5aa8d1]">${escapeHtml(name)}</span>`).join('')}
@@ -4196,8 +4238,36 @@
     // as soon as they are chosen, like search terms, because they decide
     // what the section shows rather than anything Stremio sees.
 
+    // What this section's categories ARE, the account-wide default folded
+    // in. Mirrors resolvedNetworkCategories in server.js, which is what
+    // actually decides the channel list and what auto-pick picks from;
+    // this one decides what the section draws, and the two have to agree
+    // about which networks the default reaches.
     function networkCategoriesOf(key) {
-      return ((activeUser && activeUser.networkCategories) || {})[key] || [];
+      const own = ((activeUser && activeUser.networkCategories) || {})[key];
+      if (own && own.length) return own;
+      return defaultCategoriesReach(key) ? defaultNetworkCategories() : [];
+    }
+
+    function defaultNetworkCategories() {
+      return (activeUser && activeUser.defaultNetworkCategories) || [];
+    }
+
+    // Broadcast sections only - see DEFAULT_CATEGORY_KINDS in server.js
+    // for why. The kind comes from the server's own registry rather than
+    // a list written out here, so a network added there reaches the
+    // default without this having to be told.
+    function defaultCategoriesReach(key) {
+      return networkKindOf(key) === 'broadcast';
+    }
+
+    // Whether this section is living on the default rather than on
+    // folders somebody chose for it. The picker and the chips read
+    // differently in that case: "Change" on a default would suggest the
+    // change stays here, and it would not.
+    function usingDefaultCategories(key) {
+      const own = ((activeUser && activeUser.networkCategories) || {})[key];
+      return !(own && own.length) && defaultCategoriesReach(key) && defaultNetworkCategories().length > 0;
     }
 
     function buildNetworkCategoriesHtml(key) {
@@ -4217,15 +4287,21 @@
       }
 
       const chosen = networkCategoriesOf(key);
+      const onDefault = usingDefaultCategories(key);
+      // Dimmer on the default, so a glance down the sections tells the
+      // two apart without reading the folder names on every one.
+      const chipClass = onDefault
+        ? 'text-[10px] px-1.5 py-0.5 rounded bg-[#e6e6e6]/10 text-[#e6e6e6]/55'
+        : 'text-[10px] px-1.5 py-0.5 rounded bg-[#3b8fc4]/20 text-[#5aa8d1]';
       const chips = chosen.length
-        ? chosen.map(name => `<span class="text-[10px] px-1.5 py-0.5 rounded bg-[#3b8fc4]/20 text-[#5aa8d1]">${escapeHtml(name)}</span>`).join('')
+        ? chosen.map(name => `<span class="${chipClass}">${escapeHtml(name)}</span>`).join('')
         : '<span class="text-[10px] text-[#e6e6e6]/35 italic">none &mdash; searching the whole playlist</span>';
       return `
         <div class="flex flex-wrap items-center gap-1 px-1">
-          <span class="text-[10px] text-[#e6e6e6]/35 mr-1">Categories:</span>${chips}
-          <button onclick="openCategoryPicker('${key}')" class="ml-auto text-[11px] font-bold text-[#5aa8d1] hover:text-[#8cc5e8]">
-            ${chosen.length ? 'Change' : 'Choose categories'}
-          </button>
+          <span class="text-[10px] text-[#e6e6e6]/35 mr-1">${onDefault ? 'Default categories:' : 'Categories:'}</span>${chips}
+          ${onDefault
+            ? `<button onclick="openCategoryPicker('${key}')" class="ml-auto text-[11px] font-bold text-[#5aa8d1] hover:text-[#8cc5e8]">Just for this one</button>`
+            : `<button onclick="openCategoryPicker('${key}')" class="ml-auto text-[11px] font-bold text-[#5aa8d1] hover:text-[#8cc5e8]">${chosen.length ? 'Change' : 'Choose categories'}</button>`}
         </div>`;
     }
 
@@ -4264,10 +4340,11 @@
       }
     }
 
-    async function openCategoryPicker(key) {
-      networkCategoryPicker[key] = { draft: new Set(networkCategoriesOf(key)), filter: '' };
-      refreshNetworkCategories(key);
-      if (allPlaylistCategories) return;
+    // Every category the playlist holds, fetched once and kept. Shared by
+    // the per-network pickers and the default one, which all show the
+    // same list of folders and would otherwise each fetch it.
+    async function ensurePlaylistCategories() {
+      if (allPlaylistCategories) return true;
       try {
         const res = await fetch('/api/networks/categories', {
           method: 'POST',
@@ -4277,15 +4354,163 @@
         const data = await res.json().catch(() => null);
         if (!res.ok || !data || !data.success) {
           showStatus((data && data.error) || 'Could not load your categories.', true);
-          return;
+          return false;
         }
         allPlaylistCategories = data.categories || [];
+        return true;
       } catch (err) {
         showStatus(`Could not load your categories: ${err.message}`, true);
-        return;
+        return false;
       }
+    }
+
+    async function openCategoryPicker(key) {
+      networkCategoryPicker[key] = { draft: new Set(networkCategoriesOf(key)), filter: '' };
+      refreshNetworkCategories(key);
+      if (!(await ensurePlaylistCategories())) return;
       const list = document.getElementById(`network-catlist-${key}`);
       if (list) list.innerHTML = buildCategoryPickerList(key);
+    }
+
+    // ---- Default categories ---------------------------------------
+    //
+    // The same picker as a section's own, over one list that stands in
+    // for all six broadcast sections. Held as a draft while the panel is
+    // open and written on Save, like every other panel up here - these
+    // decide what six sections list and what auto-pick picks from, and a
+    // half-ticked list must not be live.
+
+    let defaultCategoryDraft = null;   // a Set while the panel is open
+    let defaultCategoryFilter = '';
+    let defaultCategoryShown = [];     // what the list is currently drawing
+
+    async function toggleDefaultCategoriesPanel() {
+      const panel = document.getElementById('default-categories-panel');
+      if (!panel) return;
+      const opening = panel.classList.contains('hidden');
+      panel.classList.toggle('hidden', !opening);
+      if (!opening) { defaultCategoryDraft = null; return; }
+
+      defaultCategoryDraft = new Set(defaultNetworkCategories());
+      defaultCategoryFilter = '';
+      document.getElementById('default-categories-filter').value = '';
+      // Named from the server's own registry, so this cannot claim to
+      // cover a network the server does not reach.
+      document.getElementById('default-categories-networks').textContent =
+        broadcastNetworks().map(n => n.label).join(', ');
+      renderDefaultCategories();
+      if (await ensurePlaylistCategories()) renderDefaultCategories();
+    }
+
+    function broadcastNetworks() {
+      return (networkRegistry || []).filter(n => n.kind === 'broadcast');
+    }
+
+    function renderDefaultCategories() {
+      const list = document.getElementById('default-categories-list');
+      const summary = document.getElementById('default-categories-summary');
+      if (!list || !defaultCategoryDraft) return;
+
+      if (!allPlaylistCategories) {
+        list.innerHTML = '<p class="text-[11px] text-[#e6e6e6]/40 italic p-2">Loading categories...</p>';
+        summary.textContent = '';
+        return;
+      }
+
+      const words = defaultCategoryFilter.toLowerCase().split(/\s+/).filter(Boolean);
+      // Ticked ones first, so what is already chosen stays in view however
+      // the list is filtered - the same order a section's own picker uses.
+      const matching = allPlaylistCategories
+        .filter(c => defaultCategoryDraft.has(c.name) || words.every(w => c.name.toLowerCase().includes(w)))
+        .sort((a, b) => (defaultCategoryDraft.has(b.name) ? 1 : 0) - (defaultCategoryDraft.has(a.name) ? 1 : 0));
+      defaultCategoryShown = matching.slice(0, 200);
+
+      list.innerHTML = defaultCategoryShown.length === 0
+        ? '<p class="text-[11px] text-[#e6e6e6]/40 italic p-2">No categories match.</p>'
+        : defaultCategoryShown.map((c, i) => `
+            <label class="flex items-center gap-2 text-[11px] px-1 py-0.5 rounded hover:bg-[#3b4d58] cursor-pointer">
+              <input type="checkbox" ${defaultCategoryDraft.has(c.name) ? 'checked' : ''} class="accent-[#3b8fc4]"
+                     onchange="toggleDefaultCategory(${i}, this.checked)">
+              <span class="flex-1 truncate">${escapeHtml(c.name)}</span>
+              <span class="text-[10px] text-[#e6e6e6]/35">${c.channelCount}</span>
+            </label>`).join('') +
+          (matching.length > defaultCategoryShown.length
+            ? `<div class="text-[10px] text-[#e6e6e6]/35 px-1 pt-1">${matching.length - defaultCategoryShown.length} more - type to narrow the list.</div>`
+            : '');
+
+      // Counted over the sections that would actually take them. A
+      // section holding its own list keeps it, so "every broadcast
+      // network" would be a promise this cannot keep on that account.
+      const own = broadcastNetworks().filter(nw => usingOwnCategories(nw.key)).length;
+      const reached = broadcastNetworks().length - own;
+      const n = defaultCategoryDraft.size;
+      summary.textContent = n === 0
+        ? 'Nothing ticked - each broadcast section falls back to its own categories, or to searching the whole playlist.'
+        : `${n} categor${n === 1 ? 'y' : 'ies'} for ${reached} broadcast section${reached === 1 ? '' : 's'}`
+          + (own ? `, with ${own} keeping ${own === 1 ? 'its own' : 'their own'}.` : '.');
+    }
+
+    // Only the list redraws on a keystroke, so the filter box keeps its
+    // caret - the same reason a section's own picker splits these.
+    function onDefaultCategoryFilter(value) {
+      defaultCategoryFilter = value;
+      renderDefaultCategories();
+    }
+
+    function toggleDefaultCategory(index, checked) {
+      const category = defaultCategoryShown[index];
+      if (!category || !defaultCategoryDraft) return;
+      if (checked) defaultCategoryDraft.add(category.name); else defaultCategoryDraft.delete(category.name);
+      renderDefaultCategories();
+    }
+
+    function clearDefaultCategories() {
+      if (!defaultCategoryDraft) return;
+      defaultCategoryDraft.clear();
+      renderDefaultCategories();
+    }
+
+    function usingOwnCategories(key) {
+      const own = ((activeUser && activeUser.networkCategories) || {})[key];
+      return !!(own && own.length);
+    }
+
+    async function saveDefaultCategories() {
+      if (!defaultCategoryDraft) return;
+      const had = defaultNetworkCategories().length;
+      try {
+        const res = await fetch('/api/networks/categories/default', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uuid: activeUser.uuid, token: activeUser.token,
+            categories: [...defaultCategoryDraft]
+          })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          showStatus((data && data.error) || 'Could not save the default categories.', true);
+          return;
+        }
+        adoptCategoryState(data);
+      } catch (err) {
+        showStatus(`Could not save the default categories: ${err.message}`, true);
+        return;
+      }
+
+      // Every section the default reaches and that is not holding its own
+      // list now shows something different - including the ones that were
+      // on the OLD default and are now on nothing. Each is put back in
+      // step rather than the whole page redrawn, so a section left open
+      // keeps its search box and its scroll.
+      const touched = broadcastNetworks().filter(nw => !usingOwnCategories(nw.key)).map(nw => nw.key);
+      for (const key of touched) await reloadNetworkCategorySection(key);
+
+      const n = defaultNetworkCategories().length;
+      showStatus(n === 0
+        ? (had ? 'Default categories cleared.' : 'No default categories set.')
+        : `${n} default categor${n === 1 ? 'y' : 'ies'} for ${touched.length} broadcast section${touched.length === 1 ? '' : 's'}.`);
+      renderDefaultCategories();
     }
 
     function closeCategoryPicker(key) {
@@ -4326,12 +4551,39 @@
           showStatus((data && data.error) || 'Could not save the categories.', true);
           return;
         }
-        activeUser.networkCategories = data.networkCategories || {};
+        adoptCategoryState(data);
       } catch (err) {
         showStatus(`Could not save the categories: ${err.message}`, true);
         return;
       }
+      const cleared = picker.draft.size === 0;
       delete networkCategoryPicker[key];
+      await reloadNetworkCategorySection(key);
+
+      // Saving nothing does not leave a broadcast section with nothing -
+      // an empty override is not stored, so the account-wide default
+      // comes straight back. Said out loud, because a Save that appears
+      // to do nothing is otherwise read as a Save that failed.
+      if (cleared && usingDefaultCategories(key)) {
+        showStatus(`${networkLabelOf(key)} is back on your default categories.`);
+      }
+    }
+
+    // Both halves arrive together from every route that writes either -
+    // see networkCategoryState in server.js - because changing one
+    // changes what the other means for a section.
+    function adoptCategoryState(data) {
+      activeUser.networkCategories = data.networkCategories || {};
+      activeUser.defaultNetworkCategories = data.defaultNetworkCategories || [];
+    }
+
+    function networkLabelOf(key) {
+      return (networkRegistry.find(n => n.key === key) || {}).label || key;
+    }
+
+    // Puts one section back in step with whatever its categories are now:
+    // the chips, the cached channel list, and the results under it.
+    async function reloadNetworkCategorySection(key) {
       delete networkCategoryChannels[key];
       networkSearchResults[key] = [];
       networkSearchGroups[key] = [];
@@ -4342,6 +4594,7 @@
       const panel = document.getElementById('autopick-panel');
       if (panel && !panel.classList.contains('hidden')) loadAutoPick();
 
+      if (!networkExpanded[key]) return;
       if (networkCategoriesOf(key).length) {
         await loadCategoryChannels(key);
       } else {
