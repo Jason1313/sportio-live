@@ -31,10 +31,12 @@ either side of the wire. The image also carries ffmpeg, for ffprobe.
 
 `networks.js`, `autopick.js`, `bundles.js`, `posters.js` and `quality.js` are pure
 logic over plain data with no Express and no filesystem, deliberately, so
-a rule can be run against a real provider table offline. That is the
-testing story here: there is no test suite, no linter and no CI. A change
-to one of those modules is checked by exercising it with `node -e` against
-real data; a change to a route is checked by running the app.
+a rule can be run against a provider table offline. That is the testing
+story here: there is no test suite, no linter and no CI. A change to one
+of those modules is checked by exercising it with `node -e`; a change to
+a route is checked by running the app. Both happen against a table or an
+account made for the purpose, never against the live instance - see
+below for what that looks like and what it cannot reach.
 
 ## Running it
 
@@ -60,6 +62,51 @@ reseller's `testSeconds`; unset, 10 for Flix-Streams and 20 otherwise),
 The app starts without an encryption key on purpose, so the first-run
 setup can generate one - registration and login stay blocked until it is
 real and persistent.
+
+## This checkout is not the running instance
+
+The instance people actually use runs somewhere else. What is here is
+source: no container, no `data/`, no `.env`, and `docker` is often not
+even on PATH. The commands above are how the server is run where it
+lives, not a description of this machine.
+
+So a change is never checked against the live instance, an account on
+it, or a real provider. Do not fetch a real playlist URL, do not open a
+real stream, do not call a route on the deployed host, and do not reason
+about what the running app is holding as though it could be looked at.
+Where a symptom can only be explained by live state - a stale cache, a
+provider's own answer, how many channels the last refresh pulled - say
+which log line or screen would settle it and ask, rather than guessing
+in a confident voice.
+
+A check here looks like one of these instead:
+
+- **The pure modules** - `networks.js`, `autopick.js`, `bundles.js`,
+  `posters.js`, `quality.js` - run under `node -e` against a table
+  written to mirror the real naming conventions. This is the strongest
+  signal available locally and most rule changes are fully checkable
+  this way.
+- **A route** is checked by booting a throwaway instance and driving it
+  with `curl`: `npm start` with `SPORTIO_DATA_DIR` pointed at a scratch
+  directory, a freshly generated `ENCRYPTION_KEY`, a spare `PORT`, and a
+  small local HTTP server serving a hand-written M3U. Register an
+  account against that and nothing real is touched. Note that a new
+  `ENCRYPTION_KEY` makes the previous scratch run's stored credentials
+  unreadable, which reads as a provider that lost its playlist.
+- **The dashboard's inline JS** is checked by slicing a block out of
+  `public/index.html` and running it under `new Function` with stubs for
+  what it touches. That catches a runtime error and wrong output; it
+  does not catch anything about how the page looks or whether a button
+  is wired up, so say plainly that the UI went unclicked.
+
+Two things simply cannot be confirmed from here, and the honest move is
+to name them rather than imply otherwise. ffprobe is not installed, so
+every channel test comes back "ffprobe is not installed on the server" -
+enough to exercise storing, hiding and the badge path, never a real
+measurement; the image carries ffmpeg and that is where a reading gets
+confirmed. And there is no published streamcheck table in a scratch
+account, so auto-pick reports `no-published-data` and its ranking has to
+be exercised through `autopick.js` directly.
 
 ## Secrets
 
