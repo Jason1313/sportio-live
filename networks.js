@@ -35,7 +35,26 @@
 //                 markets they want. This is what makes 5 slots useful.
 const NETWORKS = [
   // Broadcast networks - affiliate-based, used by both NFL and CFB.
-  { key: 'FOX',  label: 'FOX',  kind: 'broadcast', aliases: ['FOX', 'Fox'] },
+  //
+  // `channelPattern` is what a network's channels are named, written as a
+  // whitelist and run inside the categories the account chose for it. A
+  // network carrying one has no free-text search at all: the categories
+  // say where to look and the pattern says what counts, and nothing else
+  // gets offered. See matchesNetworkChannel.
+  //
+  // FOX is the word FOX, then either a channel number ("FOX 5", "FOX5")
+  // or nothing that could be a second word of a brand - a call sign in
+  // brackets, a quality marker, a feed direction, or the end of the name.
+  // It used to be a bare "FOX" minus a list of exclusions, and the list
+  // was never finished: a FOX section drawn from "Strong8K: US| FOX HD/RAW
+  // 60fps" offered Fox Soccer Plus and Fox Sports Soccer from inside the
+  // FOX folder, and a Trex sports folder offered Fox Soccer Plus again.
+  // Written the other way round, a Fox-branded channel nobody has seen
+  // yet is left out rather than let in. What it costs is an affiliate
+  // filed by call sign alone ("KXAS 5 Dallas"), which no longer rides in
+  // on the folder's name - paste its URL if it matters.
+  { key: 'FOX',  label: 'FOX',  kind: 'broadcast', aliases: ['FOX', 'Fox'],
+    channelPattern: /\bFOX(?:\s*\d{1,3}\b|(?=\s*(?:$|[(\[|:\-]|(?:HD|FHD|UHD|SD|4K|\d{3,4}P|EAST|WEST|RAW|BACKUP)\b)))/ },
   { key: 'CBS',  label: 'CBS',  kind: 'broadcast', aliases: ['CBS'] },
   { key: 'NBC',  label: 'NBC',  kind: 'broadcast', aliases: ['NBC'] },
   { key: 'ABC',  label: 'ABC',  kind: 'broadcast', aliases: ['ABC'] },
@@ -1106,6 +1125,24 @@ function detectQuality(name) {
   return { label: '' };
 }
 
+// Whether a channel name is this network, by the network's own pattern.
+// null when the network has none, which is different from false: it
+// means "not decided here", and the caller falls back to whatever it did
+// before.
+//
+// Superscripts folded and case flattened first, so a pattern is written
+// once in plain capitals and still reads "US| FOX ᴴᴰ" as FOX HD.
+function matchesNetworkChannel(key, name) {
+  const network = NETWORKS.find(n => n.key === key);
+  if (!network || !network.channelPattern) return null;
+  const folded = foldSuperscripts(name).toUpperCase().replace(/\s+/g, ' ').trim();
+  return network.channelPattern.test(folded);
+}
+
+function hasChannelPattern(key) {
+  return NETWORKS.some(n => n.key === key && n.channelPattern);
+}
+
 function stripChannelDecorations(name) {
   return String(name || '')
     .replace(/^\s*(?:NCAAF|NCAAB|NFL|NBA|MLB|NHL|CFB|CHL|WHL)\s*\d+\s*:\s*/i, '')
@@ -1413,6 +1450,8 @@ module.exports = {
   nameMatchesAnyTerm,
   normalizeForSearch,
   stripChannelDecorations,
+  matchesNetworkChannel,
+  hasChannelPattern,
   foldSuperscripts,
   detectQuality,
   searchChannels,

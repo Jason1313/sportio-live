@@ -2206,6 +2206,15 @@
       return (networkRegistry.find(n => n.key === key) || {}).kind || '';
     }
 
+    // A section with no search box. Its network has a pattern of its own
+    // on the server (channelPattern in networks.js), and the list under it
+    // is every channel in its categories that the pattern accepts - so
+    // there is nothing for typing to add, and a box that searched the
+    // whole playlist would bring back exactly what the pattern leaves out.
+    function sectionIsExact(key) {
+      return !!(networkRegistry.find(n => n.key === key) || {}).exact;
+    }
+
     function sectionHoldsTerms(key) {
       const kind = networkKindOf(key);
       return kind === 'search' || kind === 'hybrid';
@@ -2462,14 +2471,14 @@
             <div id="network-actions-${key}">${buildNetworkActionsHtml(key)}</div>
             <div id="network-categories-${key}">${buildNetworkCategoriesHtml(key)}</div>
             <div class="pt-1">
-              <input type="text" id="network-search-${key}"
+              ${network.exact ? '' : `<input type="text" id="network-search-${key}"
                      value="${escapeHtml((document.getElementById(`network-search-${key}`) || {}).value || '')}"
                      oninput="onNetworkSearchInput('${key}')"
                      placeholder="${networkCategoriesOf(key).length
                        ? 'Filter the channels in your categories...'
                        : 'Search channels...  use &quot;quotes&quot; for an exact name'}"
                      class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
-              <div id="network-groups-${key}">${buildSearchGroupChipsHtml(key)}</div>
+              <div id="network-groups-${key}">${buildSearchGroupChipsHtml(key)}</div>`}
               <div id="network-testbar-${key}">${buildTestBarHtml(key)}</div>
               <div id="network-results-${key}" class="mt-1 max-h-72 overflow-y-auto">${resultRows}</div>
             </div>
@@ -2516,6 +2525,10 @@
       // folders are four hundred rows, and most sections are never opened.
       if (networkExpanded[key] && networkCategoriesOf(key).length && !networkCategoryChannels[key]) {
         loadCategoryChannels(key);
+      } else if (networkExpanded[key] && sectionIsExact(key) && !networkCategoriesOf(key).length) {
+        // No search box to type into, so an empty list has to say what
+        // fills it or it reads as a section that is broken.
+        renderNetworkSearchResults(key);
       }
     }
 
@@ -4251,7 +4264,10 @@
       const box = document.getElementById(`network-results-${key}`);
       if (box) {
         const html = buildSearchResultsHtml(key);
-        box.innerHTML = html || '<div class="text-[10px] text-[#e6e6e6]/40 italic px-3 py-1.5">No channels matched.</div>';
+        const empty = sectionIsExact(key) && !networkCategoriesOf(key).length
+          ? `Choose the categories ${escapeHtml(networkLabelOf(key))} lives in and its channels are listed here.`
+          : 'No channels matched.';
+        box.innerHTML = html || `<div class="text-[10px] text-[#e6e6e6]/40 italic px-3 py-1.5">${empty}</div>`;
       }
       // The chips and the button live outside the scroll box, so they
       // need updating separately - both depend on the same state as the
@@ -4330,7 +4346,9 @@
         : 'text-[10px] px-1.5 py-0.5 rounded bg-[#3b8fc4]/20 text-[#5aa8d1]';
       const chips = chosen.length
         ? chosen.map(name => `<span class="${chipClass}">${escapeHtml(name)}</span>`).join('')
-        : '<span class="text-[10px] text-[#e6e6e6]/35 italic">none &mdash; searching the whole playlist</span>';
+        : `<span class="text-[10px] text-[#e6e6e6]/35 italic">${sectionIsExact(key)
+            ? 'none &mdash; nothing is listed until some are chosen'
+            : 'none &mdash; searching the whole playlist'}</span>`;
       return `
         <div class="flex flex-wrap items-center gap-1 px-1">
           <span class="text-[10px] text-[#e6e6e6]/35 mr-1">${onDefault ? 'Default categories:' : 'Categories:'}</span>${chips}

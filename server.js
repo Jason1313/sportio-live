@@ -4666,7 +4666,12 @@ app.post('/api/leagues/teams', async (req, res) => {
 // could drift out of sync when a network is added.
 app.get('/api/networks', (req, res) => {
   res.json({
-    networks: networks.NETWORKS.map(({ key, label, kind }) => ({ key, label, kind })),
+    // `exact` says the section has no search box: its channels are its
+    // categories put through the network's own pattern, and the page
+    // draws it that way. The pattern itself stays on the server, which is
+    // the only thing that runs it.
+    networks: networks.NETWORKS.map(({ key, label, kind, channelPattern }) =>
+      ({ key, label, kind, exact: !!channelPattern })),
     maxLinksPerNetwork: networks.MAX_LINKS_PER_NETWORK
   });
 });
@@ -5985,7 +5990,14 @@ app.post('/api/networks/category-channels', async (req, res) => {
   const wanted = new Set(resolvedNetworkCategories(auth.user)[key] || []);
   if (wanted.size === 0) return res.json({ success: true, channels: [], truncated: false });
 
-  const found = auth.source.channels.filter(c => (c.categories || []).some(cat => wanted.has(cat)));
+  // A network with a pattern of its own lists only what the pattern
+  // accepts. A folder named for a network is not only that network - the
+  // FOX folder on one Flix-Streams service holds Fox Soccer Plus and Fox
+  // Sports Soccer beside the affiliates - and a section with no search
+  // box has no other way to leave them out.
+  const found = auth.source.channels.filter(c =>
+    (c.categories || []).some(cat => wanted.has(cat))
+    && networks.matchesNetworkChannel(key, c.name) !== false);
   const entries = withTestState(auth.user, enrichWithStreamcheck(auth.user,
     found.slice(0, MAX_CATEGORY_CHANNELS).map(channel => {
       const groups = channel.categories || [];

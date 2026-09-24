@@ -35,7 +35,7 @@
 // Pure logic over plain data, like networks.js and for the same reason:
 // every rule here can be run against a real provider table offline.
 
-const { foldSuperscripts } = require('./networks.js');
+const { foldSuperscripts, matchesNetworkChannel, hasChannelPattern } = require('./networks.js');
 
 // ---------------------------------------------------------------------
 // Names
@@ -668,6 +668,17 @@ function categoryCandidates(channels, categories, rules) {
     if (hasAnyTerm(tokens, rules.exclude, false)) continue;
     if (foreign) continue;
 
+    // A network with a pattern of its own (channelPattern in networks.js)
+    // is settled by it outright, in either kind of folder. The folder-
+    // ownership reasoning below exists to guess at membership from what a
+    // folder holds, and the pattern is there so nothing is guessed - the
+    // FOX folder that holds Fox Soccer Plus would otherwise have been
+    // read as FOX's own and handed it over as a call-sign affiliate.
+    if (rules.pattern) {
+      if (matchesNetworkChannel(rules.key, channel.name)) kept.push({ channel, mine: true });
+      continue;
+    }
+
     // This network by name, which settles it whatever else the name
     // carries.
     if (hasAnyTerm(tokens, rules.include, rules.numbered)) {
@@ -718,8 +729,10 @@ function candidatesFor(networkKey, channels, options = {}) {
   const categories = new Set((options.categories || []).filter(c => typeof c === 'string' && c));
 
   if (categories.size > 0) {
-    return categoryCandidates(channels, categories,
-      { include, exclude, rivals, numbered: rules.numbered });
+    return categoryCandidates(channels, categories, {
+      include, exclude, rivals, numbered: rules.numbered,
+      key: networkKey, pattern: hasChannelPattern(networkKey),
+    });
   }
 
   const out = [];
@@ -736,6 +749,12 @@ function candidatesFor(networkKey, channels, options = {}) {
     const byName = hasAnyTerm(tokens, include, rules.numbered);
     const byGroup = inConfiguredGroup(groupTokens, groups);
     if (!byName && !byGroup) continue;
+
+    // The network's own pattern, where it has one, as a last word on top
+    // of the rules - the same answer the section gives with categories
+    // chosen, so a FOX with none chosen cannot pick what a FOX with them
+    // would not list.
+    if (matchesNetworkChannel(networkKey, channel.name) === false) continue;
 
     // A channel let in by its GROUP alone must not be some other
     // network by name.
