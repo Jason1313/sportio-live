@@ -46,13 +46,40 @@
 // ESPN2.
 const PATTERN_TAIL = String.raw`\s*(?:$|[(\[|:\-/]|(?:HD|FHD|UHD|SD|4K|\d{3,4}P|EAST|WEST|RAW|BACKUP)\b)`;
 
-// A broadcast network: the name, then a station number ("FOX 5", "FOX5",
-// "abc11") or the tail. The number may be followed by anything - "US|
-// FOX 40 SACRAMENTO CA (KTXL)" - because nothing Fox-branded but the
-// network's affiliates is numbered that way.
+// A call sign: K or W and two or three more letters, with a subchannel
+// suffix where there is one - "WLOX-DT2", "KSWL-LD".
+const CALL_SIGN = String.raw`[KW][A-Z]{2,3}(?:-[A-Z0-9]+)?`;
+
+// A broadcast network's affiliates, in the four ways the playlists
+// actually write them. Read off a real Flix-Streams list of 110,679
+// channels, after the first version - the first way alone - turned away
+// 25 real FOX stations from inside the FOX folder:
+//
+//   the name, then a station number or the tail   "FOX 40 SACRAMENTO CA (KTXL)"
+//     with NET, NETWORK or TELEVISION NETWORK      "FOX NET [ABILENE TX]",
+//     allowed in between                           "TELEMUNDO TELEVISION NETWORK (WEST)"
+//   the name, then a bare call sign                "NBC WNDU (A)", "ABC WATE - KNOXVILLE"
+//   the name, then a call sign in brackets later   "FOX AL MONTGOMERY (WCOV) HD"
+//   a call sign, then the name                     "A3 NEW YORK 04 WNBC NBC NEW YORK"
+//
+// After a station number anything may follow, because nothing branded
+// for the network but its affiliates is numbered that way - with the
+// exceptions in BROADCAST_EXCEPT, which the same list turned up.
 function affiliatePattern(name) {
-  return new RegExp(String.raw`\b${name}(?:\s*\d{1,3}\b|${PATTERN_TAIL})`);
+  return new RegExp(String.raw`\b(?:${name}(?:\s*(?:TELEVISION\s*)?NET(?:WORK)?)?(?:\s*\d{1,3}\b|${PATTERN_TAIL})` +
+    String.raw`|${name}\s+${CALL_SIGN}\b|${name}\b[^()]*\(${CALL_SIGN}\)|${CALL_SIGN}\s+${name}\b)`);
 }
+
+// What a broadcast pattern lets in and should not, as found in that list:
+//
+//   NEWS     a station's news stream, not its channel - "CBS WEST PALM
+//            BEACH NEWS (WPEC)", "ABC TAMPA NEWS (WFTS)". Only where a
+//            space and not a T comes before it, because "NORFOLK/
+//            PORTSMOUTH/NEWPORT NEWS" is NBC's WAVY, a real affiliate, and
+//            the linear engine has no lookbehind to say "not NEWPORT".
+//   PLUS     and XTRA after a station number - "FOX 35 PLUS [ORLANDO]",
+//            "FOX 10 XTRA [PHOENIX]" are the owner's second stations.
+const BROADCAST_EXCEPT = String.raw`[^T] NEWS\b|\d\s*(?:PLUS|XTRA)\b`;
 
 // A cable network: one of its spellings, then the tail and nothing else.
 // A digit after the name is a different channel here, never a market.
@@ -63,7 +90,11 @@ function feedPattern(spellings) {
 // Feeds that carry a cable network's own name and not its programme - a
 // second game, or a Latin American service without the US rights. The
 // same families SHARED_EXCLUDE in autopick.js removes from its picks.
-const FEED_EXCEPT = /OVERFLOW|ALTERNATE|LATAM|EVENT ONLY/;
+//
+// ALT on its own too - "NFL NETWORK-ALT", "BIG TEN NETWORK ALT" - and
+// "##", which is how the same list writes a heading row posing as a
+// channel: "## MAX ESPN HD/RAW 60fps ##".
+const FEED_EXCEPT = /OVERFLOW|ALTERNATE|\bALT\b|LATAM|EVENT ONLY|##/;
 
 const NETWORKS = [
   // Broadcast networks - affiliate-based, used by both NFL and CFB.
@@ -97,24 +128,32 @@ const NETWORKS = [
   // cannot turn away without a lookahead: matched anywhere in the name,
   // and a hit drops the channel even though the pattern let it in.
   { key: 'FOX',  label: 'FOX',  kind: 'broadcast', aliases: ['FOX', 'Fox'],
-    channelPattern: affiliatePattern('FOX') },
+    channelPattern: affiliatePattern('FOX'), channelExcept: new RegExp(BROADCAST_EXCEPT) },
   // CBS Sports Network, CBS News and CBSSN all carry a second word or
-  // letter straight after CBS, which the shape already refuses.
+  // letter straight after CBS, which the shape already refuses. WLNY is
+  // CBS-owned but independent - "US: CBS WLNY HD" carries none of the
+  // network's games.
   { key: 'CBS',  label: 'CBS',  kind: 'broadcast', aliases: ['CBS'],
-    channelPattern: affiliatePattern('CBS') },
+    channelPattern: affiliatePattern('CBS'), channelExcept: new RegExp(String.raw`WLNY|${BROADCAST_EXCEPT}`) },
   // The one broadcast network that needs an exception. Providers file
   // NBCUniversal's other channels under the owner's name - "US NBC
   // (KVEA) Telemundo", "US: NBC USA NETWORK (EAST)" - and the first reads
   // as an NBC affiliate right up to its last word. The rules in
   // autopick.js measured 16 such wrong candidates per provider.
+  //
+  // The same list files NBCUniversal's cable channels under NBC too -
+  // "NBC BRAVO (WEST)", "NBC E! (WEST)", "NBC SYFY (WEST)" - and "(WEST)"
+  // has the shape of a call sign in brackets, so the pattern lets them in
+  // and this names them.
   { key: 'NBC',  label: 'NBC',  kind: 'broadcast', aliases: ['NBC'],
-    channelPattern: affiliatePattern('NBC'), channelExcept: /TELEMUNDO|\bUSA\b/ },
+    channelPattern: affiliatePattern('NBC'),
+    channelExcept: new RegExp(String.raw`TELEMUNDO|\bUSA\b|BRAVO|\bE!|OXYGEN|SYFY|UNIVERSO|${BROADCAST_EXCEPT}`) },
   { key: 'ABC',  label: 'ABC',  kind: 'broadcast', aliases: ['ABC'],
-    channelPattern: affiliatePattern('ABC') },
+    channelPattern: affiliatePattern('ABC'), channelExcept: new RegExp(BROADCAST_EXCEPT) },
   // "The CW" needs nothing of its own: the pattern finds CW anywhere in
   // the name. CW Seed is streaming and refused by the shape.
   { key: 'CW',   label: 'The CW', kind: 'broadcast', aliases: ['CW', 'The CW', 'CW Network'],
-    channelPattern: affiliatePattern('CW') },
+    channelPattern: affiliatePattern('CW'), channelExcept: new RegExp(BROADCAST_EXCEPT) },
 
   // Telemundo is affiliate-based like the four above - WNJU New York,
   // KVEA Los Angeles, WSCV Miami - which is why it is 'broadcast' and not
@@ -130,14 +169,15 @@ const NETWORKS = [
   // - KVEA is Telemundo's Los Angeles station.
   { key: 'TELEMUNDO', label: 'Telemundo', kind: 'broadcast',
     aliases: ['Telemundo', 'Tele'],
-    channelPattern: affiliatePattern('TELEMUNDO'), channelExcept: /NOTICIAS/ },
+    channelPattern: affiliatePattern('TELEMUNDO'),
+    channelExcept: new RegExp(String.raw`NOTICIAS|${BROADCAST_EXCEPT}`) },
 
   // Cable/satellite networks - single national feed.
   //
   // ESPN+ is refused by the shape, since '+' is not something that may
   // follow a name. So are ESPNews, ESPN Deportes and ESPN2 from ESPN.
   { key: 'ESPN',    label: 'ESPN',        kind: 'cable', aliases: ['ESPN'],
-    channelPattern: feedPattern(String.raw`ESPN(?:\s*1)?`), channelExcept: FEED_EXCEPT },
+    channelPattern: feedPattern(String.raw`ESPN(?:\s*1|\s*USA)?`), channelExcept: FEED_EXCEPT },
   { key: 'ESPN2',   label: 'ESPN2',       kind: 'cable', aliases: ['ESPN2'],
     channelPattern: feedPattern(String.raw`ESPN\s*2`), channelExcept: FEED_EXCEPT },
   { key: 'ESPNU',   label: 'ESPNU',       kind: 'cable', aliases: ['ESPNU'],
@@ -178,7 +218,7 @@ const NETWORKS = [
   { key: 'REDZONE', label: 'NFL RedZone', kind: 'cable', pinnedTo: 'NFL',
     aliases: ['NFL RedZone', 'NFL Red Zone', 'RedZone', 'Red Zone', 'NFL RZ'],
     channelPattern: feedPattern(String.raw`(?:NFL\s*)?RED\s*ZONE|NFL\s*RZ`),
-    channelExcept: /FANTASY|OVERFLOW|ALTERNATE|LATAM|EVENT ONLY/ },
+    channelExcept: new RegExp(`FANTASY|${FEED_EXCEPT.source}`) },
   // The single biggest soccer carrier on American linear TV: measured
   // over three weeks it held 5 of 30 Premier League fixtures and 1 of 27
   // Bundesliga, more than any other channel in either. ESPN writes it
