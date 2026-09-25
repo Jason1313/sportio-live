@@ -4666,12 +4666,17 @@ app.post('/api/leagues/teams', async (req, res) => {
 // could drift out of sync when a network is added.
 app.get('/api/networks', (req, res) => {
   res.json({
-    // `exact` says the section has no search box: its channels are its
-    // categories put through the network's own pattern, and the page
-    // draws it that way. The pattern itself stays on the server, which is
-    // the only thing that runs it.
-    networks: networks.NETWORKS.map(({ key, label, kind, channelPattern }) =>
-      ({ key, label, kind, exact: !!channelPattern })),
+    // `patternable` says the section takes a channel pattern at all, and
+    // `defaultPattern` is the built-in one where there is one - shown in
+    // the pattern editor so it can be read and copied, and what an
+    // account's own pattern is measured against. A section with either
+    // has no search box: its channels are its categories put through the
+    // pattern. Only the server ever runs one.
+    networks: networks.NETWORKS.map(({ key, label, kind }) => ({
+      key, label, kind,
+      patternable: networks.acceptsChannelPattern(key),
+      defaultPattern: networks.defaultChannelPattern(key),
+    })),
     maxLinksPerNetwork: networks.MAX_LINKS_PER_NETWORK
   });
 });
@@ -5958,6 +5963,45 @@ app.post('/api/networks/categories/default', async (req, res) => {
   return res.json({ success: true, ...networkCategoryState(auth.user) });
 });
 
+// The channel patterns an account wrote for itself, by network. Absent
+// means the built-in pattern, or none. Read through the compiler so a
+// stored pattern that no longer compiles - the rules for what is allowed
+// can tighten - is dropped here rather than failing somewhere later.
+function readNetworkPatterns(user) {
+  const raw = (user && user.networkPatterns) || {};
+  const out = {};
+  for (const [key, source] of Object.entries(raw)) {
+    if (!networks.acceptsChannelPattern(key) || typeof source !== 'string') continue;
+    if (networks.compileChannelPattern(source).regex) out[key] = source.trim();
+  }
+  return out;
+}
+
+// Saved as soon as it is written, like the categories beside it: it
+// decides what the section lists, not anything Stremio sees. An empty
+// pattern puts the section back on the built-in one.
+app.post('/api/networks/pattern/save', async (req, res) => {
+  const auth = await authenticateAccount(req, res);
+  if (!auth) return;
+
+  const key = String(req.body.key || '');
+  if (!networks.acceptsChannelPattern(key)) {
+    return res.status(400).json({ error: 'That section does not take a pattern.' });
+  }
+  const source = typeof req.body.pattern === 'string' ? req.body.pattern.trim() : '';
+  const patterns = readNetworkPatterns(auth.user);
+  if (source) {
+    const compiled = networks.compileChannelPattern(source);
+    if (compiled.error) return res.status(400).json({ error: compiled.error });
+    patterns[key] = source;
+  } else {
+    delete patterns[key];
+  }
+  auth.user.networkPatterns = patterns;
+  saveUserConfigs();
+  return res.json({ success: true, networkPatterns: patterns });
+});
+
 // Both halves together, because a page that changed one has to redraw
 // the other: clearing the default empties every section that was living
 // on it, and naming one fills every section that had nothing.
@@ -5988,6 +6032,25 @@ app.post('/api/networks/category-channels', async (req, res) => {
 
   const key = String(req.body.key || '');
   const wanted = new Set(resolvedNetworkCategories(auth.user)[key] || []);
+
+  // A pattern still being written, sent by the editor's Preview so the
+  // list answers for it before it is saved. Checked the way a save is,
+  // and a bad one is refused rather than quietly falling back - a preview
+  // that answered for the old pattern would look like the new one worked.
+  const patterns = readNetworkPatterns(auth.user);
+  if (typeof req.body.pattern === 'string') {
+    if (!networks.acceptsChannelPattern(key)) {
+      return res.status(400).json({ error: 'That section does not take a pattern.' });
+    }
+    if (req.body.pattern.trim()) {
+      const compiled = networks.compileChannelPattern(req.body.pattern);
+      if (compiled.error) return res.status(400).json({ error: compiled.error });
+      patterns[key] = req.body.pattern.trim();
+    } else {
+      delete patterns[key];
+    }
+  }
+
   if (wanted.size === 0) return res.json({ success: true, channels: [], truncated: false });
 
   // A network with a pattern of its own lists only what the pattern
@@ -5997,7 +6060,7 @@ app.post('/api/networks/category-channels', async (req, res) => {
   // box has no other way to leave them out.
   const found = auth.source.channels.filter(c =>
     (c.categories || []).some(cat => wanted.has(cat))
-    && networks.matchesNetworkChannel(key, c.name) !== false);
+    && networks.matchesNetworkChannel(key, c.name, patterns) !== false);
   const entries = withTestState(auth.user, enrichWithStreamcheck(auth.user,
     found.slice(0, MAX_CATEGORY_CHANNELS).map(channel => {
       const groups = channel.categories || [];
@@ -6281,7 +6344,7 @@ function computeAutoPick(user, channels, options = {}) {
 
   const results = keys.map((key) => {
     const outcome = autopick.pickAcrossProviders(key, groups, read, {
-      rules, limit, categories: chosen[key] || [],
+      rules, limit, categories: chosen[key] || [], patterns: readNetworkPatterns(user),
     });
     const current = (user.networkLinks || {})[key] || [];
 
@@ -6921,6 +6984,7 @@ app.post('/api/user/login', async (req, res) => {
     // is the difference between what its picker shows and what clearing
     // it would do.
     ...networkCategoryState(user),
+    networkPatterns: readNetworkPatterns(user),
     networkLinks: tierNetworkLinks(user.networkLinks),
     savedChannels: (user.savedChannels || []).map(withQualityTier),
     manifestUrl: `/user/${uuid}/manifest.json` 

@@ -675,7 +675,7 @@ function categoryCandidates(channels, categories, rules) {
     // FOX folder that holds Fox Soccer Plus would otherwise have been
     // read as FOX's own and handed it over as a call-sign affiliate.
     if (rules.pattern) {
-      if (matchesNetworkChannel(rules.key, channel.name)) kept.push({ channel, mine: true });
+      if (matchesNetworkChannel(rules.key, channel.name, rules.patterns)) kept.push({ channel, mine: true });
       continue;
     }
 
@@ -717,6 +717,10 @@ function categoryCandidates(channels, categories, rules) {
 // category list compares them, because the two have to agree - a section
 // that lists a folder's channels and a pick that draws from somewhere
 // else is the worst of both.
+//
+// `options.patterns` is the account's own channel patterns, by network,
+// which replace the built-in one where a network has both - see
+// channelPatternFor in networks.js.
 function candidatesFor(networkKey, channels, options = {}) {
   const rules = rulesFor(networkKey, options.rules);
   if (!rules) return [];
@@ -731,7 +735,9 @@ function candidatesFor(networkKey, channels, options = {}) {
   if (categories.size > 0) {
     return categoryCandidates(channels, categories, {
       include, exclude, rivals, numbered: rules.numbered,
-      key: networkKey, pattern: hasChannelPattern(networkKey),
+      key: networkKey,
+      pattern: hasChannelPattern(networkKey, options.patterns),
+      patterns: options.patterns,
     });
   }
 
@@ -754,7 +760,7 @@ function candidatesFor(networkKey, channels, options = {}) {
     // of the rules - the same answer the section gives with categories
     // chosen, so a FOX with none chosen cannot pick what a FOX with them
     // would not list.
-    if (matchesNetworkChannel(networkKey, channel.name) === false) continue;
+    if (matchesNetworkChannel(networkKey, channel.name, options.patterns) === false) continue;
 
     // A channel let in by its GROUP alone must not be some other
     // network by name.

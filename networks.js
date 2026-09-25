@@ -52,9 +52,16 @@ const NETWORKS = [
   // Written the other way round, a Fox-branded channel nobody has seen
   // yet is left out rather than let in. What it costs is an affiliate
   // filed by call sign alone ("KXAS 5 Dallas"), which no longer rides in
-  // on the folder's name - paste its URL if it matters.
+  // on the folder's name - an account that wants those writes its own
+  // pattern for the section, which replaces this one.
+  //
+  // What follows FOX is consumed rather than looked ahead at. The two
+  // answer identically for a yes/no test, and this way the pattern runs
+  // on the linear-time engine an account's own pattern is held to (see
+  // compileChannelPattern) - so it can be copied into the editor as a
+  // starting point and still save.
   { key: 'FOX',  label: 'FOX',  kind: 'broadcast', aliases: ['FOX', 'Fox'],
-    channelPattern: /\bFOX(?:\s*\d{1,3}\b|(?=\s*(?:$|[(\[|:\-]|(?:HD|FHD|UHD|SD|4K|\d{3,4}P|EAST|WEST|RAW|BACKUP)\b)))/ },
+    channelPattern: /\bFOX(?:\s*\d{1,3}\b|\s*(?:$|[(\[|:\-]|(?:HD|FHD|UHD|SD|4K|\d{3,4}P|EAST|WEST|RAW|BACKUP)\b))/ },
   { key: 'CBS',  label: 'CBS',  kind: 'broadcast', aliases: ['CBS'] },
   { key: 'NBC',  label: 'NBC',  kind: 'broadcast', aliases: ['NBC'] },
   { key: 'ABC',  label: 'ABC',  kind: 'broadcast', aliases: ['ABC'] },
@@ -1125,22 +1132,147 @@ function detectQuality(name) {
   return { label: '' };
 }
 
-// Whether a channel name is this network, by the network's own pattern.
-// null when the network has none, which is different from false: it
-// means "not decided here", and the caller falls back to whatever it did
-// before.
+// A network's channels by pattern: the one in NETWORKS, or one the
+// account wrote for itself. Only the standing sections take one - the
+// event buckets are searched by term because their listings are named
+// for whichever card is on, which no pattern written today will fit.
+const PATTERN_KINDS = new Set(['broadcast', 'cable']);
+const MAX_PATTERN_LENGTH = 300;
+
+// Names are short, and the cap is what bounds a pattern's worst case: it
+// runs once per channel over a playlist that can hold 57,000 of them, on
+// the same process serving everybody else.
+const MAX_PATTERN_INPUT = 200;
+
+function acceptsChannelPattern(key) {
+  const network = NETWORKS.find(n => n.key === key);
+  return !!network && PATTERN_KINDS.has(network.kind);
+}
+
+function defaultChannelPattern(key) {
+  const network = NETWORKS.find(n => n.key === key);
+  return network && network.channelPattern ? network.channelPattern.source : '';
+}
+
+// An account's pattern, compiled, or the reason it cannot be.
+//
+// Compiled for V8's linear-time engine (the 'l' flag), which is the only
+// thing making it safe to run somebody's pattern here at all. A pattern
+// saved from the dashboard runs on the server over every channel in the
+// playlist, on the process serving every other account. With the
+// ordinary engine, A+A+A+A+B took 21 seconds on one 200-character name -
+// and that is not even the nested (A+)+ shape anyone would think to
+// refuse. Linear, it takes a millisecond on 5,000 characters. Refusing
+// shapes by inspection was tried first and that case walked through it.
+//
+// What it costs is lookarounds and backreferences, which the linear
+// engine cannot run and says so when the pattern is compiled - that
+// message is passed on. The built-in patterns are written without them
+// for the same reason, so any of them can be copied and edited.
+//
+// The flag does not combine with 'i' either, so case is handled the
+// other way round: names are compared in capitals (foldForPattern), and
+// the pattern's own letters are raised to match - but not the letters of
+// an escape, where \d and \D mean opposite things.
+function capitalizePattern(source) {
+  let out = '';
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+    // A group's name is an identifier, not text to match, and \k<name>
+    // below keeps its spelling - raising one and not the other would
+    // break the reference.
+    const named = ch === '(' && /^\(\?<[A-Za-z_$][\w$]*>/.exec(source.slice(i));
+    if (named) { out += named[0]; i += named[0].length - 1; continue; }
+    if (ch !== '\\') { out += ch.toUpperCase(); continue; }
+    // An escape and whatever belongs to it, verbatim: \p{Letter}, \u{1F4FA},
+    // \x41, A, \cJ, \k<name>.
+    const next = source[i + 1] || '';
+    let end = i + 2;
+    if ((next === 'p' || next === 'P' || next === 'u') && source[end] === '{') {
+      end = source.indexOf('}', end) + 1 || source.length;
+    } else if (next === 'k' && source[end] === '<') {
+      end = source.indexOf('>', end) + 1 || source.length;
+    } else if (next === 'x') {
+      end += 2;
+    } else if (next === 'u') {
+      end += 4;
+    } else if (next === 'c') {
+      end += 1;
+    }
+    out += source.slice(i, end);
+    i = end - 1;
+  }
+  return out;
+}
+
+try {
+  require('v8').setFlagsFromString('--enable-experimental-regexp-engine');
+} catch (err) {
+  // Without it every account pattern is refused below, which is the safe
+  // way for this to fail.
+}
+
+const compiledPatterns = new Map();
+
+function compileChannelPattern(source) {
+  const text = String(source || '').trim();
+  if (!text) return { error: 'The pattern is empty.' };
+  if (compiledPatterns.has(text)) return compiledPatterns.get(text);
+
+  let result;
+  if (text.length > MAX_PATTERN_LENGTH) {
+    result = { error: `A pattern can be at most ${MAX_PATTERN_LENGTH} characters.` };
+  } else {
+    try {
+      result = { regex: new RegExp(capitalizePattern(text), 'l') };
+    } catch (err) {
+      result = {
+        error: /linear time/i.test(err.message)
+          ? 'Lookarounds like (?=...) and backreferences like \\1 are not available in your own pattern.'
+          : `Not a valid pattern: ${err.message.replace(/^Invalid regular expression: /, '')}`,
+      };
+    }
+  }
+  // Bounded, since every draft previewed from the dashboard lands here.
+  if (compiledPatterns.size > 500) compiledPatterns.clear();
+  compiledPatterns.set(text, result);
+  return result;
+}
+
+// The pattern that decides a network: the account's own where it has
+// written one that compiles, the built-in one otherwise, and null when
+// there is neither. `patterns` is the account's map of network key to
+// pattern text.
+function channelPatternFor(key, patterns) {
+  if (!acceptsChannelPattern(key)) return null;
+  const own = patterns && patterns[key];
+  if (own) {
+    const compiled = compileChannelPattern(own);
+    if (compiled.regex) return compiled.regex;
+  }
+  const network = NETWORKS.find(n => n.key === key);
+  return (network && network.channelPattern) || null;
+}
+
+// Whether a channel name is this network, by its pattern. null when the
+// network has none, which is different from false: it means "not
+// decided here", and the caller falls back to whatever it did before.
 //
 // Superscripts folded and case flattened first, so a pattern is written
 // once in plain capitals and still reads "US| FOX ᴴᴰ" as FOX HD.
-function matchesNetworkChannel(key, name) {
-  const network = NETWORKS.find(n => n.key === key);
-  if (!network || !network.channelPattern) return null;
-  const folded = foldSuperscripts(name).toUpperCase().replace(/\s+/g, ' ').trim();
-  return network.channelPattern.test(folded);
+function foldForPattern(name) {
+  return foldSuperscripts(name).toUpperCase().replace(/\s+/g, ' ').trim()
+    .slice(0, MAX_PATTERN_INPUT);
 }
 
-function hasChannelPattern(key) {
-  return NETWORKS.some(n => n.key === key && n.channelPattern);
+function matchesNetworkChannel(key, name, patterns) {
+  const pattern = channelPatternFor(key, patterns);
+  if (!pattern) return null;
+  return pattern.test(foldForPattern(name));
+}
+
+function hasChannelPattern(key, patterns) {
+  return !!channelPatternFor(key, patterns);
 }
 
 function stripChannelDecorations(name) {
@@ -1452,6 +1584,10 @@ module.exports = {
   stripChannelDecorations,
   matchesNetworkChannel,
   hasChannelPattern,
+  acceptsChannelPattern,
+  defaultChannelPattern,
+  compileChannelPattern,
+  foldForPattern,
   foldSuperscripts,
   detectQuality,
   searchChannels,

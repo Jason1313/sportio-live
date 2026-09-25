@@ -2211,8 +2211,35 @@
     // is every channel in its categories that the pattern accepts - so
     // there is nothing for typing to add, and a box that searched the
     // whole playlist would bring back exactly what the pattern leaves out.
+    //
+    // The pattern is the account's own where it wrote one, the built-in
+    // one otherwise; a section with neither keeps its search box.
     function sectionIsExact(key) {
-      return !!(networkRegistry.find(n => n.key === key) || {}).exact;
+      return !!(ownNetworkPattern(key) || defaultNetworkPattern(key));
+    }
+
+    function ownNetworkPattern(key) {
+      return ((activeUser && activeUser.networkPatterns) || {})[key] || '';
+    }
+
+    function defaultNetworkPattern(key) {
+      return (networkRegistry.find(n => n.key === key) || {}).defaultPattern || '';
+    }
+
+    // The search box, or nothing. Its own region, because writing or
+    // clearing a pattern turns a section with a box into one without and
+    // back, and rebuilding the section for that would throw away the
+    // list under it - see renderNetworkLinks.
+    function buildNetworkSearchBoxHtml(key) {
+      if (sectionIsExact(key)) return '';
+      return `<input type="text" id="network-search-${key}"
+                     value="${escapeHtml((document.getElementById(`network-search-${key}`) || {}).value || '')}"
+                     oninput="onNetworkSearchInput('${key}')"
+                     placeholder="${networkCategoriesOf(key).length
+                       ? 'Filter the channels in your categories...'
+                       : 'Search channels...  use &quot;quotes&quot; for an exact name'}"
+                     class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
+              <div id="network-groups-${key}">${buildSearchGroupChipsHtml(key)}</div>`;
     }
 
     function sectionHoldsTerms(key) {
@@ -2470,25 +2497,11 @@
             <div id="network-links-list-${key}">${buildNetworkLinksListHtml(key)}</div>
             <div id="network-actions-${key}">${buildNetworkActionsHtml(key)}</div>
             <div id="network-categories-${key}">${buildNetworkCategoriesHtml(key)}</div>
+            ${network.patternable ? `<div id="network-pattern-${key}">${buildNetworkPatternHtml(key)}</div>` : ''}
             <div class="pt-1">
-              ${network.exact ? '' : `<input type="text" id="network-search-${key}"
-                     value="${escapeHtml((document.getElementById(`network-search-${key}`) || {}).value || '')}"
-                     oninput="onNetworkSearchInput('${key}')"
-                     placeholder="${networkCategoriesOf(key).length
-                       ? 'Filter the channels in your categories...'
-                       : 'Search channels...  use &quot;quotes&quot; for an exact name'}"
-                     class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
-              <div id="network-groups-${key}">${buildSearchGroupChipsHtml(key)}</div>`}
+              <div id="network-searchbox-${key}">${buildNetworkSearchBoxHtml(key)}</div>
               <div id="network-testbar-${key}">${buildTestBarHtml(key)}</div>
               <div id="network-results-${key}" class="mt-1 max-h-72 overflow-y-auto">${resultRows}</div>
-            </div>
-            <div class="flex gap-2 pt-1">
-              <input type="text" id="network-paste-${key}"
-                     placeholder="...or paste a direct stream URL"
-                     class="flex-1 min-w-0 bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-2 text-xs focus:border-[#3b8fc4] focus:outline-none">
-              <button onclick="addPastedNetworkLink('${key}')" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 text-xs font-bold py-2 px-3 rounded-lg transition shrink-0">
-                Add
-              </button>
             </div>
             ${termsPanel}
           </div>
@@ -4054,61 +4067,6 @@
       }
     }
 
-    // Adds a stream URL typed or pasted in directly, for when the exact
-    // feed is already known and finding it in a list of identically-named
-    // channels would be the slow way round.
-    //
-    // If the URL is present in the playlist its name and group are looked
-    // up and attached, which is what lets the link self-heal later when
-    // the provider rotates URLs. A URL that ISN'T in the playlist is still
-    // accepted - it may be a channel outside the parsed source, and
-    // refusing it would make this escape hatch useless in exactly the case
-    // it exists for - but it's flagged, because without that metadata it
-    // can never be healed and will simply stop working if the id changes.
-    function addPastedNetworkLink(key) {
-      const input = document.getElementById(`network-paste-${key}`);
-      if (!input) return;
-      const url = input.value.trim();
-
-      if (!/^https?:\/\/\S+$/i.test(url)) {
-        showStatus('Enter a full stream URL starting with http:// or https://', true);
-        return;
-      }
-
-      const links = getNetworkLinks(key);
-      if (links.length >= networkMaxLinks) {
-        const label = (networkRegistry.find(n => n.key === key) || {}).label || key;
-        showStatus(`${label} already has ${networkMaxLinks} channels. Remove one first.`, true);
-        return;
-      }
-      if (links.some(l => l.url === url)) {
-        showStatus('That stream is already in this network.', true);
-        return;
-      }
-
-      const known = (networkSearchResults[key] || []).find(c => c.url === url);
-      // A pasted URL that matched nothing in the channel list is stored
-      // as a plain URL whatever the account type. Typing it 'xtream' off
-      // the connection alone would be a guess: the id is only meaningful
-      // if the URL really is this provider's, and a hand-pasted one need
-      // not be. Stored as-is, it plays; guessed wrong, it would resolve
-      // to a different channel entirely.
-      links.push(known || {
-        type: 'm3u',
-        url,
-        tvgId: '',
-        name: `Direct link #${streamIdFromUrl(url)}`,
-        group: ''
-      });
-
-      input.value = '';
-      markDashboardDirty();
-      refreshNetworkLinksRegion(key);
-      showStatus(known
-        ? `Added ${known.name}.`
-        : 'Added. This URL is not in your playlist, so it cannot be relinked automatically if the provider changes it.');
-    }
-
     // Debounced so a search fires once the user stops typing rather than
     // on every keystroke - the server scans the whole 16k-channel playlist
     // per query.
@@ -4621,6 +4579,141 @@
       }
     }
 
+    // ---- Channel patterns ---------------------------------------------
+    //
+    // What a section's channels are named, as a regular expression run
+    // over every channel in its categories. The built-in one where the
+    // network has one, or the account's own, which replaces it. Written
+    // here, run only on the server - see compileChannelPattern in
+    // networks.js for what it will and will not take.
+
+    // key -> { draft, note, error } while the editor is open.
+    let networkPatternEditor = {};
+
+    function buildNetworkPatternHtml(key) {
+      const editor = networkPatternEditor[key];
+      const own = ownNetworkPattern(key);
+      const builtIn = defaultNetworkPattern(key);
+
+      if (editor) {
+        const resetLabel = builtIn ? 'Use built-in' : 'Remove';
+        return `
+          <div class="border border-[#e6e6e6]/10 rounded-lg p-2 space-y-2">
+            <input type="text" id="network-pattern-input-${key}" maxlength="300" spellcheck="false"
+                   value="${escapeHtml(editor.draft)}" oninput="networkPatternEditor['${key}'].draft = this.value"
+                   onkeydown="if(event.key==='Enter'){event.preventDefault();previewNetworkPattern('${key}');}"
+                   placeholder="e.g. ^US: ${escapeHtml(networkLabelOf(key).toUpperCase())}"
+                   class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-1.5 text-xs font-mono focus:border-[#3b8fc4] focus:outline-none">
+            <p class="text-[10px] text-[#e6e6e6]/40 leading-relaxed">
+              Matched against each channel name in your categories, anywhere in the name and ignoring case.
+              Lookaheads and back-references are not available.
+              ${builtIn ? `Built-in: <code class="font-mono text-[#e6e6e6]/60 break-all">${escapeHtml(builtIn)}</code>` : ''}
+            </p>
+            ${editor.error ? `<p class="text-[11px] text-[#e56a6a]">${escapeHtml(editor.error)}</p>` : ''}
+            ${editor.note ? `<p class="text-[11px] text-[#e6e6e6]/55">${escapeHtml(editor.note)}</p>` : ''}
+            <div class="flex flex-wrap items-center gap-2">
+              <button onclick="previewNetworkPattern('${key}')" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 text-[11px] font-bold py-1.5 px-3 rounded-lg">Preview</button>
+              <button onclick="saveNetworkPattern('${key}', false)" class="bg-[#3b8fc4] hover:bg-[#2f7fb3] text-white text-[11px] font-bold py-1.5 px-3 rounded-lg">Save</button>
+              ${own ? `<button onclick="saveNetworkPattern('${key}', true)" class="text-[11px] font-bold text-[#e56a6a]/70 hover:text-[#e56a6a] px-2">${resetLabel}</button>` : ''}
+              <button onclick="closePatternEditor('${key}')" class="ml-auto text-[11px] text-[#e6e6e6]/60 hover:text-[#e6e6e6] px-2">Cancel</button>
+            </div>
+          </div>`;
+      }
+
+      const shown = own || builtIn;
+      const chip = shown
+        ? `<code class="text-[10px] font-mono px-1.5 py-0.5 rounded ${own
+            ? 'bg-[#3b8fc4]/20 text-[#5aa8d1]'
+            : 'bg-[#e6e6e6]/10 text-[#e6e6e6]/55'} truncate min-w-0" title="${escapeHtml(shown)}">${escapeHtml(shown)}</code>`
+        : '<span class="text-[10px] text-[#e6e6e6]/35 italic">none &mdash; channels are found by searching</span>';
+      return `
+        <div class="flex items-center gap-1 px-1 min-w-0">
+          <span class="text-[10px] text-[#e6e6e6]/35 mr-1 shrink-0">${own ? 'Your pattern:' : (builtIn ? 'Built-in pattern:' : 'Pattern:')}</span>${chip}
+          <button onclick="openPatternEditor('${key}')" class="ml-auto shrink-0 text-[11px] font-bold text-[#5aa8d1] hover:text-[#8cc5e8]">${shown ? 'Edit' : 'Write one'}</button>
+        </div>`;
+    }
+
+    function refreshNetworkPattern(key) {
+      const box = document.getElementById(`network-pattern-${key}`);
+      if (box) box.innerHTML = buildNetworkPatternHtml(key);
+    }
+
+    function openPatternEditor(key) {
+      networkPatternEditor[key] = { draft: ownNetworkPattern(key) || defaultNetworkPattern(key), note: '', error: '' };
+      refreshNetworkPattern(key);
+      const input = document.getElementById(`network-pattern-input-${key}`);
+      if (input) input.focus();
+    }
+
+    // Closing puts the list back on the saved pattern, since a preview
+    // may have left it showing a draft that was never kept.
+    function closePatternEditor(key) {
+      const previewed = networkPatternEditor[key] && networkPatternEditor[key].previewed;
+      delete networkPatternEditor[key];
+      refreshNetworkPattern(key);
+      if (previewed && networkCategoriesOf(key).length) loadCategoryChannels(key);
+    }
+
+    async function previewNetworkPattern(key) {
+      const editor = networkPatternEditor[key];
+      if (!editor) return;
+      if (!networkCategoriesOf(key).length) {
+        editor.error = '';
+        editor.note = 'Choose categories first - a pattern only runs over the channels in them.';
+        refreshNetworkPattern(key);
+        return;
+      }
+      editor.previewed = true;
+      const outcome = await loadCategoryChannels(key, editor.draft);
+      if (!networkPatternEditor[key]) return;
+      editor.error = outcome && !outcome.ok ? outcome.error : '';
+      editor.note = outcome && outcome.ok
+        ? `${outcome.count} channel${outcome.count === 1 ? '' : 's'} in your categories match${outcome.count === 1 ? 'es' : ''}. Nothing is kept until you save.`
+        : '';
+      refreshNetworkPattern(key);
+    }
+
+    // `reset` saves an empty pattern, which the server reads as "back to
+    // the built-in one, or to none".
+    async function saveNetworkPattern(key, reset) {
+      const editor = networkPatternEditor[key];
+      if (!editor) return;
+      const pattern = reset ? '' : editor.draft.trim();
+      try {
+        const res = await fetch('/api/networks/pattern/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token, key, pattern })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.success) {
+          editor.error = (data && data.error) || 'Could not save that pattern.';
+          editor.note = '';
+          refreshNetworkPattern(key);
+          return;
+        }
+        activeUser.networkPatterns = data.networkPatterns || {};
+      } catch (err) {
+        editor.error = `Could not reach the server: ${err.message}`;
+        refreshNetworkPattern(key);
+        return;
+      }
+
+      delete networkPatternEditor[key];
+      refreshNetworkPattern(key);
+      // Saving can give a section a pattern it did not have, or take its
+      // only one away, and the search box comes and goes with that.
+      const searchBox = document.getElementById(`network-searchbox-${key}`);
+      if (searchBox) searchBox.innerHTML = buildNetworkSearchBoxHtml(key);
+      refreshNetworkCategories(key);
+      await reloadNetworkCategorySection(key);
+      showStatus(pattern
+        ? `Saved your pattern for ${networkLabelOf(key)}.`
+        : (defaultNetworkPattern(key)
+          ? `${networkLabelOf(key)} is back on its built-in pattern.`
+          : `${networkLabelOf(key)} has no pattern - its channels are found by searching again.`));
+    }
+
     // Both halves arrive together from every route that writes either -
     // see networkCategoryState in server.js - because changing one
     // changes what the other means for a section.
@@ -4654,28 +4747,36 @@
       }
     }
 
-    async function loadCategoryChannels(key) {
+    // `draftPattern`, when given, is a pattern still being written in the
+    // editor: the server answers for it instead of the saved one, and
+    // refuses it outright if it would not save. What it returns is for
+    // the editor, which shows a refusal beside the pattern that caused it.
+    async function loadCategoryChannels(key, draftPattern) {
       const box = document.getElementById(`network-results-${key}`);
       if (box) box.innerHTML = '<div class="text-[10px] text-[#e6e6e6]/40 italic px-3 py-1.5"><i class="fa-solid fa-spinner fa-spin mr-1"></i>Loading the channels in your categories...</div>';
       try {
+        const body = { uuid: activeUser.uuid, token: activeUser.token, key };
+        if (typeof draftPattern === 'string') body.pattern = draftPattern;
         const res = await fetch('/api/networks/category-channels', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ uuid: activeUser.uuid, token: activeUser.token, key })
+          body: JSON.stringify(body)
         });
         const data = await res.json().catch(() => null);
         if (!res.ok || !data || !data.success) {
-          if (box) box.innerHTML = `<div class="text-[10px] text-[#e56a6a] px-3 py-1.5">${escapeHtml((data && data.error) || 'Could not load the channels.')}</div>`;
-          return;
+          const error = (data && data.error) || 'Could not load the channels.';
+          if (box) box.innerHTML = `<div class="text-[10px] text-[#e56a6a] px-3 py-1.5">${escapeHtml(error)}</div>`;
+          return { ok: false, error };
         }
         networkCategoryChannels[key] = stampPositions(data.channels);
         absorbPublishedEntries(networkCategoryChannels[key]);
         if (data.truncated) showStatus('Those categories hold more channels than can be listed at once; the first 1,500 are shown.', true);
       } catch (err) {
         if (box) box.innerHTML = `<div class="text-[10px] text-[#e56a6a] px-3 py-1.5">${escapeHtml(err.message)}</div>`;
-        return;
+        return { ok: false, error: err.message };
       }
       filterCategoryChannels(key);
+      return { ok: true, count: networkCategoryChannels[key].length };
     }
 
     // Every word typed has to appear in the channel's name or category.
