@@ -5473,21 +5473,44 @@ app.post('/api/networks/test', async (req, res) => {
 // Puts a channel that failed its test back in the picker, without
 // forgetting what the test found - the badge still says 720p30, and the
 // next test decides afresh.
+//
+// One channel as { url, providerId }, or a section's worth as `channels`
+// - Unhide all, so a whole list can go back into Select all and be
+// tested again. One request and one save for the lot, rather than a
+// round trip and a rewrite of the accounts file per row.
+const MAX_UNHIDE_AT_ONCE = 1500;
+
 app.post('/api/networks/test/unhide', async (req, res) => {
   const auth = await authenticateAccount(req, res);
   if (!auth) return;
 
-  const { url, providerId } = req.body;
-  if (!url || typeof url !== 'string') {
+  const single = !Array.isArray(req.body.channels);
+  const asked = (single ? [{ url: req.body.url, providerId: req.body.providerId }] : req.body.channels)
+    .filter(c => c && typeof c.url === 'string' && c.url)
+    .slice(0, MAX_UNHIDE_AT_ONCE);
+  if (asked.length === 0) {
     return res.status(400).json({ error: 'A stream URL is required.' });
   }
-  const key = testKey(providerIdFor(auth.user, providerId), url);
-  const results = readTestResults(auth.user);
-  if (!results[key]) return res.status(404).json({ error: 'That channel has not been tested.' });
 
-  auth.user.testResults = { ...results, [key]: { ...results[key], shown: true } };
-  saveUserConfigs();
-  return res.json({ success: true, url, test: testStateFor(auth.user, providerId, url) });
+  const results = { ...readTestResults(auth.user) };
+  const unhidden = [];
+  for (const { url, providerId } of asked) {
+    const key = testKey(providerIdFor(auth.user, providerId), url);
+    if (!results[key]) continue;
+    results[key] = { ...results[key], shown: true };
+    unhidden.push({ url, providerId });
+  }
+  if (single && unhidden.length === 0) {
+    return res.status(404).json({ error: 'That channel has not been tested.' });
+  }
+
+  auth.user.testResults = results;
+  if (unhidden.length > 0) saveUserConfigs();
+  const states = unhidden.map(({ url, providerId }) =>
+    ({ url, test: testStateFor(auth.user, providerId, url) }));
+  return res.json(single
+    ? { success: true, url: states[0].url, test: states[0].test }
+    : { success: true, channels: states });
 });
 
 // ---------------------------------------------------------------------
