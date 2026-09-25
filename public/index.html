@@ -2218,12 +2218,17 @@
       return !!(ownNetworkPattern(key) || defaultNetworkPattern(key));
     }
 
+    // Both as { match, except } or null. The server sends every stored
+    // pattern in that shape; the string case is a page that loaded before
+    // it did, and costs one line to keep reading.
     function ownNetworkPattern(key) {
-      return ((activeUser && activeUser.networkPatterns) || {})[key] || '';
+      const own = ((activeUser && activeUser.networkPatterns) || {})[key];
+      if (!own) return null;
+      return typeof own === 'string' ? { match: own, except: '' } : own;
     }
 
     function defaultNetworkPattern(key) {
-      return (networkRegistry.find(n => n.key === key) || {}).defaultPattern || '';
+      return (networkRegistry.find(n => n.key === key) || {}).defaultPattern || null;
     }
 
     // The search box, or nothing. Its own region, because writing or
@@ -4587,8 +4592,21 @@
     // here, run only on the server - see compileChannelPattern in
     // networks.js for what it will and will not take.
 
-    // key -> { draft, note, error } while the editor is open.
+    // key -> { draft: { match, except }, note, error } while the editor
+    // is open.
     let networkPatternEditor = {};
+
+    const PATTERN_INPUT_CLASSES = 'w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-1.5 text-xs font-mono focus:border-[#3b8fc4] focus:outline-none';
+
+    // One half of a pattern as it sits on the closed row. In full and
+    // wrapped rather than cut off: the point of showing a built-in pattern
+    // is that it can be read, and the ends of these are where the rules
+    // are.
+    function patternCode(text, own) {
+      return `<code class="text-[10px] font-mono px-1.5 py-0.5 rounded break-all ${own
+        ? 'bg-[#3b8fc4]/20 text-[#5aa8d1]'
+        : 'bg-[#e6e6e6]/10 text-[#e6e6e6]/60'}">${escapeHtml(text)}</code>`;
+    }
 
     function buildNetworkPatternHtml(key) {
       const editor = networkPatternEditor[key];
@@ -4599,21 +4617,33 @@
         const resetLabel = builtIn ? 'Use built-in' : 'Remove';
         return `
           <div class="border border-[#e6e6e6]/10 rounded-lg p-2 space-y-2">
-            <input type="text" id="network-pattern-input-${key}" maxlength="300" spellcheck="false"
-                   value="${escapeHtml(editor.draft)}" oninput="networkPatternEditor['${key}'].draft = this.value"
-                   onkeydown="if(event.key==='Enter'){event.preventDefault();previewNetworkPattern('${key}');}"
-                   placeholder="e.g. ^US: ${escapeHtml(networkLabelOf(key).toUpperCase())}"
-                   class="w-full bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-3 py-1.5 text-xs font-mono focus:border-[#3b8fc4] focus:outline-none">
+            <label class="block space-y-1">
+              <span class="text-[10px] text-[#e6e6e6]/45">Match</span>
+              <input type="text" id="network-pattern-input-${key}" maxlength="300" spellcheck="false"
+                     value="${escapeHtml(editor.draft.match)}" oninput="networkPatternEditor['${key}'].draft.match = this.value"
+                     onkeydown="if(event.key==='Enter'){event.preventDefault();previewNetworkPattern('${key}');}"
+                     placeholder="e.g. ^US: ${escapeHtml(networkLabelOf(key).toUpperCase())}"
+                     class="${PATTERN_INPUT_CLASSES}">
+            </label>
+            <label class="block space-y-1">
+              <span class="text-[10px] text-[#e6e6e6]/45">Except <span class="text-[#e6e6e6]/30">&mdash; optional; a name matching this is dropped even if it matched above</span></span>
+              <input type="text" id="network-pattern-except-${key}" maxlength="300" spellcheck="false"
+                     value="${escapeHtml(editor.draft.except)}" oninput="networkPatternEditor['${key}'].draft.except = this.value"
+                     onkeydown="if(event.key==='Enter'){event.preventDefault();previewNetworkPattern('${key}');}"
+                     placeholder="e.g. NEWS|SPORTS"
+                     class="${PATTERN_INPUT_CLASSES}">
+            </label>
             <p class="text-[10px] text-[#e6e6e6]/40 leading-relaxed">
-              Matched against each channel name in your categories, anywhere in the name and ignoring case.
+              Both are matched against each channel name in your categories, anywhere in the name and ignoring case.
               Lookaheads and back-references are not available.
-              ${builtIn ? `Built-in: <code class="font-mono text-[#e6e6e6]/60 break-all">${escapeHtml(builtIn)}</code>` : ''}
             </p>
             ${editor.error ? `<p class="text-[11px] text-[#e56a6a]">${escapeHtml(editor.error)}</p>` : ''}
             ${editor.note ? `<p class="text-[11px] text-[#e6e6e6]/55">${escapeHtml(editor.note)}</p>` : ''}
             <div class="flex flex-wrap items-center gap-2">
               <button onclick="previewNetworkPattern('${key}')" class="bg-[#3f5460] hover:bg-[#56707d] border border-[#66818f]/40 text-[11px] font-bold py-1.5 px-3 rounded-lg">Preview</button>
               <button onclick="saveNetworkPattern('${key}', false)" class="bg-[#3b8fc4] hover:bg-[#2f7fb3] text-white text-[11px] font-bold py-1.5 px-3 rounded-lg">Save</button>
+              ${builtIn ? `<button onclick="restoreBuiltInDraft('${key}')" title="Put the built-in pattern back in the boxes, to start again from it"
+                                  class="text-[11px] font-bold text-[#5aa8d1] hover:text-[#8cc5e8] px-2">Start from built-in</button>` : ''}
               ${own ? `<button onclick="saveNetworkPattern('${key}', true)" class="text-[11px] font-bold text-[#e56a6a]/70 hover:text-[#e56a6a] px-2">${resetLabel}</button>` : ''}
               <button onclick="closePatternEditor('${key}')" class="ml-auto text-[11px] text-[#e6e6e6]/60 hover:text-[#e6e6e6] px-2">Cancel</button>
             </div>
@@ -4621,14 +4651,14 @@
       }
 
       const shown = own || builtIn;
-      const chip = shown
-        ? `<code class="text-[10px] font-mono px-1.5 py-0.5 rounded ${own
-            ? 'bg-[#3b8fc4]/20 text-[#5aa8d1]'
-            : 'bg-[#e6e6e6]/10 text-[#e6e6e6]/55'} truncate min-w-0" title="${escapeHtml(shown)}">${escapeHtml(shown)}</code>`
+      const body = shown
+        ? `<span class="flex flex-wrap items-center gap-1 min-w-0">${patternCode(shown.match, !!own)}${shown.except
+            ? `<span class="text-[10px] text-[#e6e6e6]/35">except</span>${patternCode(shown.except, !!own)}`
+            : ''}</span>`
         : '<span class="text-[10px] text-[#e6e6e6]/35 italic">none &mdash; channels are found by searching</span>';
       return `
-        <div class="flex items-center gap-1 px-1 min-w-0">
-          <span class="text-[10px] text-[#e6e6e6]/35 mr-1 shrink-0">${own ? 'Your pattern:' : (builtIn ? 'Built-in pattern:' : 'Pattern:')}</span>${chip}
+        <div class="flex items-start gap-1 px-1 min-w-0">
+          <span class="text-[10px] text-[#e6e6e6]/35 mr-1 shrink-0 pt-0.5">${own ? 'Your pattern:' : (builtIn ? 'Built-in pattern:' : 'Pattern:')}</span>${body}
           <button onclick="openPatternEditor('${key}')" class="ml-auto shrink-0 text-[11px] font-bold text-[#5aa8d1] hover:text-[#8cc5e8]">${shown ? 'Edit' : 'Write one'}</button>
         </div>`;
     }
@@ -4638,11 +4668,26 @@
       if (box) box.innerHTML = buildNetworkPatternHtml(key);
     }
 
+    // Opens on whatever the section is using now, so editing a built-in
+    // pattern starts from the built-in text rather than a blank box.
     function openPatternEditor(key) {
-      networkPatternEditor[key] = { draft: ownNetworkPattern(key) || defaultNetworkPattern(key), note: '', error: '' };
+      const start = ownNetworkPattern(key) || defaultNetworkPattern(key) || { match: '', except: '' };
+      networkPatternEditor[key] = { draft: { match: start.match, except: start.except || '' }, note: '', error: '' };
       refreshNetworkPattern(key);
       const input = document.getElementById(`network-pattern-input-${key}`);
       if (input) input.focus();
+    }
+
+    // Only the boxes. Nothing is saved, and a section already on its own
+    // pattern stays on it until Save.
+    function restoreBuiltInDraft(key) {
+      const editor = networkPatternEditor[key];
+      const builtIn = defaultNetworkPattern(key);
+      if (!editor || !builtIn) return;
+      editor.draft = { match: builtIn.match, except: builtIn.except || '' };
+      editor.note = 'The built-in pattern is back in the boxes. Preview or save it.';
+      editor.error = '';
+      refreshNetworkPattern(key);
     }
 
     // Closing puts the list back on the saved pattern, since a preview
@@ -4678,7 +4723,9 @@
     async function saveNetworkPattern(key, reset) {
       const editor = networkPatternEditor[key];
       if (!editor) return;
-      const pattern = reset ? '' : editor.draft.trim();
+      const pattern = reset
+        ? { match: '', except: '' }
+        : { match: editor.draft.match.trim(), except: editor.draft.except.trim() };
       try {
         const res = await fetch('/api/networks/pattern/save', {
           method: 'POST',
@@ -4707,7 +4754,7 @@
       if (searchBox) searchBox.innerHTML = buildNetworkSearchBoxHtml(key);
       refreshNetworkCategories(key);
       await reloadNetworkCategorySection(key);
-      showStatus(pattern
+      showStatus(pattern.match
         ? `Saved your pattern for ${networkLabelOf(key)}.`
         : (defaultNetworkPattern(key)
           ? `${networkLabelOf(key)} is back on its built-in pattern.`
@@ -4756,7 +4803,7 @@
       if (box) box.innerHTML = '<div class="text-[10px] text-[#e6e6e6]/40 italic px-3 py-1.5"><i class="fa-solid fa-spinner fa-spin mr-1"></i>Loading the channels in your categories...</div>';
       try {
         const body = { uuid: activeUser.uuid, token: activeUser.token, key };
-        if (typeof draftPattern === 'string') body.pattern = draftPattern;
+        if (draftPattern !== undefined) body.pattern = draftPattern;
         const res = await fetch('/api/networks/category-channels', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

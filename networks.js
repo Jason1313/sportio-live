@@ -33,6 +33,38 @@
 //   'broadcast' - no national channel exists in reality. FOX/CBS/NBC/ABC/CW
 //                 are hundreds of local affiliates, and the user picks the
 //                 markets they want. This is what makes 5 slots useful.
+
+// The two shapes a built-in channel pattern takes, so the rule for what
+// may follow a network's name is written once. Built into real RegExps
+// here and shown to the account as source text, which is why they are
+// spelled out in full rather than left as a named helper the editor
+// could not show.
+//
+// What may follow the name: nothing, a bracket or separator, or a
+// quality or feed marker. Not another word - that is how "FOX" stays off
+// Fox Soccer Plus - and not a bare digit, which is how "ESPN" stays off
+// ESPN2.
+const PATTERN_TAIL = String.raw`\s*(?:$|[(\[|:\-/]|(?:HD|FHD|UHD|SD|4K|\d{3,4}P|EAST|WEST|RAW|BACKUP)\b)`;
+
+// A broadcast network: the name, then a station number ("FOX 5", "FOX5",
+// "abc11") or the tail. The number may be followed by anything - "US|
+// FOX 40 SACRAMENTO CA (KTXL)" - because nothing Fox-branded but the
+// network's affiliates is numbered that way.
+function affiliatePattern(name) {
+  return new RegExp(String.raw`\b${name}(?:\s*\d{1,3}\b|${PATTERN_TAIL})`);
+}
+
+// A cable network: one of its spellings, then the tail and nothing else.
+// A digit after the name is a different channel here, never a market.
+function feedPattern(spellings) {
+  return new RegExp(String.raw`\b(?:${spellings})${PATTERN_TAIL}`);
+}
+
+// Feeds that carry a cable network's own name and not its programme - a
+// second game, or a Latin American service without the US rights. The
+// same families SHARED_EXCLUDE in autopick.js removes from its picks.
+const FEED_EXCEPT = /OVERFLOW|ALTERNATE|LATAM|EVENT ONLY/;
+
 const NETWORKS = [
   // Broadcast networks - affiliate-based, used by both NFL and CFB.
   //
@@ -60,12 +92,29 @@ const NETWORKS = [
   // on the linear-time engine an account's own pattern is held to (see
   // compileChannelPattern) - so it can be copied into the editor as a
   // starting point and still save.
+  //
+  // `channelExcept` is the other half, for the rare name a whitelist
+  // cannot turn away without a lookahead: matched anywhere in the name,
+  // and a hit drops the channel even though the pattern let it in.
   { key: 'FOX',  label: 'FOX',  kind: 'broadcast', aliases: ['FOX', 'Fox'],
-    channelPattern: /\bFOX(?:\s*\d{1,3}\b|\s*(?:$|[(\[|:\-]|(?:HD|FHD|UHD|SD|4K|\d{3,4}P|EAST|WEST|RAW|BACKUP)\b))/ },
-  { key: 'CBS',  label: 'CBS',  kind: 'broadcast', aliases: ['CBS'] },
-  { key: 'NBC',  label: 'NBC',  kind: 'broadcast', aliases: ['NBC'] },
-  { key: 'ABC',  label: 'ABC',  kind: 'broadcast', aliases: ['ABC'] },
-  { key: 'CW',   label: 'The CW', kind: 'broadcast', aliases: ['CW', 'The CW', 'CW Network'] },
+    channelPattern: affiliatePattern('FOX') },
+  // CBS Sports Network, CBS News and CBSSN all carry a second word or
+  // letter straight after CBS, which the shape already refuses.
+  { key: 'CBS',  label: 'CBS',  kind: 'broadcast', aliases: ['CBS'],
+    channelPattern: affiliatePattern('CBS') },
+  // The one broadcast network that needs an exception. Providers file
+  // NBCUniversal's other channels under the owner's name - "US NBC
+  // (KVEA) Telemundo", "US: NBC USA NETWORK (EAST)" - and the first reads
+  // as an NBC affiliate right up to its last word. The rules in
+  // autopick.js measured 16 such wrong candidates per provider.
+  { key: 'NBC',  label: 'NBC',  kind: 'broadcast', aliases: ['NBC'],
+    channelPattern: affiliatePattern('NBC'), channelExcept: /TELEMUNDO|\bUSA\b/ },
+  { key: 'ABC',  label: 'ABC',  kind: 'broadcast', aliases: ['ABC'],
+    channelPattern: affiliatePattern('ABC') },
+  // "The CW" needs nothing of its own: the pattern finds CW anywhere in
+  // the name. CW Seed is streaming and refused by the shape.
+  { key: 'CW',   label: 'The CW', kind: 'broadcast', aliases: ['CW', 'The CW', 'CW Network'],
+    channelPattern: affiliatePattern('CW') },
 
   // Telemundo is affiliate-based like the four above - WNJU New York,
   // KVEA Los Angeles, WSCV Miami - which is why it is 'broadcast' and not
@@ -75,19 +124,40 @@ const NETWORKS = [
   // rights, and ESPN listed it on 3 of the next 30 fixtures. ESPN writes
   // it as the bare word "Tele", which is why that is an alias rather than
   // an abbreviation anyone would guess.
+  //
+  // "NOTICIAS TELEMUNDO" ends on the word and so passes the shape; it is
+  // the 24/7 news feed. "US NBC (KVEA) Telemundo" passes too, and rightly
+  // - KVEA is Telemundo's Los Angeles station.
   { key: 'TELEMUNDO', label: 'Telemundo', kind: 'broadcast',
-    aliases: ['Telemundo', 'Tele'] },
+    aliases: ['Telemundo', 'Tele'],
+    channelPattern: affiliatePattern('TELEMUNDO'), channelExcept: /NOTICIAS/ },
 
   // Cable/satellite networks - single national feed.
-  { key: 'ESPN',    label: 'ESPN',        kind: 'cable', aliases: ['ESPN'] },
-  { key: 'ESPN2',   label: 'ESPN2',       kind: 'cable', aliases: ['ESPN2'] },
-  { key: 'ESPNU',   label: 'ESPNU',       kind: 'cable', aliases: ['ESPNU'] },
-  { key: 'FS1',     label: 'FS1',         kind: 'cable', aliases: ['FS1', 'Fox Sports 1'] },
-  { key: 'CBSSN',   label: 'CBS Sports Network', kind: 'cable', aliases: ['CBSSN', 'CBS Sports Network', 'CBS Sports Net'] },
-  { key: 'BTN',     label: 'Big Ten Network',    kind: 'cable', aliases: ['BTN', 'Big Ten Network'] },
-  { key: 'SECN',    label: 'SEC Network',        kind: 'cable', aliases: ['SEC Network', 'SECN'] },
-  { key: 'ACCN',    label: 'ACC Network',        kind: 'cable', aliases: ['ACC Network', 'ACCN'] },
-  { key: 'NFLN',    label: 'NFL Network',        kind: 'cable', aliases: ['NFL Network', 'NFL Net'] },
+  //
+  // ESPN+ is refused by the shape, since '+' is not something that may
+  // follow a name. So are ESPNews, ESPN Deportes and ESPN2 from ESPN.
+  { key: 'ESPN',    label: 'ESPN',        kind: 'cable', aliases: ['ESPN'],
+    channelPattern: feedPattern(String.raw`ESPN(?:\s*1)?`), channelExcept: FEED_EXCEPT },
+  { key: 'ESPN2',   label: 'ESPN2',       kind: 'cable', aliases: ['ESPN2'],
+    channelPattern: feedPattern(String.raw`ESPN\s*2`), channelExcept: FEED_EXCEPT },
+  { key: 'ESPNU',   label: 'ESPNU',       kind: 'cable', aliases: ['ESPNU'],
+    channelPattern: feedPattern(String.raw`ESPN\s*U`), channelExcept: FEED_EXCEPT },
+  { key: 'FS1',     label: 'FS1',         kind: 'cable', aliases: ['FS1', 'Fox Sports 1'],
+    channelPattern: feedPattern(String.raw`FS\s*1|FOX\s*SPORTS\s*1`), channelExcept: FEED_EXCEPT },
+  { key: 'CBSSN',   label: 'CBS Sports Network', kind: 'cable', aliases: ['CBSSN', 'CBS Sports Network', 'CBS Sports Net'],
+    channelPattern: feedPattern(String.raw`CBSSN|CBS\s*SPORTS\s*NET(?:WORK)?`), channelExcept: FEED_EXCEPT },
+  { key: 'BTN',     label: 'Big Ten Network',    kind: 'cable', aliases: ['BTN', 'Big Ten Network'],
+    channelPattern: feedPattern(String.raw`BTN|BIG\s*TEN(?:\s*NETWORK)?`), channelExcept: FEED_EXCEPT },
+  // Bare "SEC" as well as the full name, because providers file it
+  // under ESPN's name - "US ESPN SEC (X)" - and that is this channel.
+  { key: 'SECN',    label: 'SEC Network',        kind: 'cable', aliases: ['SEC Network', 'SECN'],
+    channelPattern: feedPattern(String.raw`SECN|SEC(?:\s*NETWORK)?`), channelExcept: FEED_EXCEPT },
+  // ACCNX and ACC Network Extra are the streaming overflow tier, and are
+  // refused by the shape - an X or a further word after the name.
+  { key: 'ACCN',    label: 'ACC Network',        kind: 'cable', aliases: ['ACC Network', 'ACCN'],
+    channelPattern: feedPattern(String.raw`ACCN|ACC(?:\s*NETWORK)?`), channelExcept: FEED_EXCEPT },
+  { key: 'NFLN',    label: 'NFL Network',        kind: 'cable', aliases: ['NFL Network', 'NFL Net'],
+    channelPattern: feedPattern(String.raw`NFL\s*NET(?:WORK)?`), channelExcept: FEED_EXCEPT },
 
   // NFL RedZone. A cable network like the rest, with one extra property:
   // `pinnedTo` (see getPinnedNetworksForSport) puts it at the head of a
@@ -102,16 +172,27 @@ const NETWORKS = [
   // The aliases cover both spellings because providers use both; the
   // normalized form (see normalizeNetworkName) collapses the spacing, so
   // "NFL REDZONE" and "NFL Red Zone" are already the same key.
+  //
+  // "RZ" only with NFL in front of it, since two letters alone are
+  // anybody's. Fantasy RedZone is a different programme under the name.
   { key: 'REDZONE', label: 'NFL RedZone', kind: 'cable', pinnedTo: 'NFL',
-    aliases: ['NFL RedZone', 'NFL Red Zone', 'RedZone', 'Red Zone', 'NFL RZ'] },
+    aliases: ['NFL RedZone', 'NFL Red Zone', 'RedZone', 'Red Zone', 'NFL RZ'],
+    channelPattern: feedPattern(String.raw`(?:NFL\s*)?RED\s*ZONE|NFL\s*RZ`),
+    channelExcept: /FANTASY|OVERFLOW|ALTERNATE|LATAM|EVENT ONLY/ },
   // The single biggest soccer carrier on American linear TV: measured
   // over three weeks it held 5 of 30 Premier League fixtures and 1 of 27
   // Bundesliga, more than any other channel in either. ESPN writes it
   // "USA Net".
+  //
+  // Never bare "USA", which is a country tag on half the playlist.
   { key: 'USANET',  label: 'USA Network', kind: 'cable',
-    aliases: ['USA Network', 'USA Net', 'USA'] },
-  { key: 'TNT',     label: 'TNT',         kind: 'cable', aliases: ['TNT'] },
-  { key: 'TRUTV',   label: 'truTV',       kind: 'cable', aliases: ['truTV', 'TruTV'] },
+    aliases: ['USA Network', 'USA Net', 'USA'],
+    channelPattern: feedPattern(String.raw`USA\s*NET(?:WORK)?`), channelExcept: FEED_EXCEPT },
+  // TNT Sports is the British channel and refused by the shape.
+  { key: 'TNT',     label: 'TNT',         kind: 'cable', aliases: ['TNT'],
+    channelPattern: feedPattern('TNT'), channelExcept: FEED_EXCEPT },
+  { key: 'TRUTV',   label: 'truTV',       kind: 'cable', aliases: ['truTV', 'TruTV'],
+    channelPattern: feedPattern(String.raw`TRU\s*TV`), channelExcept: FEED_EXCEPT },
 
   // Event bucket, not a network. UFC events resolve to Paramount+, which
   // is streaming and correctly yields no network slot - so there would be
@@ -1149,9 +1230,41 @@ function acceptsChannelPattern(key) {
   return !!network && PATTERN_KINDS.has(network.kind);
 }
 
+// The built-in pattern as text, for the editor to show and prefill: the
+// same { match, except } pair an account's own is stored as. null where
+// the network has none.
 function defaultChannelPattern(key) {
   const network = NETWORKS.find(n => n.key === key);
-  return network && network.channelPattern ? network.channelPattern.source : '';
+  if (!network || !network.channelPattern) return null;
+  return {
+    match: network.channelPattern.source,
+    except: network.channelExcept ? network.channelExcept.source : '',
+  };
+}
+
+// An account's stored pattern in the current shape. It was a bare string
+// before the exception half existed, and one saved then is read as that
+// string with no exception - migrate on read, like everything else an
+// account holds.
+function readChannelPattern(value) {
+  if (typeof value === 'string') return value.trim() ? { match: value.trim(), except: '' } : null;
+  if (!value || typeof value !== 'object') return null;
+  const match = typeof value.match === 'string' ? value.match.trim() : '';
+  const except = typeof value.except === 'string' ? value.except.trim() : '';
+  return match ? { match, except } : null;
+}
+
+// Both halves compiled, or the first reason either cannot be. The
+// message says which half, because the editor shows them side by side.
+function compileChannelPatternPair(pair) {
+  const read = readChannelPattern(pair);
+  if (!read) return { error: 'The pattern is empty.' };
+  const match = compileChannelPattern(read.match);
+  if (match.error) return { error: match.error };
+  if (!read.except) return { match: match.regex, except: null, pair: read };
+  const except = compileChannelPattern(read.except);
+  if (except.error) return { error: `Except: ${except.error}` };
+  return { match: match.regex, except: except.regex, pair: read };
 }
 
 // An account's pattern, compiled, or the reason it cannot be.
@@ -1243,15 +1356,21 @@ function compileChannelPattern(source) {
 // written one that compiles, the built-in one otherwise, and null when
 // there is neither. `patterns` is the account's map of network key to
 // pattern text.
+//
+// Returned as { match, except }, the except half null where there is
+// none. An account's own pair replaces the built-in one whole, exception
+// included - it was shown both halves in the editor, and whatever it left
+// in the second box is what it meant.
 function channelPatternFor(key, patterns) {
   if (!acceptsChannelPattern(key)) return null;
   const own = patterns && patterns[key];
   if (own) {
-    const compiled = compileChannelPattern(own);
-    if (compiled.regex) return compiled.regex;
+    const compiled = compileChannelPatternPair(own);
+    if (!compiled.error) return { match: compiled.match, except: compiled.except };
   }
   const network = NETWORKS.find(n => n.key === key);
-  return (network && network.channelPattern) || null;
+  if (!network || !network.channelPattern) return null;
+  return { match: network.channelPattern, except: network.channelExcept || null };
 }
 
 // Whether a channel name is this network, by its pattern. null when the
@@ -1268,7 +1387,8 @@ function foldForPattern(name) {
 function matchesNetworkChannel(key, name, patterns) {
   const pattern = channelPatternFor(key, patterns);
   if (!pattern) return null;
-  return pattern.test(foldForPattern(name));
+  const folded = foldForPattern(name);
+  return pattern.match.test(folded) && !(pattern.except && pattern.except.test(folded));
 }
 
 function hasChannelPattern(key, patterns) {
@@ -1587,6 +1707,8 @@ module.exports = {
   acceptsChannelPattern,
   defaultChannelPattern,
   compileChannelPattern,
+  compileChannelPatternPair,
+  readChannelPattern,
   foldForPattern,
   foldSuperscripts,
   detectQuality,

@@ -4667,7 +4667,7 @@ app.post('/api/leagues/teams', async (req, res) => {
 app.get('/api/networks', (req, res) => {
   res.json({
     // `patternable` says the section takes a channel pattern at all, and
-    // `defaultPattern` is the built-in one where there is one - shown in
+    // `defaultPattern` is the built-in { match, except } pair - shown in
     // the pattern editor so it can be read and copied, and what an
     // account's own pattern is measured against. A section with either
     // has no search box: its channels are its categories put through the
@@ -5963,18 +5963,39 @@ app.post('/api/networks/categories/default', async (req, res) => {
   return res.json({ success: true, ...networkCategoryState(auth.user) });
 });
 
-// The channel patterns an account wrote for itself, by network. Absent
-// means the built-in pattern, or none. Read through the compiler so a
-// stored pattern that no longer compiles - the rules for what is allowed
-// can tighten - is dropped here rather than failing somewhere later.
+// The channel patterns an account wrote for itself, by network, each a
+// { match, except } pair. Absent means the built-in pattern. Read
+// through the compiler so a stored pattern that no longer compiles - the
+// rules for what is allowed can tighten - is dropped here rather than
+// failing somewhere later, and one stored as a bare string, before the
+// exception half existed, comes back as a pair.
 function readNetworkPatterns(user) {
   const raw = (user && user.networkPatterns) || {};
   const out = {};
-  for (const [key, source] of Object.entries(raw)) {
-    if (!networks.acceptsChannelPattern(key) || typeof source !== 'string') continue;
-    if (networks.compileChannelPattern(source).regex) out[key] = source.trim();
+  for (const [key, value] of Object.entries(raw)) {
+    if (!networks.acceptsChannelPattern(key)) continue;
+    const compiled = networks.compileChannelPatternPair(value);
+    if (!compiled.error) out[key] = compiled.pair;
   }
   return out;
+}
+
+// The account's patterns with one network's replaced by what the editor
+// sent - a pair, or a bare string from a page older than the pair - or
+// removed where the match half is empty. Shared by Save and by Preview,
+// so a pattern the preview answered for is one the save will take.
+function patternsWithDraft(user, key, draft) {
+  if (!networks.acceptsChannelPattern(key)) return { error: 'That section does not take a pattern.' };
+  const patterns = readNetworkPatterns(user);
+  const read = networks.readChannelPattern(draft);
+  if (!read) {
+    delete patterns[key];
+    return { patterns };
+  }
+  const compiled = networks.compileChannelPatternPair(read);
+  if (compiled.error) return { error: compiled.error };
+  patterns[key] = compiled.pair;
+  return { patterns };
 }
 
 // Saved as soon as it is written, like the categories beside it: it
@@ -5985,18 +6006,8 @@ app.post('/api/networks/pattern/save', async (req, res) => {
   if (!auth) return;
 
   const key = String(req.body.key || '');
-  if (!networks.acceptsChannelPattern(key)) {
-    return res.status(400).json({ error: 'That section does not take a pattern.' });
-  }
-  const source = typeof req.body.pattern === 'string' ? req.body.pattern.trim() : '';
-  const patterns = readNetworkPatterns(auth.user);
-  if (source) {
-    const compiled = networks.compileChannelPattern(source);
-    if (compiled.error) return res.status(400).json({ error: compiled.error });
-    patterns[key] = source;
-  } else {
-    delete patterns[key];
-  }
+  const { patterns, error } = patternsWithDraft(auth.user, key, req.body.pattern);
+  if (error) return res.status(400).json({ error });
   auth.user.networkPatterns = patterns;
   saveUserConfigs();
   return res.json({ success: true, networkPatterns: patterns });
@@ -6037,18 +6048,11 @@ app.post('/api/networks/category-channels', async (req, res) => {
   // list answers for it before it is saved. Checked the way a save is,
   // and a bad one is refused rather than quietly falling back - a preview
   // that answered for the old pattern would look like the new one worked.
-  const patterns = readNetworkPatterns(auth.user);
-  if (typeof req.body.pattern === 'string') {
-    if (!networks.acceptsChannelPattern(key)) {
-      return res.status(400).json({ error: 'That section does not take a pattern.' });
-    }
-    if (req.body.pattern.trim()) {
-      const compiled = networks.compileChannelPattern(req.body.pattern);
-      if (compiled.error) return res.status(400).json({ error: compiled.error });
-      patterns[key] = req.body.pattern.trim();
-    } else {
-      delete patterns[key];
-    }
+  let patterns = readNetworkPatterns(auth.user);
+  if (req.body.pattern !== undefined) {
+    const draft = patternsWithDraft(auth.user, key, req.body.pattern);
+    if (draft.error) return res.status(400).json({ error: draft.error });
+    patterns = draft.patterns;
   }
 
   if (wanted.size === 0) return res.json({ success: true, channels: [], truncated: false });
