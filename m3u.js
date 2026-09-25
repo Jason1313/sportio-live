@@ -59,8 +59,15 @@ function parseM3UPlaylist(content) {
     const idMatch = block.match(/tvg-id="([^"]*)"/);
     const logoMatch = block.match(/tvg-logo="([^"]*)"/);
     const groupMatch = block.match(/group-title="([^"]*)"/);
-    const extinfLine = block.split('\n')[0];
-    const nameMatch = extinfLine.match(/,([^,]*)$/);
+    // The name is everything after the first comma that is not inside a
+    // quoted attribute. It used to be everything after the LAST comma,
+    // which cut any name holding one: a Strong8K NBC folder writes its
+    // stations "... DALLAS, TX (D) RAW", and 102 of them arrived named
+    // "TX (D) RAW" - no network, no call sign, nothing a channel pattern
+    // or a person could recognise. The quotes are stepped over rather
+    // than split on, since a group-title can hold a comma of its own.
+    const extinfLine = block.split('\n')[0].replace(/\r$/, '');
+    const nameMatch = extinfLine.match(/^#EXTINF:[^,"]*(?:"[^"]*"[^,"]*)*,(.*)$/);
     const urlMatch = block.match(/\n(https?:\/\/\S+)/);
 
     // Skip malformed entries rather than let one bad line break the whole
