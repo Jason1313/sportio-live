@@ -5882,11 +5882,21 @@ app.post('/api/networks/link-check', async (req, res) => {
   });
 });
 
-// The playlist categories each network section lists channels from, keyed
-// by network - "Strong8K: US| FOX NETWORK" and "Trex: US| FOX NETWORK" for
-// FOX. Names only, exactly as the playlist spells them; a category the
-// provider has since renamed contributes nothing rather than failing.
-const MAX_NETWORK_CATEGORIES = 20;
+// The playlist categories every broadcast and cable section lists its
+// channels from - one list for the account, chosen under Network
+// categories. Names only, exactly as the playlist spells them; a category
+// the provider has since renamed contributes nothing rather than failing.
+//
+// One list, not one per network. Each section used to be able to name
+// its own, capped at twenty like this one, on the reasoning that a
+// network lives in a folder or two of its own and the list says which.
+// Once every network had a channel pattern that reasoning ran out: the
+// pattern says which channels are the network, so the list only has to
+// say where to look, and the answer is the same for every section. One
+// account ticked every US category on its playlist, 166 of them, and hit
+// the old cap eight times over. The cap is now what bounds a request,
+// not a choice - a whole playlist's folders fit under it.
+const MAX_NETWORK_CATEGORIES = 2000;
 
 function cleanCategoryList(list) {
   if (!Array.isArray(list)) return [];
@@ -5895,93 +5905,59 @@ function cleanCategoryList(list) {
     .map(c => c.slice(0, 160)))].slice(0, MAX_NETWORK_CATEGORIES);
 }
 
-function readNetworkCategories(user) {
-  const raw = (user && user.networkCategories) || {};
-  const known = new Set(networks.NETWORKS.map(n => n.key));
-  const out = {};
-  for (const [key, list] of Object.entries(raw)) {
-    if (!known.has(key)) continue;
-    const cleaned = cleanCategoryList(list);
-    if (cleaned.length) out[key] = cleaned;
-  }
-  return out;
-}
-
-// One list standing in for every standing-channel section that has not
-// named its own.
-//
-// Broadcast AND cable. This started as a broadcast setting, on the
-// reasoning that a cable network sits in a folder of its own name and
-// no single list could be right for ESPN and TNT at once - which had
-// the second half backwards. A list of the two or three folders an
-// account's channels actually live in is right for every one of those
-// sections; what tells ESPN from TNT inside one of them is the rule
-// table, and categoryCandidates in autopick.js consults it exactly when
-// the folder holds more than one network's channels.
-//
-// Not the event sections - UFC, DWCS, BKFC, RAF. A provider spins those
-// listings up per card, names them for the event and takes them down
-// again, and files them wherever it files a one-off. Those sections
-// search the whole playlist for that reason, and pointing them at the
-// folders the standing channels live in would narrow them to somewhere
-// the listing is not. It is the same line LINK_CHECK_KINDS draws a few
-// hundred lines up, for the same underlying reason: an event bucket is
-// empty between events.
+// Only the standing-channel sections - broadcast and cable. Not the
+// event sections - UFC, DWCS, BKFC, RAF. A provider spins those listings
+// up per card, names them for the event and takes them down again, and
+// files them wherever it files a one-off. Those sections search the
+// whole playlist for that reason, and pointing them at the folders the
+// standing channels live in would narrow them to somewhere the listing
+// is not. It is the same line LINK_CHECK_KINDS draws a few hundred lines
+// up, for the same underlying reason: an event bucket is empty between
+// events.
 const DEFAULT_CATEGORY_KINDS = new Set(['broadcast', 'cable']);
 
+// The account's list. Migrated on read from the per-network lists an
+// account could hold before: one that never set the account-wide list
+// but chose folders for FOX and for ESPN gets both sets of folders, for
+// every section, rather than waking up to sections with nothing in them.
+// Each pattern still decides which of those channels are its network.
+// The per-network lists are dropped the next time the account-wide one
+// is saved, which is when the new shape holds what the account meant.
 function readDefaultNetworkCategories(user) {
-  return cleanCategoryList(user && user.defaultNetworkCategories);
+  const own = cleanCategoryList(user && user.defaultNetworkCategories);
+  if (own.length > 0) return own;
+  const legacy = (user && user.networkCategories) || {};
+  const folded = [];
+  for (const network of networks.NETWORKS) {
+    if (DEFAULT_CATEGORY_KINDS.has(network.kind)) folded.push(...cleanCategoryList(legacy[network.key]));
+  }
+  return cleanCategoryList(folded);
 }
 
-// What each network's categories actually ARE, defaults folded in. This
-// is what every behaviour reads; readNetworkCategories is the stored
-// override on its own, which only the picker and the account payload
-// want.
-//
-// A network's own list wins outright, including over a default it
-// contradicts - somebody who opened FOX's picker and chose has said
-// something more specific than the account-wide setting. Clearing that
-// list puts the network back on the default rather than on nothing,
-// which is why an empty list is not stored as an empty list.
+// What each section's categories are, by network key - the account's one
+// list for every broadcast and cable section, nothing for the rest. This
+// is what every behaviour reads: the section's channel list, auto-pick,
+// and what the pickers draw.
 function resolvedNetworkCategories(user) {
-  const own = readNetworkCategories(user);
-  const fallback = readDefaultNetworkCategories(user);
-  if (fallback.length === 0) return own;
-
-  const out = { ...own };
+  const list = readDefaultNetworkCategories(user);
+  if (list.length === 0) return {};
+  const out = {};
   for (const network of networks.NETWORKS) {
-    if (!DEFAULT_CATEGORY_KINDS.has(network.kind)) continue;
-    if (!out[network.key]) out[network.key] = fallback;
+    if (DEFAULT_CATEGORY_KINDS.has(network.kind)) out[network.key] = list;
   }
   return out;
 }
 
-app.post('/api/networks/categories/save', async (req, res) => {
-  const auth = await authenticateAccount(req, res);
-  if (!auth) return;
-
-  const key = String(req.body.key || '');
-  if (!networks.NETWORKS.some(n => n.key === key)) {
-    return res.status(400).json({ error: `Unknown network: ${key}` });
-  }
-  const categories = Array.isArray(req.body.categories) ? req.body.categories : [];
-  auth.user.networkCategories = readNetworkCategories({
-    networkCategories: { ...readNetworkCategories(auth.user), [key]: categories },
-  });
-  saveUserConfigs();
-  return res.json({ success: true, ...networkCategoryState(auth.user) });
-});
-
-// The account-wide default. Saved on its own route rather than as a
-// `key` of '' on the one above, because the two are different settings
-// and a route that told them apart by an empty string would be one
-// typo away from writing the wrong one.
 app.post('/api/networks/categories/default', async (req, res) => {
   const auth = await authenticateAccount(req, res);
   if (!auth) return;
 
   const categories = Array.isArray(req.body.categories) ? req.body.categories : [];
   auth.user.defaultNetworkCategories = cleanCategoryList(categories);
+  // The per-network lists this replaced. Whatever they held was on
+  // screen in this list when it was saved, folded in by the read above,
+  // so what was saved is what the account now means.
+  delete auth.user.networkCategories;
   saveUserConfigs();
   return res.json({ success: true, ...networkCategoryState(auth.user) });
 });
@@ -6036,14 +6012,9 @@ app.post('/api/networks/pattern/save', async (req, res) => {
   return res.json({ success: true, networkPatterns: patterns });
 });
 
-// Both halves together, because a page that changed one has to redraw
-// the other: clearing the default empties every section that was living
-// on it, and naming one fills every section that had nothing.
+// What the page draws the sections from, after any change to it.
 function networkCategoryState(user) {
-  return {
-    networkCategories: readNetworkCategories(user),
-    defaultNetworkCategories: readDefaultNetworkCategories(user),
-  };
+  return { defaultNetworkCategories: readDefaultNetworkCategories(user) };
 }
 
 // Every channel in a network's chosen categories, for its section to list
