@@ -4688,8 +4688,10 @@ app.get('/api/networks', (req, res) => {
     // account's own pattern is measured against. A section with either
     // has no search box: its channels are its categories put through the
     // pattern. Only the server ever runs one.
-    networks: networks.NETWORKS.map(({ key, label, kind }) => ({
+    networks: networks.NETWORKS.map(({ key, label, kind, rejectFormats }) => ({
       key, label, kind,
+      // Pictures this network never sends, for the best-tested button.
+      rejectFormats: rejectFormats || [],
       patternable: networks.acceptsChannelPattern(key),
       defaultPattern: networks.defaultChannelPattern(key),
     })),
@@ -5397,6 +5399,8 @@ function testStateFor(user, providerId, url) {
     bandName: passes ? TEST_BANDS[testBandFor(result, bpp)] : '',
     bpp: bpp ? Math.round(bpp * 1000) / 1000 : null,
     testedAt: result.testedAt || '',
+    height: result.ok ? result.height : null,
+    interlaced: !!result.interlaced,
     format: result.ok
       ? `${result.height}${result.interlaced ? 'i' : 'p'}${rate || ''}`
       : (result.error || 'could not open'),

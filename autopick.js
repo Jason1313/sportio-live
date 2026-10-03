@@ -35,7 +35,7 @@
 // Pure logic over plain data, like networks.js and for the same reason:
 // every rule here can be run against a real provider table offline.
 
-const { foldSuperscripts, matchesNetworkChannel, hasChannelPattern } = require('./networks.js');
+const { foldSuperscripts, matchesNetworkChannel, hasChannelPattern, formatRejected } = require('./networks.js');
 
 // ---------------------------------------------------------------------
 // Names
@@ -855,6 +855,10 @@ function rankCandidates(candidates, read, options = {}) {
     const reading = read(candidate.channel);
     if (!reading) { rejected.unmeasured++; continue; }
     if (reading.status && reading.status !== 'Alive') { rejected.notAlive++; continue; }
+    // A picture the network never sends - 1080p under a FOX name is the
+    // CBS half of a dual affiliate. Counted with the dead ones: it is not
+    // a channel for this network, whatever it is called.
+    if (options.networkKey && formatRejected(options.networkKey, reading)) { rejected.notAlive++; continue; }
 
     const slow = (reading.fps || 0) < MIN_FPS;
     if (slow && !options.allowSlow) { rejected.slow++; continue; }
@@ -885,6 +889,7 @@ function pickForNetwork(networkKey, channels, read, options = {}) {
   const limit = options.limit || 5;
   const candidates = candidatesFor(networkKey, channels, options);
 
+  options = { ...options, networkKey };
   let { ranked, rejected } = rankCandidates(candidates, read, options);
 
   // The 30fps fallback, and only ever as a fallback: it runs when the

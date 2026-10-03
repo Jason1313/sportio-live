@@ -127,8 +127,16 @@ const NETWORKS = [
   // `channelExcept` is the other half, for the rare name a whitelist
   // cannot turn away without a lookahead: matched anywhere in the name,
   // and a hit drops the channel even though the pattern let it in.
+  //
+  // `rejectFormats` is for what a name cannot say. A dual affiliate such
+  // as KFXA is filed as FOX and is a CBS station, and a provider's feed
+  // of it is named for Fox all the same. What gives it away is the
+  // picture: Fox broadcasts 720p60, so a progressive 1080 feed under a
+  // Fox name is the CBS signal. A reading matching an entry is not this
+  // network's - see formatRejected.
   { key: 'FOX',  label: 'FOX',  kind: 'broadcast', aliases: ['FOX', 'Fox'],
-    channelPattern: affiliatePattern('FOX'), channelExcept: new RegExp(BROADCAST_EXCEPT) },
+    channelPattern: affiliatePattern('FOX'), channelExcept: new RegExp(BROADCAST_EXCEPT),
+    rejectFormats: [{ minHeight: 1080, interlaced: false }] },
   // CBS Sports Network, CBS News and CBSSN all carry a second word or
   // letter straight after CBS, which the shape already refuses. WLNY is
   // CBS-owned but independent - "US: CBS WLNY HD" carries none of the
@@ -729,6 +737,18 @@ function resolveSavedChannels(savedChannels, source) {
   });
 
   return { resolved, problems };
+}
+
+// Whether a measured picture rules a channel out of a network, whatever
+// its name says. `reading` is { height, interlaced } from a sweep or a
+// test; one with no height has nothing to rule on and is let through.
+function formatRejected(networkKey, reading) {
+  const rules = NETWORK_BY_KEY.get(networkKey)?.rejectFormats || [];
+  const height = (reading && reading.height) || 0;
+  if (!height) return false;
+  const interlaced = !!(reading && reading.interlaced);
+  return rules.some(rule => height >= (rule.minHeight || 0)
+    && (rule.interlaced === undefined || rule.interlaced === interlaced));
 }
 
 function getNetworkLabel(networkKey) {
@@ -1720,6 +1740,7 @@ module.exports = {
   resolveLinkEntry,
   resolveNetworkLinks,
   getNetworkLabel,
+  formatRejected,
   MAX_SAVED_CHANNELS,
   streamIdFromUrl,
   validateSavedChannels,

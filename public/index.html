@@ -4822,6 +4822,16 @@
     // own number. Five, the same share auto-pick gives each provider.
     const BEST_PER_SERVICE = 5;
 
+    // Whether a tested picture is one this network never sends: a FOX
+    // section is not offered a 1080p feed, which is the CBS half of a dual
+    // affiliate named for Fox. Mirrors networks.formatRejected.
+    function formatRejectedFor(key, test) {
+      const rules = (networkRegistry.find(n => n.key === key) || {}).rejectFormats || [];
+      if (!test || !test.height) return false;
+      return rules.some(rule => test.height >= (rule.minHeight || 0)
+        && (rule.interlaced === undefined || rule.interlaced === !!test.interlaced));
+    }
+
     // Every channel this section knows has passed a test - the category
     // list when there is one, otherwise the current search results.
     function bestTestedFor(key) {
@@ -4830,6 +4840,7 @@
       const seen = new Set();
       for (const row of source) {
         if (!row.test || !row.test.tested || !row.test.passes || row.test.hidden) continue;
+        if (formatRejectedFor(key, row.test)) continue;
         if (seen.has(row.url)) continue;
         seen.add(row.url);
         const provider = providerOfRow(row.providerId);
