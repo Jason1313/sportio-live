@@ -68,10 +68,11 @@
 // which is every connection the login has. Somebody who wants one left
 // free to watch with can lower it here.
 //
-// The dashboard's "best tested" button takes up to `bestPerProvider` from
-// each provider and deals them out one provider at a time - each one's
-// best in slots 1-3, each one's second best in 4-6 - so the first slots
-// span all three services and one of them having a bad night leaves the
+// The dashboard's "best tested" button takes `bestPerProvider` from each
+// provider - two, a primary and a backup, so six links a network across
+// three providers - and deals them out one provider at a time: each one's
+// best in slots 1-3, each one's second best in 4-6. The first slots span
+// all three services and one of them having a bad night leaves the
 // others playing.
 const BUNDLES = [
   {
@@ -81,7 +82,7 @@ const BUNDLES = [
     maxTestsAtOnce: 3,
     testSeconds: 10,
     loginSuffixes: ['dream', 'strong', 'trex'],
-    bestPerProvider: 5,
+    bestPerProvider: 2,
   },
 ];
 
