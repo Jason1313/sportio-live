@@ -2944,7 +2944,10 @@
                    </select>
                  </label>`}
           ${bundleSwitches(pr, i)}
-          <label class="flex items-center gap-2 text-[10px] text-[#e6e6e6]/45">
+          ${bundleOf(pr) ? `<p class="text-[10px] text-[#e6e6e6]/45">
+            Tests ${testsAtOnceOf(pr)} channels at a time across every ${escapeHtml(bundleOf(pr).label)}
+            provider on this login &mdash; they share the ${testCeilingOf(pr)} connections it sells.
+          </p>` : `<label class="flex items-center gap-2 text-[10px] text-[#e6e6e6]/45">
             Test
             <select onchange="updateProviderField(${i}, 'testsAtOnce', Number(this.value))"
                     class="bg-[#2f3e47] border border-[#e6e6e6]/15 rounded-lg px-2 py-1 text-[11px] focus:border-[#3b8fc4] focus:outline-none">
@@ -2952,10 +2955,8 @@
                 .map(n => `<option value="${n}" ${testsAtOnceOf(pr) === n ? 'selected' : ''}>${n}</option>`).join('')}
             </select>
             channel${testsAtOnceOf(pr) === 1 ? '' : 's'} at a time &mdash; each holds a connection to this
-            provider while it reads, so leave one free for watching${bundleOf(pr)
-              ? ` (${escapeHtml(bundleOf(pr).label)} sells ${testCeilingOf(pr)})`
-              : ''}
-          </label>
+            provider while it reads, so leave one free for watching
+          </label>`}
           ${pr.id && !bundleOf(pr) ? `<p class="text-[10px] text-[#e6e6e6]/35">
               Quality data: ${escapeHtml(pr.streamcheckProvider || 'none chosen')} &mdash; chosen under Quality data.
             </p>` : ''}
@@ -3028,6 +3029,10 @@
     // dropdown stops and where a new one starts. Mirrors testLimitsFor
     // in server.js, which is what a run actually obeys.
     function testsAtOnceOf(provider) {
+      // A reseller's providers share one login's connections, so the
+      // number is the service's and not the provider's own.
+      const bundle = provider && bundleOf(provider);
+      if (bundle) return Math.min(bundle.testsAtOnce || 1, testCeilingOf(provider));
       const asked = provider && provider.testsAtOnce;
       return Math.min(asked || defaultTestsAtOnceOf(provider), testCeilingOf(provider));
     }
@@ -4795,48 +4800,33 @@
     // ---- Best tested ---------------------------------------------------
     //
     // Fills a network with the best channels that passed their test: up
-    // to five from each service - a reseller's folders counted apart,
-    // five Strong and five Trex for Flix-Streams, and one share per
-    // provider otherwise - then all of them ordered by quality alone,
-    // whichever service each is on. So the list can run Strong, Strong,
-    // Strong, Trex, Strong: slot order is the order a player tries, and
-    // it should try the best stream first.
+    // to five from each provider, dealt out one provider at a time. Each
+    // provider's best goes in slots 1, 2, 3 in the order the providers
+    // are listed, each one's second best in 4, 5, 6, and so on. So the
+    // first slots span every service - Dream, Strong and Trex for
+    // Flix-Streams - and a player working down the list has tried all of
+    // them before it comes back to any one.
     //
-    // A service with fewer than five passes contributes what it has
-    // rather than letting the others fill its share. The split is the
-    // point - five from each is what keeps half the list working when one
-    // service has a bad night. It is the same reasoning auto-pick uses to
-    // give each provider its own block, and this is its hand-run twin:
-    // auto-pick ranks a whole network off the published sweep, this ranks
-    // what somebody chose to open.
+    // This used to sort everything by quality alone, which could put
+    // Strong's five best ahead of Trex's first and leave a player with
+    // nothing else to try when Strong had a bad night. Within one
+    // provider the order is still quality; what is dealt is the turn.
+    //
+    // A provider with fewer than five passes contributes what it has and
+    // drops out of the later rounds; the others keep their turns. It is the
+    // same reasoning auto-pick uses to give each provider its own block,
+    // and this is its hand-run twin: auto-pick ranks a whole network off
+    // the published sweep, this ranks what somebody chose to open.
 
-    // Which of a reseller's services a channel plays from, by the folder
-    // prefix on any of its categories.
-    function folderOfRow(bundle, row) {
-      const categories = [row.group, ...(row.groups || [])].filter(Boolean);
-      for (const folder of bundle.folders || []) {
-        const prefix = new RegExp(`^\\s*${folder.prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:`, 'i');
-        if (categories.some(category => prefix.test(category))) return folder;
-      }
-      return null;
-    }
-
-    // How many a service contributes when it is not a reseller naming its
+    // How many a provider contributes when it is not a reseller naming its
     // own number. Five, the same share auto-pick gives each provider.
     const BEST_PER_SERVICE = 5;
 
     // Every channel this section knows has passed a test - the category
     // list when there is one, otherwise the current search results.
-    //
-    // A "service" is one of a reseller's folders where there is one, and
-    // the provider itself otherwise. Both are the same thing for the
-    // purpose here: a set of channels that go dark together, which is
-    // what the split protects against. Grouping by folder alone meant
-    // this button did nothing at all on an ordinary provider, since none
-    // of its rows sits in one.
     function bestTestedFor(key) {
       const source = networkCategoryChannels[key] || networkSearchResults[key] || [];
-      const byService = new Map();
+      const byProvider = new Map();
       const seen = new Set();
       for (const row of source) {
         if (!row.test || !row.test.tested || !row.test.passes || row.test.hidden) continue;
@@ -4844,31 +4834,29 @@
         seen.add(row.url);
         const provider = providerOfRow(row.providerId);
         if (!provider) continue;
-        const bundle = bundleOf(provider);
-        const folder = bundle ? folderOfRow(bundle, row) : null;
-        // A reseller channel in none of its folders cannot be said to
-        // play from either service, so it is left out rather than
-        // credited to a guess.
-        if (bundle && !folder) continue;
-        const service = `${provider.id}|${folder ? folder.prefix : ''}`;
-        if (!byService.has(service)) {
-          byService.set(service, {
-            take: (bundle && bundle.bestPerFolder) || BEST_PER_SERVICE,
-            label: folder ? folder.label : provider.label,
-            rows: [],
-          });
-        }
-        byService.get(service).rows.push(row);
+        if (!byProvider.has(provider.id)) byProvider.set(provider.id, { provider, rows: [] });
+        byProvider.get(provider.id).rows.push(row);
       }
 
+      // Account order, which is the order the person put the providers in
+      // and so the order they want the slots to run.
+      const order = (activeUser && activeUser.providers) || [];
+      const turns = [...byProvider.values()]
+        .sort((a, b) => order.indexOf(a.provider) - order.indexOf(b.provider))
+        .map(({ provider, rows }) => {
+          const bundle = bundleOf(provider);
+          const take = (bundle && bundle.bestPerProvider) || BEST_PER_SERVICE;
+          return { label: provider.label, best: rows.sort(compareQuality).slice(0, take) };
+        });
+
       const picks = [];
-      const counts = [];
-      for (const { take, label, rows } of byService.values()) {
-        const best = rows.sort(compareQuality).slice(0, take);
-        picks.push(...best);
-        counts.push(`${best.length} ${label}`);
+      for (let round = 0; turns.some(t => round < t.best.length); round++) {
+        for (const { best } of turns) {
+          if (round < best.length) picks.push(best[round]);
+        }
       }
-      return { picks: picks.sort(compareQuality).slice(0, networkMaxLinks), counts };
+      const counts = turns.map(({ label, best }) => `${best.length} ${label}`);
+      return { picks: picks.slice(0, networkMaxLinks), counts };
     }
 
     function applyBestTested(key) {
@@ -5348,15 +5336,17 @@
       if (bar) bar.innerHTML = buildTestEverythingHtml();
     }
 
-    // Grouped by provider, because that is what a connection limit
-    // belongs to: each provider's channels are worked through as many at
-    // a time as it allows, and the providers run side by side - so the
-    // wait is the slowest provider's share, not the sum.
+    // Grouped by login, because that is what a connection limit belongs
+    // to: each login's channels are worked through as many at a time as
+    // it allows, and the logins run side by side - so the wait is the
+    // slowest login's share, not the sum. Flix-Streams' Dream, Strong and
+    // Trex providers are one login to its connection count, so grouping
+    // by provider gave each its own three and the run opened up to nine.
     function groupByProvider(channels) {
       const groups = new Map();
       for (const row of channels) {
         const provider = providerOfRow(row.providerId);
-        const id = provider ? provider.id : '';
+        const id = provider ? (provider.connection || provider.id) : '';
         if (!groups.has(id)) groups.set(id, { provider, urls: [] });
         groups.get(id).urls.push(row.url);
       }

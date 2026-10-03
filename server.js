@@ -393,8 +393,12 @@ function testLimitsFor(provider) {
   const bundle = provider && bundles.bundleFor(provider.bundle);
   const asked = provider && provider.testsAtOnce;
   if (bundle) {
+    // The bundle's number and not the provider's own: the lane is shared
+    // by every provider on the login, and a lane takes the limit of
+    // whichever probe arrived last, so three providers set to different
+    // numbers would have it flapping between them.
     return {
-      atOnce: Math.min(asked || bundle.testsAtOnce || 1, testCeilingFor(provider)),
+      atOnce: Math.min(bundle.testsAtOnce || 1, testCeilingFor(provider)),
       seconds: bundle.testSeconds,
     };
   }
@@ -462,6 +466,9 @@ function describeProvider(provider, { withConnection = false, withSecrets = fals
     streamcheckProvider: provider.streamcheckProvider || '',
     bundle: provider.bundle || '',
     testsAtOnce: provider.testsAtOnce || defaultTestsAtOnceFor(provider),
+    // Which providers share connections, so the page can queue a run per
+    // login rather than per provider. A hash: it is only ever compared.
+    connection: crypto.createHash('sha1').update(connectionKeyFor(provider)).digest('hex').slice(0, 12),
   };
   if (provider.kind === 'm3u') {
     return (withConnection || withSecrets)
@@ -3997,9 +4004,18 @@ function xtreamCacheKey(provider) {
 // M3U playlist URL carries the login in its path, so it is hashed rather
 // than kept whole; the key lives in memory and is never logged either
 // way.
+//
+// A reseller's providers that differ only by service suffix
+// (name.strong, name.trex) are one login to the service's connection
+// count, so they key together - see bundles.sharedLoginName.
 function connectionKeyFor(provider) {
   if (provider.kind === 'm3u') {
     return `m3u|${crypto.createHash('sha1').update(String(provider.playlistUrl || '')).digest('hex')}`;
+  }
+  const bundle = bundles.bundleFor(provider.bundle);
+  if (bundle) {
+    const baseUrl = String(provider.url || '').replace(/\/+$/, '');
+    return `xtream|${baseUrl}|${bundles.sharedLoginName(bundle, provider.username)}`;
   }
   return `xtream|${xtreamCacheKey(provider)}`;
 }
@@ -6879,8 +6895,7 @@ function describeBundles() {
     // What a test will actually read, for the page's time estimates - the
     // environment override included, so the estimate matches the wait.
     testSeconds: probe.sampleSecondsFor(bundle.testSeconds),
-    folders: (bundle.folders || []).map(({ prefix, label }) => ({ prefix, label })),
-    bestPerFolder: bundle.bestPerFolder || 5,
+    bestPerProvider: bundle.bestPerProvider || 5,
   }));
 }
 

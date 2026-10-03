@@ -51,23 +51,37 @@
 // sit close together inside a band but cannot move one across the pass
 // line.
 //
-// `folders` says which service a channel plays from, by the prefix the
-// reseller puts on its category - "Strong8K: US| FOX NETWORK" is Strong.
-// The dashboard's "best tested" button takes up to `bestPerFolder` from
-// each, so a network ends up with links on both services and one of them
-// having a bad night leaves the other half of the list working.
+// Flix-Streams used to be one login carrying Strong and Trex, told apart
+// by the prefix on each category. It is now three logins - Dream, Strong
+// and Trex - on one server and one password, the username differing by a
+// suffix: "name.dream", "name.strong", "name.trex". Each is added as its
+// own provider, and the three share ONE allowance of connections, not
+// three. A test run that counted each provider's three separately was
+// fine inside the first provider and ran past the limit the moment it
+// moved to the next, with the first one's probes still open.
+//
+// `loginSuffixes` are what come off a username to find the login they
+// all share (see sharedLoginName), so the probe lane that holds a run to
+// `testsAtOnce` is the same lane for all three. Because the allowance is
+// the login's and not any one provider's, `testsAtOnce` is not a
+// per-provider setting for a reseller: it is the number here, three,
+// which is every connection the login has. Somebody who wants one left
+// free to watch with can lower it here.
+//
+// The dashboard's "best tested" button takes up to `bestPerProvider` from
+// each provider and deals them out one provider at a time - each one's
+// best in slots 1-3, each one's second best in 4-6 - so the first slots
+// span all three services and one of them having a bad night leaves the
+// others playing.
 const BUNDLES = [
   {
     key: 'flix-streams',
     label: 'Flix-Streams',
-    testsAtOnce: 2,
+    testsAtOnce: 3,
     maxTestsAtOnce: 3,
     testSeconds: 10,
-    folders: [
-      { prefix: 'Strong8K', label: 'Strong' },
-      { prefix: 'Trex', label: 'Trex' },
-    ],
-    bestPerFolder: 5,
+    loginSuffixes: ['dream', 'strong', 'trex'],
+    bestPerProvider: 5,
   },
 ];
 
@@ -77,7 +91,20 @@ function bundleFor(key) {
   return BUNDLE_BY_KEY.get(String(key || '')) || null;
 }
 
+// The username with the bundle's service suffix taken off, so
+// "name.strong" and "name.trex" come out as the same login. A username
+// ending in anything else is left alone.
+function sharedLoginName(bundle, username) {
+  const name = String(username || '');
+  for (const suffix of (bundle && bundle.loginSuffixes) || []) {
+    const tail = `.${suffix}`;
+    if (name.toLowerCase().endsWith(tail)) return name.slice(0, -tail.length);
+  }
+  return name;
+}
+
 module.exports = {
   BUNDLES,
   bundleFor,
+  sharedLoginName,
 };
