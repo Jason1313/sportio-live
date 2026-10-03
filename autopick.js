@@ -447,6 +447,8 @@ const DEFAULT_RULES = {
       // ESPN name too - "US ESPN ACC Network", "US ESPN SEC (X)". Those
       // are ACCN and SECN, and they have their own slots.
       'ACC NETWORK', 'SEC NETWORK', 'ESPN ACC', 'ESPN SEC', 'BIG TEN',
+      // The same two with the owner last: "|US| SEC ESPN ᴴᴰ".
+      'SEC ESPN', 'ACC ESPN',
     ],
   },
   ESPN2: {

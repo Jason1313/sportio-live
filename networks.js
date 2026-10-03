@@ -184,8 +184,15 @@ const NETWORKS = [
   //
   // ESPN+ is refused by the shape, since '+' is not something that may
   // follow a name. So are ESPNews, ESPN Deportes and ESPN2 from ESPN.
+  //
+  // "SEC ESPN" and "ACC ESPN" are ESPN's conference channels written with
+  // the owner last - "Dream 4K · |US| SEC ESPN ᴴᴰ". The shape lets them
+  // in, since ESPN is followed by the tail, so they are refused here and
+  // claimed by SECN and ACCN below. ("ESPN SEC (X)" never needed this: a
+  // word after ESPN already fails the shape.)
   { key: 'ESPN',    label: 'ESPN',        kind: 'cable', aliases: ['ESPN'],
-    channelPattern: feedPattern(String.raw`ESPN(?:\s*1|\s*USA)?`), channelExcept: FEED_EXCEPT },
+    channelPattern: feedPattern(String.raw`ESPN(?:\s*1|\s*USA)?`),
+    channelExcept: new RegExp(String.raw`${FEED_EXCEPT.source}|\b(?:SEC|ACC)\s*ESPN`) },
   { key: 'ESPN2',   label: 'ESPN2',       kind: 'cable', aliases: ['ESPN2'],
     channelPattern: feedPattern(String.raw`ESPN\s*2`), channelExcept: FEED_EXCEPT },
   { key: 'ESPNU',   label: 'ESPNU',       kind: 'cable', aliases: ['ESPNU'],
@@ -199,11 +206,11 @@ const NETWORKS = [
   // Bare "SEC" as well as the full name, because providers file it
   // under ESPN's name - "US ESPN SEC (X)" - and that is this channel.
   { key: 'SECN',    label: 'SEC Network',        kind: 'cable', aliases: ['SEC Network', 'SECN'],
-    channelPattern: feedPattern(String.raw`SECN|SEC(?:\s*NETWORK)?`), channelExcept: FEED_EXCEPT },
+    channelPattern: feedPattern(String.raw`SECN|SEC(?:\s*NETWORK)?|SEC\s*ESPN`), channelExcept: FEED_EXCEPT },
   // ACCNX and ACC Network Extra are the streaming overflow tier, and are
   // refused by the shape - an X or a further word after the name.
   { key: 'ACCN',    label: 'ACC Network',        kind: 'cable', aliases: ['ACC Network', 'ACCN'],
-    channelPattern: feedPattern(String.raw`ACCN|ACC(?:\s*NETWORK)?`), channelExcept: FEED_EXCEPT },
+    channelPattern: feedPattern(String.raw`ACCN|ACC(?:\s*NETWORK)?|ACC\s*ESPN`), channelExcept: FEED_EXCEPT },
   { key: 'NFLN',    label: 'NFL Network',        kind: 'cable', aliases: ['NFL Network', 'NFL Net'],
     channelPattern: feedPattern(String.raw`NFL\s*NET(?:WORK)?`), channelExcept: FEED_EXCEPT },
 
