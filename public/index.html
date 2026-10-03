@@ -4800,17 +4800,19 @@
     // ---- Best tested ---------------------------------------------------
     //
     // Fills a network with the best channels that passed their test: up
-    // to five from each provider, dealt out one provider at a time. Each
-    // provider's best goes in slots 1, 2, 3 in the order the providers
-    // are listed, each one's second best in 4, 5, 6, and so on. So the
-    // first slots span every service - Dream, Strong and Trex for
-    // Flix-Streams - and a player working down the list has tried all of
-    // them before it comes back to any one.
+    // to five from each provider, dealt out a round at a time. Round one
+    // is each provider's best, sorted by quality among themselves, so
+    // slots 1, 2, 3 are the three best links there are and whichever
+    // provider holds the best one is first. Round two is each provider's
+    // second best, sorted the same way, in slots 4, 5, 6. So the first
+    // slots span every service - Dream, Strong and Trex for Flix-Streams -
+    // and a player has tried all of them before it comes back to any one.
     //
-    // This used to sort everything by quality alone, which could put
-    // Strong's five best ahead of Trex's first and leave a player with
-    // nothing else to try when Strong had a bad night. Within one
-    // provider the order is still quality; what is dealt is the turn.
+    // It was first dealt in the order the providers are listed, which put
+    // Trex first whatever it measured: a Strong link with the higher bpp
+    // sat behind it. This used to sort everything by quality alone before
+    // that, which could stack one provider's five best ahead of another's
+    // first. The round is what keeps the spread; quality orders inside it.
     //
     // A provider with fewer than five passes contributes what it has and
     // drops out of the later rounds; the others keep their turns. It is the
@@ -4849,8 +4851,7 @@
         byProvider.get(provider.id).rows.push(row);
       }
 
-      // Account order, which is the order the person put the providers in
-      // and so the order they want the slots to run.
+      // Account order, which only breaks a tie between equal readings.
       const order = (activeUser && activeUser.providers) || [];
       const turns = [...byProvider.values()]
         .sort((a, b) => order.indexOf(a.provider) - order.indexOf(b.provider))
@@ -4860,11 +4861,13 @@
           return { label: provider.label, best: rows.sort(compareQuality).slice(0, take) };
         });
 
+      // Each round is sorted on quality alone, so slots 1-3 run best to
+      // worst whichever provider each is on. The sort is stable, so two
+      // channels nothing tells apart keep the account's provider order.
       const picks = [];
       for (let round = 0; turns.some(t => round < t.best.length); round++) {
-        for (const { best } of turns) {
-          if (round < best.length) picks.push(best[round]);
-        }
+        picks.push(...turns.filter(t => round < t.best.length)
+          .map(t => t.best[round]).sort(compareQuality));
       }
       const counts = turns.map(({ label, best }) => `${best.length} ${label}`);
       return { picks: picks.slice(0, networkMaxLinks), counts };
