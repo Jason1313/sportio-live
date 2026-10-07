@@ -13,6 +13,14 @@ COPY package*.json ./
 
 RUN npm ci --omit=dev
 
+# npm ci installs exactly what the lockfile pins, so a rebuild never moved
+# a dependency and the instance sat on whatever was current the day the
+# lockfile was last written. update.sh rebuilds weekly, and this lets that
+# rebuild take the newest release each ^ range allows (express stays on 4,
+# axios on 1). The lockfile still decides the starting point; it just no
+# longer freezes the result.
+RUN npm update --omit=dev
+
 COPY . .
 
 EXPOSE 2323
