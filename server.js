@@ -697,6 +697,14 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
   });
 }
 
+// Express 4 never sees a rejection from an async handler, so one bad
+// request used to end the process (a missing sport segment did, twice in
+// a minute) and drop every viewer's stream with it. Log it and carry on;
+// the request in question just never gets an answer and times out.
+process.on('unhandledRejection', (err) => {
+  console.error('[Process] Unhandled rejection:', err && err.stack ? err.stack : err);
+});
+
 // Any accounts loaded with legacy plaintext Xtream credentials get
 // re-saved immediately, so encryption is applied automatically without
 // anyone needing to re-enter their credentials.
@@ -7875,6 +7883,7 @@ app.get('/user/:uuid/meta/sports/:id.json', async (req, res) => {
   }
 
   if (prefix === 'sb') {
+    if (!sport) return res.json({ meta: {} });
     const userTz = user.timeZone || 'America/New_York';
     const games = await fetchGamesForSport(sport.toUpperCase(), hostUrl, userTz);
     const game = games.find(g => g.id === idVal);
@@ -7924,6 +7933,11 @@ app.get('/user/:uuid/stream/sports/:id.json', async (req, res) => {
   // Upcoming Schedule card. Nothing to play, and answering here avoids an
   // ESPN lookup for an id that will never match.
   if (idVal === 'none') return res.json({ streams: [] });
+  // An id with no colons at all (a probe, a mangled client request) leaves
+  // sport undefined, and the toUpperCase below threw inside an async
+  // handler. Express 4 does not catch that, so it became an unhandled
+  // rejection and took the whole process down twice in a minute.
+  if (!sport) return res.json({ streams: [] });
 
   // net:{NETWORK} - the user asked for a network directly rather than for
   // a game. No ESPN lookup and no tier matching: just that network's own
